@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html data-bs-theme="light" lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no">
+    <title>Hidden Haven Threads — Reseller Manager</title>
+    <link rel="stylesheet" href="assets/bootstrap/css/bootstrap.min.css">
+    <link rel="manifest" href="manifest.json" crossorigin="use-credentials">
+    <link rel="stylesheet" href="assets/css/bss-overrides.css">
+</head>
+
+<body class="bg-vintage-base text-vintage-cream min-h-screen">
+    <nav class="top-0 px-6 py-4 border-b border-vintage-border bg-vintage-base/90 backdrop-blur-md sticky z-50">
+        <div class="mx-auto max-w-6xl flex items-center justify-between">
+            <div class="gap-4 flex items-center">
+                <div class="border w-10 h-10 rounded-full border-vintage-accent/40 bg-vintage-card flex items-center justify-center font-serif text-lg text-vintage-sand font-semibold"><span>H</span></div>
+                <div>
+                    <h1 class="font-serif text-lg tracking-wide text-vintage-cream font-medium">Hidden Haven Threads</h1>
+                </div>
+            </div>
+            <div class="gap-3 flex items-center"></div>
+        </div>
+    </nav>
+    <main class="pt-8 mx-auto px-6 max-w-6xl space-y-10">
+        <div class="gap-3 px-5 hidden fixed bottom-6 right-6 z-50 bg-vintage-sand text-vintage-base py-3.5 rounded-xl shadow-2xl flex items-center transition font-medium text-xs tracking-wide" id="toast"><i data-lucide="check" class="w-4 h-4"></i><span id="toast-text">Notification</span></div>
+        <section class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+            <div class="lg:col-span-5 space-y-4">
+                <div class="border p-6 bg-vintage-card border-vintage-border rounded-2xl shadow-xl">
+                    <h2 class="gap-2 mb-4 pb-2 font-serif text-sm text-vintage-sand flex items-center border-b border-vintage-border/50"><i data-lucide="camera" class="w-4 h-4 text-vintage-accent"></i>1. Capture or Select Item</h2>
+                    <div class="text-center border p-6 border-dashed border-vintage-accent/30 hover:border-vintage-sand rounded-xl cursor-pointer transition bg-vintage-base/50 min-h-[230px] flex flex-col items-center justify-center relative" id="drop-zone"><input type="file" accept="image/*" class="hidden" id="file-input" multiple="">
+                        <div id="upload-placeholder" class="space-y-3">
+                            <div class="border mx-auto w-12 h-12 rounded-full border-vintage-border bg-vintage-card flex items-center justify-center text-vintage-sand"><i data-lucide="images" class="w-5 h-5"></i></div>
+                            <p class="text-xs text-vintage-sand font-normal">Drop 5-10 photos (Front, Back, Tags)</p>
+                            <p class="text-[10px] text-vintage-accent uppercase tracking-widest">Bulk Upload Enabled</p>
+                        </div>
+                        <div id="preview-container" class="hidden w-full space-y-2">
+                            <div class="overflow-y-auto gap-2 p-1 grid grid-cols-4 max-h-48" id="image-grid"></div><button class="gap-1 mx-auto text-[10px] uppercase tracking-tighter text-vintage-accent hover:text-red-400 flex items-center justify-center" type="button"><i data-lucide="trash-2" class="w-3 h-3"></i> Clear All Photos </button>
+                        </div>
+                    </div><button class="disabled gap-2 mt-5 px-4 py-3 disabled w-full bg-vintage-sand hover:bg-vintage-cream text-vintage-base disabled:opacity-30 disabled:cursor-not-allowed font-medium rounded-xl transition text-xs tracking-wider uppercase flex items-center justify-center" id="generate-btn" type="button" disabled=""><i data-lucide="sparkles" class="w-4 h-4"></i><span>Auto-Extract Details with AI</span></button>
+                </div>
+            </div>
+            <div class="lg:col-span-7">
+                <div class="border p-6 bg-vintage-card border-vintage-border rounded-2xl shadow-xl space-y-5">
+                    <h2 class="gap-2 pb-2 font-serif text-sm text-vintage-sand flex items-center border-b border-vintage-border/50"><i data-lucide="edit-2" class="w-4 h-4 text-vintage-accent"></i>2. Verified Item Schema</h2>
+                    <form id="item-form" class="space-y-4">
+                        <div><label class="block text-[11px] font-medium uppercase tracking-widest text-vintage-accent mb-1.5">Optimized Title (eBay / Site)</label><input class="border px-4 w-full bg-vintage-base border-vintage-border rounded-xl py-2.5 text-xs text-vintage-cream focus:outline-none focus:border-vintage-sand placeholder:text-neutral-600" type="text" id="item-title" placeholder="e.g. Vintage 90s Carhartt Washed Duck Canvas Jacket Mens L" required=""></div>
+                        <div class="gap-4 grid grid-cols-3">
+                            <div><label class="block text-[11px] font-medium uppercase tracking-widest text-vintage-accent mb-1.5">Price ($ USD)</label><input class="border px-4 w-full bg-vintage-base border-vintage-border rounded-xl py-2.5 text-xs text-vintage-cream focus:outline-none focus:border-vintage-sand placeholder:text-neutral-600" type="number" id="item-price" placeholder="45.00" required="" step="0.01"></div>
+                            <div><label class="block text-[11px] font-medium uppercase tracking-widest text-vintage-accent mb-1.5">Quantity</label><input class="border px-4 w-full bg-vintage-base border-vintage-border rounded-xl py-2.5 text-xs text-vintage-cream focus:outline-none focus:border-vintage-sand" type="number" id="item-qty" value="1"></div>
+                            <div><label class="block text-[11px] font-medium uppercase tracking-widest text-vintage-accent mb-1.5">Condition ID</label><select class="border px-3 w-full bg-vintage-base border-vintage-border rounded-xl py-2.5 text-xs text-vintage-cream focus:outline-none focus:border-vintage-sand" id="item-condition">
+                                    <option value="3000">Used / Pre-owned</option>
+                                    <option value="1000">New with tags</option>
+                                    <option value="1500">New without tags</option>
+                                    <option value="7000">For parts / Repair</option>
+                                </select></div>
+                        </div>
+                        <div><label class="block text-[11px] font-medium uppercase tracking-widest text-vintage-accent mb-1.5">Automated Category Taxonomy</label><select class="border px-3 w-full bg-vintage-base border-vintage-border rounded-xl py-2.5 text-xs text-vintage-cream focus:outline-none focus:border-vintage-sand" id="item-category">
+                                <option value="Outerwear > Jackets &amp; Coats">Outerwear &gt; Jackets &amp; Coats</option>
+                                <option value="Tops > Vintage Graphic Tees">Tops &gt; Vintage Graphic Tees</option>
+                                <option value="Tops > Sweaters &amp; Hoodies">Tops &gt; Sweaters &amp; Hoodies</option>
+                                <option value="Bottoms > Washed Denim &amp; Pants">Bottoms &gt; Washed Denim &amp; Pants</option>
+                                <option value="Accessories > Vintage Hats &amp; Caps">Accessories &gt; Vintage Hats &amp; Caps</option>
+                                <option value="Sportswear > Archive &amp; Vintage">Sportswear &gt; Archive &amp; Vintage</option>
+                            </select></div>
+                        <div><label class="block text-[11px] font-medium uppercase tracking-widest text-vintage-accent mb-1.5">Description &amp; Measurements</label><textarea class="border px-4 w-full bg-vintage-base border-vintage-border rounded-xl py-2.5 text-xs text-vintage-cream focus:outline-none focus:border-vintage-sand placeholder:text-neutral-600" id="item-desc" placeholder="Measurements, fabric composition, care tag info..." rows="3"></textarea></div><button class="border gap-2 px-4 py-3 w-full bg-vintage-border hover:bg-vintage-accent/20 text-vintage-sand border-vintage-accent/30 font-medium rounded-xl transition text-xs tracking-wider uppercase flex items-center justify-center" type="submit"><i data-lucide="cloud-upload" class="w-4 h-4"></i>Save to Appwrite Cloud &amp; Local Cache</button>
+                    </form>
+                </div>
+            </div>
+        </section>
+        <section class="space-y-4">
+            <div class="flex-wrap gap-4 pb-4 flex items-center justify-between border-b border-vintage-border">
+                <div>
+                    <h2 class="gap-2 font-serif text-lg font-normal text-vintage-cream flex items-center"><i data-lucide="database" class="w-5 h-5 text-vintage-sand"></i>Inventory Catalog (<span id="count">0</span>)</h2>
+                    <p class="text-xs text-vintage-accent mt-0.5">Synced with Appwrite Cloud and ready for bulk export.</p>
+                </div>
+                <div class="gap-2 flex"><button class="gap-2 px-5 bg-vintage-sand hover:bg-vintage-cream text-vintage-base text-xs font-medium py-2.5 rounded-full transition flex items-center tracking-wide uppercase" type="button"><i data-lucide="download" class="w-4 h-4"></i>Export eBay CSV</button></div>
+            </div>
+            <div class="border overflow-hidden bg-vintage-card border-vintage-border rounded-2xl shadow-xl">
+                <div class="overflow-x-auto table-responsive">
+                    <table class="w-full text-left text-xs text-vintage-cream">
+                        <thead class="bg-vintage-base/80 text-vintage-accent uppercase tracking-widest font-medium border-b border-vintage-border text-[10px]">
+                            <tr>
+                                <th class="p-4">Image</th>
+                                <th class="p-4">Title</th>
+                                <th class="p-4">Category</th>
+                                <th class="p-4">Price</th>
+                                <th class="p-4">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="inventory-table-body" class="divide-y divide-vintage-border/60">
+                            <tr>
+                                <td class="text-center p-10 text-vintage-accent font-serif" colspan="5">No items added yet. Take or upload a photo above to begin.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+    </main>
+    <div class="p-4 hidden fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center" id="settings-modal">
+        <div class="border p-6 bg-vintage-card border-vintage-border rounded-2xl max-w-md w-full space-y-5 shadow-2xl">
+            <div class="pb-3 flex items-center justify-between border-b border-vintage-border/50">
+                <h3 class="gap-2 font-serif text-base font-normal text-vintage-cream flex items-center"><i data-lucide="key" class="w-4 h-4 text-vintage-sand"></i>API Credentials</h3><button type="button" class="text-vintage-accent hover:text-vintage-cream"><i data-lucide="x" class="w-5 h-5"></i></button>
+            </div>
+            <div class="space-y-4 text-xs">
+                <div><label class="block text-[11px] uppercase tracking-widest font-medium text-vintage-accent mb-1.5">Google Gemini API Key</label><input class="border px-4 w-full bg-vintage-base border-vintage-border rounded-xl py-2.5 text-vintage-cream font-mono focus:outline-none focus:border-vintage-sand" type="password" id="cfg-gemini" placeholder="AIzaSy..."></div>
+                <div><label class="block text-[11px] uppercase tracking-widest font-medium text-vintage-accent mb-1.5">Appwrite Project ID</label><input class="border px-4 w-full bg-vintage-base border-vintage-border rounded-xl py-2.5 text-vintage-cream font-mono focus:outline-none focus:border-vintage-sand" type="text" id="cfg-project" placeholder="6a7ce37..."></div>
+            </div>
+            <div class="pt-2"><button class="py-3 w-full bg-vintage-sand hover:bg-vintage-cream text-vintage-base font-medium rounded-xl transition text-xs tracking-wider uppercase" type="button">Save and Connect</button></div>
+            <div class="text-center text-[10px] text-vintage-accent" id="conn-status"></div>
+        </div>
+    </div>
+    <script src="assets/bootstrap/js/bootstrap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lucide@0.268.0/dist/lucide.min.js"></script>
+    <script src="assets/js/app.js"></script>
+    <script src="assets/js/config.js"></script>
+</body>
+
+</html>
