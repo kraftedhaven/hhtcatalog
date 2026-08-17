@@ -1,6 +1,6 @@
-flask==3.0.3
-flask-cors==4.0.1
-gunicorn==22.0.0
-google-generativeai==0.7.2
-boto3==1.34.140
-appwrite==5.0.0
+flask
+flask-cors
+google-generativeai
+appwrite
+boto3
+gunicorn
