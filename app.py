@@ -1,5 +1,5 @@
 import os
-import json
+import uuid
 import boto3
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -8,85 +8,99 @@ from appwrite.client import Client
 from appwrite.services.databases import Databases
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS so your Bootstrap UI can talk to this server
 
-# Configure AI
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")
+# --- 1. CONFIGURATION (From DigitalOcean Environment Variables) ---
+GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
+DO_SPACES_KEY = os.environ.get('DO_SPACES_KEY')
+DO_SPACES_SECRET = os.environ.get('DO_SPACES_SECRET')
+DO_SPACES_REGION = os.environ.get('DO_SPACES_REGION', 'nyc3')
+DO_SPACES_BUCKET = os.environ.get('DO_SPACES_BUCKET')
+# Example endpoint: https://nyc3.digitaloceanspaces.com
+DO_SPACES_ENDPOINT = f'https://{DO_SPACES_REGION}.digitaloceanspaces.com'
 
-# Configure DigitalOcean Spaces (S3)
-s3_client = boto3.client(
-    "s3",
-    region_name=os.environ.get("DO_SPACES_REGION", "nyc3"),
-    endpoint_url=f"https://{os.environ.get('DO_SPACES_REGION', 'nyc3')}.digitaloceanspaces.com",
-    aws_access_key_id=os.environ.get("DO_SPACES_KEY"),
-    aws_secret_access_key=os.environ.get("DO_SPACES_SECRET"),
+APPWRITE_ENDPOINT = os.environ.get('APPWRITE_ENDPOINT', 'https://cloud.appwrite.io/v1')
+APPWRITE_PROJECT = os.environ.get('APPWRITE_PROJECT_ID')
+APPWRITE_KEY = os.environ.get('APPWRITE_API_KEY')
+APPWRITE_DB = os.environ.get('APPWRITE_DATABASE_ID', 'default')
+APPWRITE_COLL = os.environ.get('APPWRITE_COLLECTION_ID', 'inventory')
+
+# Initialize Clients
+genai.configure(api_key=GEMINI_KEY)
+session = boto3.session.Session()
+s3_client = session.client('s3',
+    region_name=DO_SPACES_REGION,
+    endpoint_url=DO_SPACES_ENDPOINT,
+    aws_access_key_id=DO_SPACES_KEY,
+    aws_secret_access_key=DO_SPACES_SECRET
 )
 
-# Configure Appwrite
-client = Client()
-client.set_endpoint(os.environ.get("APPWRITE_ENDPOINT", "https://nyc.cloud.appwrite.io/v1"))
-client.set_project(os.environ.get("APPWRITE_PROJECT_ID", "6a7ce37f000ac07f7ca5"))
-client.set_key(os.environ.get("APPWRITE_API_KEY"))
-databases = Databases(client)
+appwrite_client = Client()
+appwrite_client.set_endpoint(APPWRITE_ENDPOINT).set_project(APPWRITE_PROJECT).set_key(APPWRITE_KEY)
+databases = Databases(appwrite_client)
 
-SYSTEM_PROMPT = """
-You are an expert vintage and streetwear reseller assistant for Hidden Haven Threads.
-Analyze the garment in the image and return ONLY a valid JSON object:
-{
-  "title": "Optimized eBay Title (Brand, Era, Item, Color, Size)",
-  "price": "Suggested resale price float (e.g. 38.00)",
-  "condition_id": "3000",
-  "category": "eBay Category String (e.g. Men's Vintage Clothing > Sweaters)",
-  "description": "Formatted item description with key details, style cues, and estimated sizing."
-}
-"""
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    if 'files' not in request.files:
+        return jsonify({"error": "No files uploaded"}), 400
 
-@app.route("/analyze", methods=["POST"])
-def analyze_item():
-    if "image" not in request.files:
-        return jsonify({"error": "No image provided"}), 400
-    
-    image_file = request.files["image"]
-    filename = image_file.filename
-    image_bytes = image_file.read()
+    files = request.files.getlist('files')
+    image_data_list = []
+    public_urls = []
 
-    # 1. Upload to DigitalOcean Space
-    bucket_name = os.environ.get("DO_SPACES_BUCKET")
-    s3_client.put_object(
-        Bucket=bucket_name,
-        Key=filename,
-        Body=image_bytes,
-        ACL="public-read",
-        ContentType=image_file.content_type
-    )
-    image_url = f"https://{bucket_name}.{os.environ.get('DO_SPACES_REGION')}.digitaloceanspaces.com/{filename}"
+    try:
+        # STEP 1: Upload to DigitalOcean Spaces
+        for file in files:
+            file_ext = os.path.splitext(file.filename)[1]
+            unique_name = f"uploads/{uuid.uuid4()}{file_ext}"
+            
+            s3_client.upload_fileobj(
+                file, 
+                DO_SPACES_BUCKET, 
+                unique_name,
+                ExtraArgs={'ACL': 'public-read', 'ContentType': file.content_type}
+            )
+            
+            url = f"https://{DO_SPACES_BUCKET}.{DO_SPACES_REGION}.digitaloceanspaces.com/{unique_name}"
+            public_urls.append(url)
+            
+            # Prepare image for Gemini (reset pointer first)
+            file.seek(0)
+            image_data_list.append({
+                "mime_type": file.content_type,
+                "data": file.read()
+            })
 
-    # 2. Run Vision AI Model
-    response = model.generate_content([
-        SYSTEM_PROMPT,
-        {"mime_type": image_file.content_type, "data": image_bytes}
-    ])
-    
-    clean_text = response.text.replace("```json", "").replace("```", "").strip()
-    parsed_data = json.loads(clean_text)
-    parsed_data["image_url"] = image_url
+        # STEP 2: Ask Gemini to Analyze
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = "Analyze these vintage garment photos. Return ONLY raw JSON with keys: title, price, condition_id, category, description."
+        
+        response = model.generate_content([prompt] + image_data_list)
+        # Basic cleanup of AI markdown response
+        clean_json = response.text.replace('```json', '').replace('```', '').strip()
+        analysis = jsonify().get_json() # placeholder
+        import json
+        analysis = json.loads(clean_json)
 
-    # 3. Save to Appwrite inventory table
-    doc = databases.create_document(
-        database_id="default",
-        collection_id="inventory",
-        document_id="unique()",
-        data={
-            "title": parsed_data.get("title", ""),
-            "price": str(parsed_data.get("price", "0.00")),
-            "condition_id": str(parsed_data.get("condition_id", "3000")),
-            "category": parsed_data.get("category", ""),
-            "description": parsed_data.get("description", "")
+        # STEP 3: Save to Appwrite
+        item_id = str(uuid.uuid4())[:8]
+        doc_data = {
+            "title": analysis.get('title'),
+            "price": float(analysis.get('price', 0)),
+            "category": analysis.get('category'),
+            "description": analysis.get('description'),
+            "image_urls": public_urls, # Storing array of DO Space links
+            "item_id": f"HHT-{item_id}"
         }
-    )
 
-    return jsonify({"success": True, "document": doc, "listing": parsed_data})
+        databases.create_document(APPWRITE_DB, APPWRITE_COLL, 'unique()', doc_data)
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+        # STEP 4: Return result to Bootstrap UI
+        return jsonify(analysis)
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
