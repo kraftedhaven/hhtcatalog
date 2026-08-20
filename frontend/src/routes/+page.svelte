@@ -29,6 +29,20 @@
             loading = false;
         }
     }
+
+    async function analyze() {
+        const file = document.getElementById("fileInput").files[0];
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const res = await fetch("http://104.248.120.81:8000/analyze", {
+            method: "POST",
+            body: formData,
+        });
+
+        const data = await res.json();
+        console.log(data);
+    }
 </script>
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
