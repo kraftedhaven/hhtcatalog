@@ -1,1 +1,2 @@
 {"ts":"2026-08-20T11:14:37.281Z","latency_ms":59,"http_status":500,"fallback_detected":false,"body_sample":"Internal Server Error","errors":[]}
+{"ts":"2026-08-20T12:12:18.465Z","latency_ms":45,"http_status":500,"fallback_detected":false,"body_sample":"Internal Server Error","errors":[]}

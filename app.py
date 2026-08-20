@@ -8,7 +8,9 @@ from appwrite.client import Client
 from appwrite.services.databases import Databases
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS so your Bootstrap UI can talk to this server
+CORS(app, resources={r"/*": {
+    "origins": os.environ.get("CORS_ORIGINS", "*")
+}})
 
 # --- 1. CONFIGURATION (From DigitalOcean Environment Variables) ---
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
@@ -41,10 +43,11 @@ databases = Databases(appwrite_client)
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    if 'files' not in request.files:
+    uploaded_files = request.files.getlist('file') or request.files.getlist('files')
+    if not uploaded_files:
         return jsonify({"error": "No files uploaded"}), 400
 
-    files = request.files.getlist('files')
+    files = uploaded_files
     image_data_list = []
     public_urls = []
 
@@ -104,7 +107,3 @@ def analyze():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-
-@app.post("/analyze")
-async def analyze(file: UploadFile):
-    ...
