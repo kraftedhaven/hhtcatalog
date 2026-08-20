@@ -1,15 +1,8 @@
-import adapter from '@sveltejs/adapter-auto';
 import preprocess from 'svelte-preprocess';
 
-/** @type {import('@sveltejs/kit').Config} */
+/** Minimal Svelte config for Vite (not SvelteKit) */
 const config = {
-    preprocess: preprocess(),
-    kit: {
-        adapter: adapter(),
-        vite: {
-            css: { postcss: './postcss.config.cjs' }
-        }
-    }
+    preprocess: preprocess({ postcss: true })
 };
 
 export default config;

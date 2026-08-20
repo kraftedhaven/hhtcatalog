@@ -1,7 +1,7 @@
-HHTCatalog Frontend (SvelteKit)
+HHTCatalog Frontend (Svelte + Vite)
 ===============================
 
-This frontend is a SvelteKit app that uploads an image to a backend `/analyze` endpoint and displays the pipeline results (vision, SKU, pricing, SEO).
+This frontend is a Svelte + Vite app that uploads an image to a backend `/analyze` endpoint and displays the pipeline results (vision, SKU, pricing, SEO).
 
 Quick start
 -----------
@@ -10,14 +10,14 @@ Quick start
 
 ```bash
 cp .env.example .env
-# set PUBLIC_API_URL in .env to your droplet API base (e.g. https://example.com)
+# set VITE_PUBLIC_API_URL in frontend/.env to your droplet API base (e.g. https://example.com)
 ```
 
 2. Install and run locally:
 
 ```bash
 cd frontend
-npm install
+npm install --legacy-peer-deps
 npm run dev
 ```
 
@@ -32,7 +32,7 @@ npm run preview
 Environment variables
 ---------------------
 
-- `PUBLIC_API_URL` — base URL for your backend (no trailing slash). The app POSTs to `${PUBLIC_API_URL}/analyze`.
+- `VITE_PUBLIC_API_URL` — base URL for your backend (no trailing slash). The app POSTs to `${VITE_PUBLIC_API_URL}/analyze`.
 
 DigitalOcean App Platform deployment
 -----------------------------------
@@ -51,7 +51,7 @@ npm ci && npm run build
 npm run preview
 ```
 
-5. Add the environment variable `PUBLIC_API_URL` in the App Platform settings.
+5. Add the environment variable `VITE_PUBLIC_API_URL` in the App Platform settings.
 
 Notes
 -----
