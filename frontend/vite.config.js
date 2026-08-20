@@ -1,8 +1,13 @@
 import { defineConfig } from 'vite';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
+import path from 'path';
 
 export default defineConfig({
-  server: {
-    host: '0.0.0.0',
-    port: 5173
-  }
+    plugins: [svelte()],
+    resolve: {
+        alias: {
+            $lib: path.resolve('./src/lib'),
+            $components: path.resolve('./src/lib/components')
+        }
+    }
 });
