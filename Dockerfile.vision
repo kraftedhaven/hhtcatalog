@@ -1,0 +1,18 @@
+FROM node:18-slim
+
+# Use a predictable working directory to simplify Windows volume mounts
+WORKDIR /workspaces/hhtcatalog
+
+# Create log and test folders so mounts have expected targets
+RUN mkdir -p /workspaces/hhtcatalog/logs /workspaces/hhtcatalog/tests/images /workspaces/hhtcatalog/scripts
+
+# Copy runner scripts (leave package management to the host if needed)
+COPY scripts/ /workspaces/hhtcatalog/scripts/
+COPY tests/ /workspaces/hhtcatalog/tests/
+COPY logs/ /workspaces/hhtcatalog/logs/
+
+RUN chmod +x /workspaces/hhtcatalog/scripts/*.sh || true
+
+ENV INTERVAL_SECONDS=900
+
+CMD ["/bin/bash", "-lc", "/workspaces/hhtcatalog/scripts/run-cron.sh"]
