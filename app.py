@@ -104,3 +104,17 @@ def analyze():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+async function analyze() {
+  const file = document.getElementById("fileInput").files[0];
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch("http://104.248.120.81:8000/analyze", {
+    method: "POST",
+    body: formData
+  });
+
+  const data = await res.json();
+  console.log(data);
+}
