@@ -1,109 +1,520 @@
+"""
+Hidden Haven Threads (HHT) — Vision + Listing Automation API
+============================================================
+Single-file Flask pipeline. Upload a garment photo to POST /analyze and get back a
+full listing package:
+
+    {
+      "demo": true/false,
+      "vision":  { "labels": [...], "colors": ["#hex", ...], "text": "..." },
+      "sku":     { "title", "category", "condition_id", "description", "code", "barcode" },
+      "pricing": { "list_price", "floor", "auction_start", "accept_offer", "decline_offer",
+                   "ebay", "depop", "poshmark", "etsy", "mercari" },
+      "seo":     { "title", "meta_description", "keywords": [...], "platform_routing": [...] }
+    }
+
+Runs with NO API keys (demo mode extracts real colors from the image and uses a
+curated vintage catalog). Add GEMINI_API_KEY for real per-image AI vision analysis.
+Add DO_SPACES_* / APPWRITE_* keys to persist uploads + inventory.
+"""
+
 import os
+import io
+import re
+import json
+import math
 import uuid
-import boto3
+import hashlib
+from collections import Counter
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import google.generativeai as genai
-from appwrite.client import Client
-from appwrite.services.databases import Databases
+
+# ---------- optional dependencies (graceful degradation) ----------
+try:
+    import google.generativeai as genai
+    HAS_GEMINI = True
+except Exception:
+    HAS_GEMINI = False
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except Exception:
+    HAS_PIL = False
+
+try:
+    import boto3
+    HAS_BOTO3 = True
+except Exception:
+    HAS_BOTO3 = False
+
+try:
+    from appwrite.client import Client
+    from appwrite.services.databases import Databases
+    HAS_APPWRITE = True
+except Exception:
+    HAS_APPWRITE = False
+
+
+# ---------- configuration ----------
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+
+DO_SPACES_KEY = os.environ.get("DO_SPACES_KEY")
+DO_SPACES_SECRET = os.environ.get("DO_SPACES_SECRET")
+DO_SPACES_REGION = os.environ.get("DO_SPACES_REGION", "nyc3")
+DO_SPACES_BUCKET = os.environ.get("DO_SPACES_BUCKET")
+DO_SPACES_ENDPOINT = f"https://{DO_SPACES_REGION}.digitaloceanspaces.com"
+
+APPWRITE_ENDPOINT = os.environ.get("APPWRITE_ENDPOINT", "https://cloud.appwrite.io/v1")
+APPWRITE_PROJECT = os.environ.get("APPWRITE_PROJECT_ID")
+APPWRITE_KEY = os.environ.get("APPWRITE_API_KEY")
+APPWRITE_DB = os.environ.get("APPWRITE_DATABASE_ID", "default")
+APPWRITE_COLL = os.environ.get("APPWRITE_COLLECTION_ID", "inventory")
+
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*")
+PORT = int(os.environ.get("PORT", 8080))
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {
-    "origins": os.environ.get("CORS_ORIGINS", "*")
-}})
+CORS(app, resources={r"/*": {"origins": CORS_ORIGINS}})
 
-# --- 1. CONFIGURATION (From DigitalOcean Environment Variables) ---
-GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
-DO_SPACES_KEY = os.environ.get('DO_SPACES_KEY')
-DO_SPACES_SECRET = os.environ.get('DO_SPACES_SECRET')
-DO_SPACES_REGION = os.environ.get('DO_SPACES_REGION', 'nyc3')
-DO_SPACES_BUCKET = os.environ.get('DO_SPACES_BUCKET')
-# Example endpoint: https://nyc3.digitaloceanspaces.com
-DO_SPACES_ENDPOINT = f'https://{DO_SPACES_REGION}.digitaloceanspaces.com'
 
-APPWRITE_ENDPOINT = os.environ.get('APPWRITE_ENDPOINT', 'https://cloud.appwrite.io/v1')
-APPWRITE_PROJECT = os.environ.get('APPWRITE_PROJECT_ID')
-APPWRITE_KEY = os.environ.get('APPWRITE_API_KEY')
-APPWRITE_DB = os.environ.get('APPWRITE_DATABASE_ID', 'default')
-APPWRITE_COLL = os.environ.get('APPWRITE_COLLECTION_ID', 'inventory')
+# =====================================================================
+# CATALOG — vintage apparel pricing & taxonomy reference data
+# =====================================================================
+BASE_PRICE = {
+    "jacket": 45, "jeans": 30, "dress": 35, "shirt": 20, "tee": 15,
+    "sweater": 30, "skirt": 25, "boots": 40, "sneakers": 35, "bag": 30,
+    "hat": 12, "accessory": 10, "vest": 22, "coat": 50, "shorts": 18,
+}
 
-# Initialize Clients
-genai.configure(api_key=GEMINI_KEY)
-session = boto3.session.Session()
-s3_client = session.client('s3',
-    region_name=DO_SPACES_REGION,
-    endpoint_url=DO_SPACES_ENDPOINT,
-    aws_access_key_id=DO_SPACES_KEY,
-    aws_secret_access_key=DO_SPACES_SECRET
-)
+BRAND_MULTIPLIER = {
+    "levi's": 1.8, "levis": 1.8, "carhartt": 2.2, "nike": 1.6, "adidas": 1.5,
+    "ralph lauren": 2.4, "tommy hilfiger": 1.7, "calvin klein": 1.6,
+    "burberry": 3.5, "gucci": 5.0, "prada": 4.5, "vintage": 1.0, "unbranded": 1.0,
+    "the north face": 2.0, "patagonia": 1.9, "champion": 1.4, "wrangler": 1.3,
+    "lee": 1.3, "dickies": 1.5, "stussy": 2.0, "supreme": 3.0,
+    "harley davidson": 1.8, "pendleton": 2.2, "lacoste": 1.8, "fila": 1.3,
+    "umbro": 1.3, "kappa": 1.3, "oakley": 1.6, "fila": 1.3, "guess": 1.5,
+    "armani": 3.0, "versace": 4.0, "diesel": 1.8, "true religion": 2.0,
+    "new balance": 1.5, "asics": 1.5, "salomon": 1.7, "doc martens": 1.8,
+    "dr. martens": 1.8,
+}
 
-appwrite_client = Client()
-appwrite_client.set_endpoint(APPWRITE_ENDPOINT).set_project(APPWRITE_PROJECT).set_key(APPWRITE_KEY)
-databases = Databases(appwrite_client)
+ERA_PREMIUM = {
+    "50s": 1.8, "60s": 1.7, "70s": 1.6, "80s": 1.3, "90s": 1.5,
+    "y2k": 1.4, "00s": 1.4, "2000s": 1.4, "modern": 1.0, "vintage": 1.3,
+}
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    uploaded_files = request.files.getlist('file') or request.files.getlist('files')
-    if not uploaded_files:
-        return jsonify({"error": "No files uploaded"}), 400
+CONDITION_FACTOR = {
+    "new": 1.0, "new with tags": 1.0, "nwt": 1.0,
+    "like new": 0.9, "excellent": 0.9, "like-new": 0.9,
+    "very good": 0.8, "very-good": 0.8, "good": 0.65, "fair": 0.45,
+}
 
-    files = uploaded_files
-    image_data_list = []
-    public_urls = []
+# Nearest-name color lookup for SKU color code + label
+COLOR_MAP = [
+    ("indigo", "IND", "indigo"), ("denim", "IND", "indigo"), ("navy", "NVY", "navy"),
+    ("blue", "BLU", "blue"), ("black", "BLK", "black"), ("white", "WHT", "white"),
+    ("red", "RED", "red"), ("maroon", "MRN", "maroon"), ("burgundy", "BRG", "burgundy"),
+    ("green", "GRN", "green"), ("olive", "OLV", "olive"), ("brown", "BRN", "brown"),
+    ("tan", "TAN", "tan"), ("beige", "BGE", "beige"), ("cream", "CRM", "cream"),
+    ("grey", "GRY", "grey"), ("gray", "GRY", "grey"), ("pink", "PNK", "pink"),
+    ("yellow", "YLW", "yellow"), ("gold", "GLD", "gold"), ("orange", "ORG", "orange"),
+    ("purple", "PRP", "purple"), ("teal", "TEL", "teal"), ("rust", "RST", "rust"),
+    ("khaki", "KHK", "khaki"), ("charcoal", "CHR", "charcoal"),
+]
 
+PLATFORM_TAKE = {  # platform fee fraction
+    "ebay": 0.13, "depop": 0.066, "poshmark": 0.20, "etsy": 0.065, "mercari": 0.10,
+}
+
+PLATFORM_ROUTING = {
+    "90s": ["depop", "ebay", "mercari"], "y2k": ["depop", "mercari", "ebay"],
+    "80s": ["etsy", "ebay", "depop"], "70s": ["etsy", "ebay"], "60s": ["etsy", "ebay"],
+    "vintage": ["etsy", "ebay", "poshmark"], "modern": ["ebay", "poshmark", "mercari"],
+}
+
+
+# =====================================================================
+# VISION — provider-agnostic (Gemini primary, demo fallback)
+# =====================================================================
+def _extract_colors(image_bytes, n=5):
+    """Pull dominant colors out of an image with PIL (no AI key needed)."""
+    if not HAS_PIL:
+        return []
     try:
-        # STEP 1: Upload to DigitalOcean Spaces
-        for file in files:
-            file_ext = os.path.splitext(file.filename)[1]
-            unique_name = f"uploads/{uuid.uuid4()}{file_ext}"
-            
-            s3_client.upload_fileobj(
-                file, 
-                DO_SPACES_BUCKET, 
-                unique_name,
-                ExtraArgs={'ACL': 'public-read', 'ContentType': file.content_type}
-            )
-            
-            url = f"https://{DO_SPACES_BUCKET}.{DO_SPACES_REGION}.digitaloceanspaces.com/{unique_name}"
-            public_urls.append(url)
-            
-            # Prepare image for Gemini (reset pointer first)
-            file.seek(0)
-            image_data_list.append({
-                "mime_type": file.content_type,
-                "data": file.read()
-            })
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img.thumbnail((120, 120))
+        q = img.quantize(colors=n, method=Image.MEDIANCUT).convert("RGB")
+        pixels = list(q.getdata())
+        counts = Counter(pixels)
+        out = []
+        for rgb, _ in counts.most_common(n):
+            out.append("#%02x%02x%02x" % rgb)
+        return out
+    except Exception:
+        return []
 
-        # STEP 2: Ask Gemini to Analyze
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = "Analyze these vintage garment photos. Return ONLY raw JSON with keys: title, price, condition_id, category, description."
-        
-        response = model.generate_content([prompt] + image_data_list)
-        # Basic cleanup of AI markdown response
-        clean_json = response.text.replace('```json', '').replace('```', '').strip()
-        analysis = jsonify().get_json() # placeholder
-        import json
-        analysis = json.loads(clean_json)
 
-        # STEP 3: Save to Appwrite
-        item_id = str(uuid.uuid4())[:8]
-        doc_data = {
-            "title": analysis.get('title'),
-            "price": float(analysis.get('price', 0)),
-            "category": analysis.get('category'),
-            "description": analysis.get('description'),
-            "image_urls": public_urls, # Storing array of DO Space links
-            "item_id": f"HHT-{item_id}"
-        }
+def _nearest_color(hex_color):
+    r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
+    best, best_d = None, 1e9
+    for name, code, label in COLOR_MAP:
+        # reference rgb for each named color
+        ref = _NAMED_RGB.get(name, (128, 128, 128))
+        d = (r - ref[0]) ** 2 + (g - ref[1]) ** 2 + (b - ref[2]) ** 2
+        if d < best_d:
+            best, best_d = (name, code, label), d
+    return best
 
-        databases.create_document(APPWRITE_DB, APPWRITE_COLL, 'unique()', doc_data)
 
-        # STEP 4: Return result to Bootstrap UI
-        return jsonify(analysis)
+# rough reference RGBs for color matching
+_NAMED_RGB = {
+    "indigo": (75, 0, 130), "denim": (45, 84, 130), "navy": (0, 0, 128),
+    "blue": (0, 0, 255), "black": (0, 0, 0), "white": (255, 255, 255),
+    "red": (220, 20, 20), "maroon": (128, 0, 0), "burgundy": (128, 0, 32),
+    "green": (0, 128, 0), "olive": (128, 128, 0), "brown": (139, 69, 19),
+    "tan": (210, 180, 140), "beige": (245, 245, 220), "cream": (255, 248, 220),
+    "grey": (128, 128, 128), "pink": (255, 192, 203), "yellow": (255, 255, 0),
+    "gold": (255, 215, 0), "orange": (255, 165, 0), "purple": (128, 0, 128),
+    "teal": (0, 128, 128), "rust": (183, 65, 14), "khaki": (195, 176, 145),
+    "charcoal": (54, 69, 79),
+}
 
+# Filename hints for demo-mode garment guessing
+_FILENAME_HINTS = [
+    ("jacket", "jacket"), ("denim", "jacket"), ("jean", "jeans"), ("pants", "jeans"),
+    ("dress", "dress"), ("shirt", "shirt"), ("tee", "tee"), ("tshirt", "tee"),
+    ("t-shirt", "tee"), ("sweater", "sweater"), ("knit", "sweater"), ("skirt", "skirt"),
+    ("boot", "boots"), ("sneaker", "sneakers"), ("shoe", "sneakers"), ("bag", "bag"),
+    ("purse", "bag"), ("hat", "hat"), ("cap", "hat"), ("vest", "vest"), ("coat", "coat"),
+    ("short", "shorts"),
+]
+
+DEMO_SAMPLE = {
+    "brand": "Levi's", "garment_type": "jacket", "era": "90s", "color": "indigo",
+    "size": "L", "condition": "very good", "designer_tier": "mid",
+    "title": "Levi's Vintage 90s Denim Trucker Jacket",
+    "description": "Classic Levi's Type III denim trucker jacket, 90s production. "
+                   "Indigo wash with natural fade, brass buttons, two chest pockets, "
+                   "cotton denim. Excellent vintage condition with light wear.",
+    "labels": ["denim jacket", "trucker", "vintage", "90s", "cotton", "brass buttons"],
+    "text": "LEVI'S  Made in USA  Size L",
+}
+
+
+def _guess_type_from_filename(name):
+    n = name.lower()
+    for keyword, gtype in _FILENAME_HINTS:
+        if keyword in n:
+            return gtype
+    return None
+
+
+def analyze_with_gemini(image_bytes, mime_type):
+    """Real AI vision analysis via Gemini. Returns dict or None on failure."""
+    if not (HAS_GEMINI and GEMINI_KEY):
+        return None
+    try:
+        genai.configure(api_key=GEMINI_KEY)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        prompt = (
+            "You are a vintage apparel expert. Analyze this garment photo and return "
+            "ONLY raw JSON (no markdown) with keys: brand, garment_type, era, color, "
+            "size, condition, designer_tier (low|mid|high), title, description, "
+            "labels (array of short tags), text (any visible text/logos). "
+            "Use era codes like 90s, 80s, y2k, 70s, 60s, vintage, modern."
+        )
+        resp = model.generate_content(
+            [{"mime_type": mime_type or "image/jpeg", "data": image_bytes}, prompt]
+        )
+        text = (resp.text or "").replace("```json", "").replace("```", "").strip()
+        # grab first {...} block
+        m = re.search(r"\{.*\}", text, re.S)
+        if m:
+            text = m.group(0)
+        return json.loads(text)
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"[vision] gemini failed: {e}")
+        return None
+
+
+def run_vision(image_bytes, mime_type, filename):
+    """Provider-agnostic vision router. Gemini primary, demo fallback."""
+    ai = analyze_with_gemini(image_bytes, mime_type)
+    colors = _extract_colors(image_bytes)
+    if ai:
+        primary = "gemini"
+        data = ai
+    else:
+        primary = "demo"
+        data = dict(DEMO_SAMPLE)
+        gtype = _guess_type_from_filename(filename or "")
+        if gtype:
+            data["garment_type"] = gtype
+            data["title"] = f"Vintage {gtype.capitalize()}"
+            data["category"] = gtype
+    # attach real extracted colors + nearest color code
+    nearest = _nearest_color(colors[0]) if colors else ("indigo", "IND", "indigo")
+    data["color_code"] = nearest[1]
+    data["color_label"] = nearest[2]
+    data["vision_colors"] = colors
+    data["provider"] = primary
+    data["fallback_triggered"] = primary == "demo"
+    return data
+
+
+# =====================================================================
+# SKU GENERATOR  —  HHT-TYPE3-ERA2-COLOR3-SIZE3-SEQ4
+# =====================================================================
+TYPE_CODE = {
+    "jacket": "JKT", "jeans": "JNS", "dress": "DRS", "shirt": "SHT", "tee": "TEE",
+    "sweater": "SWT", "skirt": "SKR", "boots": "BTS", "sneakers": "SNK", "bag": "BAG",
+    "hat": "HAT", "accessory": "ACC", "vest": "VST", "coat": "COT", "shorts": "SHT",
+}
+
+SIZE_CODE = {
+    "xs": "XSM", "s": "SML", "m": "MED", "l": "LRG", "xl": "XLG", "xxl": "XXL",
+    "one size": "OSZ", "os": "OSZ", "2xl": "XXL", "3xl": "3XL",
+}
+
+
+def _seq_from_hash(*parts):
+    h = hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()
+    return h[:4].upper()
+
+
+def generate_sku(data):
+    gtype = (data.get("garment_type") or "accessory").lower()
+    type_code = TYPE_CODE.get(gtype, "ACC")
+    era = (data.get("era") or "vintage").lower()
+    era_code = era[:2] if era[:2] in ERA_PREMIUM else "VT"
+    color_code = data.get("color_code", "GEN")
+    size = (data.get("size") or "OS").lower()
+    size_code = SIZE_CODE.get(size, size[:3].upper() or "OSZ")
+    seq = _seq_from_hash(type_code, era_code, color_code, size_code, data.get("title", ""))
+    code = f"HHT-{type_code}-{era_code}-{color_code}-{size_code}-{seq}"
+    # EAN-13 compatible 12-digit numeric (from hex)
+    barcode = str(int(hashlib.md5(code.encode()).hexdigest()[:10], 16))[:12].zfill(12)
+    return {
+        "title": data.get("title", "Vintage garment"),
+        "category": gtype,
+        "condition_id": _condition_id(data.get("condition", "good")),
+        "description": data.get("description", ""),
+        "code": code,
+        "barcode": barcode,
+    }
+
+
+def _condition_id(condition):
+    c = (condition or "good").lower()
+    return {
+        "new": "new", "nwt": "new", "like new": "likenew", "excellent": "excellent",
+        "very good": "verygood", "good": "good", "fair": "fair",
+    }.get(c, "good")
+
+
+# =====================================================================
+# PRICING ENGINE — 8-factor scoring model
+# =====================================================================
+def compute_pricing(data):
+    gtype = (data.get("garment_type") or "accessory").lower()
+    base = BASE_PRICE.get(gtype, 15)
+
+    brand = (data.get("brand") or "unbranded").lower()
+    brand_mult = BRAND_MULTIPLIER.get(brand, 1.0)
+
+    era = (data.get("era") or "vintage").lower()
+    era_premium = ERA_PREMIUM.get(era, 1.3)
+
+    condition = (data.get("condition") or "good").lower()
+    cond_factor = CONDITION_FACTOR.get(condition, 0.65)
+
+    tier = (data.get("designer_tier") or "low").lower()
+    tier_add = {"high": 75, "mid": 15, "low": 0}.get(tier, 0)
+
+    trend = 1.0  # static trend baseline; hook for future trend API
+    special = 0  # hook for special features (rare prints, collabs)
+
+    raw = base * brand_mult * era_premium * cond_factor * trend + tier_add + special
+    if raw >= 10:
+        list_price = round(math.floor(raw) - 0.01, 2)  # .99 retail ending
+    else:
+        list_price = round(raw, 2)
+
+    floor = round(list_price * 0.55, 2)
+    auction_start = round(list_price * 0.70, 2)
+    accept_offer = round(list_price * 0.85, 2)
+    decline_offer = round(list_price * 0.95, 2)
+
+    platforms = {}
+    for plat, fee in PLATFORM_TAKE.items():
+        platforms[plat] = round(list_price / (1 - fee), 2)
+
+    return {
+        "list_price": list_price,
+        "floor": floor,
+        "auction_start": auction_start,
+        "accept_offer": accept_offer,
+        "decline_offer": decline_offer,
+        "ebay": platforms["ebay"],
+        "depop": platforms["depop"],
+        "poshmark": platforms["poshmark"],
+        "etsy": platforms["etsy"],
+        "mercari": platforms["mercari"],
+    }
+
+
+# =====================================================================
+# SEO LISTING GENERATOR
+# =====================================================================
+AESTHETIC_TAGS = {
+    "90s": ["y2k", "90sfashion", "vintage", "streetwear", "retro", "denim", "grunge"],
+    "y2k": ["y2k", "y2kfashion", "2000s", "lowrise", "bling", "retro", "vintage"],
+    "80s": ["80s", "vintage", "retro", "preppy", "bold", "neon", "streetwear"],
+    "70s": ["70s", "vintage", "boho", "retro", "cottagecore", "flared", "groovy"],
+    "vintage": ["vintage", "retro", "thrifted", "sustainable", "vintagestyle", "classic"],
+    "modern": ["streetwear", "minimal", "contemporary", "fashion", "trendy"],
+}
+
+
+def build_seo(data):
+    title = (data.get("title") or "Vintage garment").strip()
+    if len(title) > 80:
+        title = title[:77].rstrip() + "..."
+    era = (data.get("era") or "vintage").lower()
+    brand = data.get("brand") or "Vintage"
+    color = data.get("color_label") or "vintage"
+    gtype = data.get("garment_type") or "garment"
+    condition = data.get("condition") or "good"
+
+    meta = (
+        f"{brand} {era} {color} {gtype} in {condition} condition. "
+        f"Authentic vintage, ready to ship from Hidden Haven Threads."
+    )[:155]
+
+    keywords = []
+    keywords.append(brand.lower())
+    keywords.append(f"{era} {gtype}")
+    keywords.append(f"{color} {gtype}")
+    keywords.append(f"{era} {color}")
+    keywords.append("vintage clothing")
+    keywords.append("hidden haven threads")
+    keywords += AESTHETIC_TAGS.get(era, AESTHETIC_TAGS["vintage"])
+    # dedupe preserving order
+    seen = set()
+    keywords = [k for k in keywords if not (k in seen or seen.add(k))][:15]
+
+    routing = PLATFORM_ROUTING.get(era, PLATFORM_ROUTING["vintage"])
+
+    return {
+        "title": title,
+        "meta_description": meta,
+        "keywords": keywords,
+        "platform_routing": routing,
+    }
+
+
+# =====================================================================
+# STORAGE (optional) — DigitalOcean Spaces + Appwrite
+# =====================================================================
+def upload_to_spaces(file_bytes, content_type, ext):
+    if not (HAS_BOTO3 and DO_SPACES_KEY and DO_SPACES_SECRET and DO_SPACES_BUCKET):
+        return None
+    try:
+        session = boto3.session.Session()
+        s3 = session.client(
+            "s3", region_name=DO_SPACES_REGION, endpoint_url=DO_SPACES_ENDPOINT,
+            aws_access_key_id=DO_SPACES_KEY, aws_secret_access_key=DO_SPACES_SECRET,
+        )
+        key = f"uploads/{uuid.uuid4()}{ext}"
+        s3.put_object(
+            Bucket=DO_SPACES_BUCKET, Key=key, Body=file_bytes,
+            ContentType=content_type or "image/jpeg", ACL="public-read",
+        )
+        return f"https://{DO_SPACES_BUCKET}.{DO_SPACES_REGION}.digitaloceanspaces.com/{key}"
+    except Exception as e:
+        print(f"[storage] spaces upload failed: {e}")
+        return None
+
+
+def save_to_appwrite(doc):
+    if not (HAS_APPWRITE and APPWRITE_PROJECT and APPWRITE_KEY):
+        return None
+    try:
+        client = Client().set_endpoint(APPWRITE_ENDPOINT).set_project(APPWRITE_PROJECT).set_key(APPWRITE_KEY)
+        db = Databases(client)
+        doc_id = str(uuid.uuid4())[:8]
+        db.create_document(APPWRITE_DB, APPWRITE_COLL, doc_id, doc)
+        return doc_id
+    except Exception as e:
+        print(f"[storage] appwrite save failed: {e}")
+        return None
+
+
+# =====================================================================
+# PIPELINE + ROUTES
+# =====================================================================
+def run_pipeline(image_bytes, mime_type, filename):
+    vision_data = run_vision(image_bytes, mime_type, filename)
+    sku = generate_sku(vision_data)
+    pricing = compute_pricing(vision_data)
+    seo = build_seo(vision_data)
+
+    public_url = upload_to_spaces(image_bytes, mime_type, os.path.splitext(filename)[1])
+    if public_url:
+        sku["image_url"] = public_url
+        doc = {
+            "item_id": sku["code"], "title": sku["title"], "category": sku["category"],
+            "condition": sku["condition_id"], "description": sku["description"],
+            "price": pricing["list_price"], "image_urls": [public_url],
+        }
+        save_to_appwrite(doc)
+
+    return {
+        "demo": vision_data.get("provider") == "demo",
+        "provider": vision_data.get("provider"),
+        "fallback_triggered": vision_data.get("fallback_triggered", False),
+        "vision": {
+            "labels": vision_data.get("labels", []),
+            "colors": vision_data.get("vision_colors", []),
+            "text": vision_data.get("text", ""),
+        },
+        "sku": sku,
+        "pricing": pricing,
+        "seo": seo,
+    }
+
+
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    f = request.files.get("file") or request.files.get("files")
+    if not f:
+        return jsonify({"error": "No files uploaded"}), 400
+    image_bytes = f.read()
+    if not image_bytes:
+        return jsonify({"error": "Empty file"}), 400
+    try:
+        result = run_pipeline(image_bytes, f.content_type, f.filename)
+        return jsonify(result)
+    except Exception as e:
+        print(f"[analyze] error: {e}")
         return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "gemini": bool(HAS_GEMINI and GEMINI_KEY),
+        "spaces": bool(HAS_BOTO3 and DO_SPACES_KEY and DO_SPACES_BUCKET),
+        "appwrite": bool(HAS_APPWRITE and APPWRITE_PROJECT),
+        "pil": HAS_PIL,
+    })
+
+
+if __name__ == "__main__":
+    print(f"HHT Vision API starting on :{PORT}  (gemini={'on' if (HAS_GEMINI and GEMINI_KEY) else 'demo'})")
+    app.run(host="0.0.0.0", port=PORT)
