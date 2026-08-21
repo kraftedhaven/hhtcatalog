@@ -1,0 +1,30 @@
+name: Groq Models
+version: 0.0.1
+schema: v1
+envFile: ".env"
+
+models:
+  - name: llava-next-34b
+    provider: groq
+    model: llava-next-34b
+    roles:
+      - chat
+      - edit
+    apiKey: ${{ env.GROQ_API_KEY }}
+
+  - name: mixtral-8x7b
+    provider: groq
+    model: mixtral-8x7b
+    roles:
+      - chat
+      - edit
+      - autocomplete
+    apiKey: ${{ env.GROQ_API_KEY }}
+
+  - name: gemma-7b-it
+    provider: groq
+    model: gemma-7b-it
+    roles:
+      - chat
+      - edit
+    apiKey: ${{ env.GROQ_API_KEY }}
