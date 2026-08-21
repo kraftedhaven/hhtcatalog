@@ -564,6 +564,62 @@ def analyze():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/bulk-analyze", methods=["POST"])
+def bulk_analyze():
+    """Process many garment photos at once. Returns one listing per image.
+    Form field: 'files' (repeatable) or 'file'."""
+    files = request.files.getlist("files") or request.files.getlist("file")
+    if not files:
+        return jsonify({"error": "No files uploaded"}), 400
+    results = []
+    for f in files:
+        entry = {"filename": f.filename, "status": "error", "error": None}
+        try:
+            data = f.read()
+            if not data:
+                raise ValueError("Empty file")
+            entry.update(run_pipeline(data, f.content_type, f.filename))
+            entry["status"] = "ok"
+            entry.pop("error", None)
+        except Exception as e:
+            entry["error"] = str(e)
+        results.append(entry)
+    demo = results[0].get("demo", True) if results else True
+    return jsonify({"count": len(results), "demo": demo, "results": results})
+
+
+@app.route("/export/csv", methods=["POST"])
+def export_csv():
+    """Convert a batch of pipeline results into a cross-listing CSV.
+    Body: {results: [...]} (the /bulk-analyze output)."""
+    import csv as _csv
+    body = request.get_json(silent=True) or {}
+    rows = body.get("results", [])
+    cols = ["filename", "title", "sku_code", "barcode", "category", "condition_id",
+            "list_price", "floor", "auction_start", "accept_offer", "decline_offer",
+            "ebay", "depop", "poshmark", "etsy", "mercari", "platform_routing",
+            "seo_title", "meta_description", "description", "demo"]
+    out = io.StringIO()
+    w = _csv.writer(out)
+    w.writerow(cols)
+    for r in rows:
+        sku = r.get("sku", {}) or {}
+        pr = r.get("pricing", {}) or {}
+        seo = r.get("seo", {}) or {}
+        w.writerow([
+            r.get("filename"), sku.get("title"), sku.get("code"), sku.get("barcode"),
+            sku.get("category"), sku.get("condition_id"), pr.get("list_price"),
+            pr.get("floor"), pr.get("auction_start"), pr.get("accept_offer"),
+            pr.get("decline_offer"), pr.get("ebay"), pr.get("depop"),
+            pr.get("poshmark"), pr.get("etsy"), pr.get("mercari"),
+            "/".join(seo.get("platform_routing", [])), seo.get("title"),
+            seo.get("meta_description"), sku.get("description"), r.get("demo"),
+        ])
+    from flask import Response
+    return Response(out.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=hht_listings.csv"})
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
