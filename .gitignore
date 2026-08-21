@@ -5,3 +5,5 @@
 
 # Local editor/project state
 .vscode/
+__pycache__/
+*.pyc
