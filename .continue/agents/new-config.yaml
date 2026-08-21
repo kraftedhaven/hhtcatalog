@@ -1,30 +1,37 @@
-name: Groq Models
-version: 0.0.1
+name: Groq + Local Models (free, open source)
+version: 0.0.2
 schema: v1
 envFile: ".env"
 
 models:
-  - name: llava-next-34b
+  - name: llama-3.3-70b (Groq)
     provider: groq
-    model: llava-next-34b
+    model: llama-3.3-70b-versatile
     roles:
       - chat
       - edit
     apiKey: ${{ env.GROQ_API_KEY }}
 
-  - name: mixtral-8x7b
+  - name: qwen-qwq-32b (Groq, coding/reasoning)
     provider: groq
-    model: mixtral-8x7b
+    model: qwen-qwq-32b
     roles:
       - chat
       - edit
+    apiKey: ${{ env.GROQ_API_KEY }}
+
+  - name: llama-3.1-8b-instant (Groq, fast)
+    provider: groq
+    model: llama-3.1-8b-instant
+    roles:
       - autocomplete
+      - chat
     apiKey: ${{ env.GROQ_API_KEY }}
 
-  - name: gemma-7b-it
-    provider: groq
-    model: gemma-7b-it
+  - name: qwen2.5-coder-1.5b (local, private)
+    provider: ollama
+    model: qwen2.5-coder:1.5b
     roles:
+      - autocomplete
       - chat
       - edit
-    apiKey: ${{ env.GROQ_API_KEY }}

@@ -61,6 +61,12 @@ except Exception:
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 
+# Azure AI Foundry / Azure OpenAI vision fallback (optional)
+AZURE_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")  # e.g. https://hht.openai.azure.com
+AZURE_KEY = os.environ.get("AZURE_OPENAI_KEY")
+AZURE_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+AZURE_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+
 DO_SPACES_KEY = os.environ.get("DO_SPACES_KEY")
 DO_SPACES_SECRET = os.environ.get("DO_SPACES_SECRET")
 DO_SPACES_REGION = os.environ.get("DO_SPACES_REGION", "nyc3")
@@ -105,6 +111,12 @@ BRAND_MULTIPLIER = {
 ERA_PREMIUM = {
     "50s": 1.8, "60s": 1.7, "70s": 1.6, "80s": 1.3, "90s": 1.5,
     "y2k": 1.4, "00s": 1.4, "2000s": 1.4, "modern": 1.0, "vintage": 1.3,
+}
+
+# 2-char SKU era codes (explicit map — NOT era[:2], which breaks for "90s" etc.)
+ERA_CODE = {
+    "50s": "50", "60s": "60", "70s": "70", "80s": "80", "90s": "90",
+    "y2k": "Y2", "00s": "00", "2000s": "00", "modern": "MD", "vintage": "VT",
 }
 
 CONDITION_FACTOR = {
@@ -241,12 +253,60 @@ def analyze_with_gemini(image_bytes, mime_type):
         return None
 
 
+def analyze_with_azure(image_bytes, mime_type):
+    """Azure AI Foundry (Azure OpenAI GPT-4o vision) fallback. Returns dict or None."""
+    if not (AZURE_ENDPOINT and AZURE_KEY and AZURE_DEPLOYMENT):
+        return None
+    try:
+        import urllib.request, base64
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        data_url = f"data:{mime_type or 'image/jpeg'};base64,{b64}"
+        url = (
+            f"{AZURE_ENDPOINT.rstrip('/')}/openai/deployments/{AZURE_DEPLOYMENT}"
+            f"/chat/completions?api-version={AZURE_API_VERSION}"
+        )
+        body = json.dumps({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        "You are a vintage apparel expert. Analyze this garment photo and "
+                        "return ONLY raw JSON (no markdown) with keys: brand, garment_type, "
+                        "era, color, size, condition, designer_tier (low|mid|high), title, "
+                        "description, labels (array of short tags), text (visible text/logos). "
+                        "Use era codes like 90s, 80s, y2k, 70s, 60s, vintage, modern.")},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }],
+            "max_tokens": 800,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json", "api-key": AZURE_KEY},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        text = payload["choices"][0]["message"]["content"]
+        m = re.search(r"\{.*\}", text, re.S)
+        if m:
+            text = m.group(0)
+        return json.loads(text)
+    except Exception as e:
+        print(f"[vision] azure failed: {e}")
+        return None
+
+
 def run_vision(image_bytes, mime_type, filename):
-    """Provider-agnostic vision router. Gemini primary, demo fallback."""
+    """Provider-agnostic vision router. Gemini -> Azure -> demo fallback."""
     ai = analyze_with_gemini(image_bytes, mime_type)
+    provider = "gemini" if ai else None
+    if not ai:
+        ai = analyze_with_azure(image_bytes, mime_type)
+        if ai:
+            provider = "azure"
     colors = _extract_colors(image_bytes)
     if ai:
-        primary = "gemini"
+        primary = provider
         data = ai
     else:
         primary = "demo"
@@ -290,7 +350,7 @@ def generate_sku(data):
     gtype = (data.get("garment_type") or "accessory").lower()
     type_code = TYPE_CODE.get(gtype, "ACC")
     era = (data.get("era") or "vintage").lower()
-    era_code = era[:2] if era[:2] in ERA_PREMIUM else "VT"
+    era_code = ERA_CODE.get(era, "VT")
     color_code = data.get("color_code", "GEN")
     size = (data.get("size") or "OS").lower()
     size_code = SIZE_CODE.get(size, size[:3].upper() or "OSZ")
@@ -509,6 +569,7 @@ def health():
     return jsonify({
         "status": "ok",
         "gemini": bool(HAS_GEMINI and GEMINI_KEY),
+        "azure": bool(AZURE_ENDPOINT and AZURE_KEY),
         "spaces": bool(HAS_BOTO3 and DO_SPACES_KEY and DO_SPACES_BUCKET),
         "appwrite": bool(HAS_APPWRITE and APPWRITE_PROJECT),
         "pil": HAS_PIL,
