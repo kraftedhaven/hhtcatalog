@@ -1,2 +1,7 @@
 .env
+.env.*
+!.env.example
 .continue/.env
+
+# Local editor/project state
+.vscode/
