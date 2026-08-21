@@ -79,7 +79,7 @@ debugging, refactoring, generating routes/configs.
   - `llama-3.1-8b-instant` — fastest / lowest latency
   - `openai/gpt-oss-120b` — large open model
 - Note: Groq **deprecated** `qwen-2.5-coder-32b` (and `mixtral-8x7b`, `gemma-7b-it`)
-  — don't use those IDs. The local Ollama `qwen2.5-coder:1.5b` is still current and is
+  per [Groq's model deprecation notice](https://console.groq.com/docs/deprecations) — don't use those IDs. The local Ollama `qwen2.5-coder:1.5b` is still current and is
   the best free autocomplete option.
 
 Call Groq directly from a script:
@@ -136,4 +136,4 @@ Required for production: `GEMINI_API_KEY` (or `AZURE_OPENAI_*`), and
 - **Vision (HHT):** Gemini API free tier (primary) + Azure Foundry GPT-4o (fallback)
 - **Hosting:** DigitalOcean droplet (you already have one) or the deployed preview here
 
-Total cost: $0. No Copilot quota. Everything open source.
+Total cost: $0. No Copilot quota. Uses free tiers and open-source/local models where possible.
