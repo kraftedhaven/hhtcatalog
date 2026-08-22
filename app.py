@@ -61,7 +61,7 @@ import base64
 
 # ---------- configuration ----------
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Azure AI Foundry / Azure OpenAI vision fallback (optional)
 AZURE_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")  # e.g. https://hht.openai.azure.com
