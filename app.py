@@ -32,10 +32,10 @@ from flask_cors import CORS
 
 # ---------- optional dependencies (graceful degradation) ----------
 try:
-    import google.generativeai as genai
-    HAS_GEMINI = True
+    import requests
+    HAS_REQUESTS = True
 except Exception:
-    HAS_GEMINI = False
+    HAS_REQUESTS = False
 
 try:
     from PIL import Image
@@ -55,6 +55,8 @@ try:
     HAS_APPWRITE = True
 except Exception:
     HAS_APPWRITE = False
+
+import base64
 
 
 # ---------- configuration ----------
@@ -226,24 +228,35 @@ def _guess_type_from_filename(name):
 
 
 def analyze_with_gemini(image_bytes, mime_type):
-    """Real AI vision analysis via Gemini. Returns dict or None on failure."""
-    if not (HAS_GEMINI and GEMINI_KEY):
+    """Real AI vision via Gemini REST API. Works two ways:
+    (1) GEMINI_API_KEY env var set -> adds ?key= (droplet/production).
+    (2) no env var but credential proxy active -> ?key= injected by the
+        custom-credential proxy (sandbox testing). Falls back to demo on failure.
+    """
+    if not HAS_REQUESTS:
         return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    if GEMINI_KEY:
+        url += f"?key={GEMINI_KEY}"
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    prompt = (
+        "You are a vintage apparel expert. Analyze this garment photo and return "
+        "ONLY raw JSON (no markdown) with keys: brand, garment_type, era, color, "
+        "size, condition, designer_tier (low|mid|high), title, description, "
+        "labels (array of short tags), text (any visible text/logos). "
+        "Use era codes like 90s, 80s, y2k, 70s, 60s, vintage, modern."
+    )
+    body = {
+        "contents": [{"parts": [
+            {"text": prompt},
+            {"inline_data": {"mime_type": mime_type or "image/jpeg", "data": b64}},
+        ]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 800},
+    }
     try:
-        genai.configure(api_key=GEMINI_KEY)
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        prompt = (
-            "You are a vintage apparel expert. Analyze this garment photo and return "
-            "ONLY raw JSON (no markdown) with keys: brand, garment_type, era, color, "
-            "size, condition, designer_tier (low|mid|high), title, description, "
-            "labels (array of short tags), text (any visible text/logos). "
-            "Use era codes like 90s, 80s, y2k, 70s, 60s, vintage, modern."
-        )
-        resp = model.generate_content(
-            [{"mime_type": mime_type or "image/jpeg", "data": image_bytes}, prompt]
-        )
-        text = (resp.text or "").replace("```json", "").replace("```", "").strip()
-        # grab first {...} block
+        r = requests.post(url, json=body, timeout=30)
+        r.raise_for_status()
+        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
         m = re.search(r"\{.*\}", text, re.S)
         if m:
             text = m.group(0)
@@ -624,7 +637,7 @@ def export_csv():
 def health():
     return jsonify({
         "status": "ok",
-        "gemini": bool(HAS_GEMINI and GEMINI_KEY),
+        "gemini": bool(GEMINI_KEY),
         "azure": bool(AZURE_ENDPOINT and AZURE_KEY),
         "spaces": bool(HAS_BOTO3 and DO_SPACES_KEY and DO_SPACES_BUCKET),
         "appwrite": bool(HAS_APPWRITE and APPWRITE_PROJECT),
@@ -633,5 +646,5 @@ def health():
 
 
 if __name__ == "__main__":
-    print(f"HHT Vision API starting on :{PORT}  (gemini={'on' if (HAS_GEMINI and GEMINI_KEY) else 'demo'})")
+    print(f"HHT Vision API starting on :{PORT}  (gemini={'on' if GEMINI_KEY else 'demo'})")
     app.run(host="0.0.0.0", port=PORT)
