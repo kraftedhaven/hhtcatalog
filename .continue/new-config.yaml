@@ -30,7 +30,7 @@ models:
 
   - name: qwen2.5-coder-1.5b (local, private)
     provider: ollama
-    model: qwen2.5-coder:1.5b
+    model: "qwen2.5-coder:1.5b"
     roles:
       - autocomplete
       - chat
