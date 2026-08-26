@@ -1,20 +1,17 @@
 FROM node:18-slim
 
-# Use a predictable working directory to simplify Windows volume mounts
-WORKDIR /workspaces/hhtcatalog
+WORKDIR /app
 
-# Create directories for both legacy (/app) and new (/workspaces/hhtcatalog) layouts
-RUN mkdir -p /workspaces/hhtcatalog/logs /workspaces/hhtcatalog/tests/images /workspaces/hhtcatalog/scripts /app/scripts
+# Copy only scripts directory (which exists)
+COPY scripts/ /app/scripts/
 
-# Copy runner scripts into both locations for backward compatibility
-COPY scripts/ /workspaces/hhtcatalog/scripts/
-RUN cp -a /workspaces/hhtcatalog/scripts/. /app/scripts/ || true
-COPY tests/ /workspaces/hhtcatalog/tests/
-COPY logs/ /workspaces/hhtcatalog/logs/
+# Create logs directory at runtime
+RUN mkdir -p /app/logs
 
-RUN chmod +x /workspaces/hhtcatalog/scripts/*.sh /app/scripts/*.sh || true
+# Make scripts executable
+RUN chmod +x /app/scripts/*.sh || true
 
 ENV INTERVAL_SECONDS=900
 
-# Explicit entrypoint to avoid old images using /app path
-ENTRYPOINT ["/bin/bash", "-lc", "/workspaces/hhtcatalog/scripts/run-cron.sh"]
+# Run the cron script
+ENTRYPOINT ["/bin/bash", "-lc", "/app/scripts/run-cron.sh"]
