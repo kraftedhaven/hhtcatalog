@@ -22,4 +22,22 @@ assert result["pricing"]["list_price"] > 0, "list price > 0"
 assert result["pricing"]["depop"] >= result["pricing"]["list_price"], "depop price includes fee"
 assert result["seo"]["title"], "seo title present"
 assert len(result["seo"]["keywords"]) >= 3, "keywords present"
+assert result["draft"]["title"], "draft title present"
+assert result["draft"]["description"], "draft description present"
+assert result["draft"]["condition"], "draft condition present"
+assert result["draft"]["price_suggestion"] > 0, "draft price suggestion present"
+assert len(result["draft"]["tags"]) >= 3, "draft tags present"
+assert result["draft"]["sku"].startswith("HHT-"), "draft SKU present"
+
+client = app.app.test_client()
+with open(IMG, "rb") as upload:
+    response = client.post(
+        "/analyze",
+        data={"file": (upload, "denim-jacket.jpg")},
+        content_type="multipart/form-data",
+    )
+assert response.status_code == 200, response.get_data(as_text=True)
+payload = response.get_json()
+assert payload["draft"]["title"], "POST /analyze returns editable draft"
+assert payload["draft"]["sku"].startswith("HHT-"), "POST /analyze returns SKU"
 print("\nALL CHECKS PASSED")

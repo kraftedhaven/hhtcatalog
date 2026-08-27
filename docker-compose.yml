@@ -1,49 +1,60 @@
-version: "3.9"
-
 services:
   hht-api:
     build:
       context: .
       dockerfile: Dockerfile
+      target: production
     container_name: hht-api
     ports:
       - "8080:8080"
     environment:
-      - PORT=8080
-      - FLASK_ENV=production
-      # Optional: set these for real AI vision
-      # - GEMINI_API_KEY=${GEMINI_API_KEY}
-      # - GEMINI_MODEL=gemini-1.5-flash
-      # - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
-      # - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY}
-      # - AZURE_OPENAI_DEPLOYMENT=gpt-4o
-      # Optional: set for inventory persistence with Appwrite
-      # - APPWRITE_ENDPOINT=https://cloud.appwrite.io/v1
-      # - APPWRITE_PROJECT_ID=${APPWRITE_PROJECT_ID}
-      # - APPWRITE_API_KEY=${APPWRITE_API_KEY}
-      # - APPWRITE_DATABASE_ID=default
-      # - APPWRITE_COLLECTION_ID=inventory
+      PORT: "8080"
+      CORS_ORIGINS: "http://localhost:5173"
+      LOCAL_UPLOAD_DIR: "/data/uploads"
+      SAVE_UPLOADS: "true"
+      MAX_UPLOAD_MB: "10"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
+      AZURE_OPENAI_ENDPOINT: "${AZURE_OPENAI_ENDPOINT:-}"
+      AZURE_OPENAI_KEY: "${AZURE_OPENAI_KEY:-}"
+      AZURE_OPENAI_DEPLOYMENT: "${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}"
+      AZURE_OPENAI_API_VERSION: "${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}"
+      DO_SPACES_KEY: "${DO_SPACES_KEY:-}"
+      DO_SPACES_SECRET: "${DO_SPACES_SECRET:-}"
+      DO_SPACES_REGION: "${DO_SPACES_REGION:-nyc3}"
+      DO_SPACES_BUCKET: "${DO_SPACES_BUCKET:-}"
+      APPWRITE_ENDPOINT: "${APPWRITE_ENDPOINT:-https://cloud.appwrite.io/v1}"
+      APPWRITE_PROJECT_ID: "${APPWRITE_PROJECT_ID:-}"
+      APPWRITE_API_KEY: "${APPWRITE_API_KEY:-}"
+      APPWRITE_DATABASE_ID: "${APPWRITE_DATABASE_ID:-default}"
+      APPWRITE_COLLECTION_ID: "${APPWRITE_COLLECTION_ID:-inventory}"
     volumes:
-      - ./logs:/app/logs
+      - hht_uploads:/data/uploads
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read()"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 5s
+      start_period: 10s
 
-  # Optional: Vision cron job runner (Dockerfile.vision)
-  # vision-qa:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.vision
-  #   container_name: hht-vision-qa
-  #   environment:
-  #     - VITE_PUBLIC_API_URL=http://hht-api:8080
-  #     - INTERVAL_SECONDS=900
-  #   volumes:
-  #     - ./logs:/app/logs
-  #   depends_on:
-  #     - hht-api
-  #   restart: unless-stopped
+  hht-frontend:
+    image: node:20-alpine
+    container_name: hht-frontend
+    working_dir: /app/frontend
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0 --port 5173"
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_PUBLIC_API_URL: "http://localhost:8080"
+    volumes:
+      - ./frontend:/app/frontend
+      - frontend_node_modules:/app/frontend/node_modules
+    depends_on:
+      hht-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  hht_uploads:
+  frontend_node_modules:

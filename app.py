@@ -25,9 +25,10 @@ import json
 import math
 import uuid
 import hashlib
+import mimetypes
 from collections import Counter
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
 # ---------- optional dependencies (graceful degradation) ----------
@@ -83,8 +84,13 @@ APPWRITE_COLL = os.environ.get("APPWRITE_COLLECTION_ID", "inventory")
 
 CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*")
 PORT = int(os.environ.get("PORT", 8080))
+LOCAL_UPLOAD_DIR = os.environ.get("LOCAL_UPLOAD_DIR", "/data/uploads")
+SAVE_UPLOADS = os.environ.get("SAVE_UPLOADS", "true").lower() in {"1", "true", "yes", "on"}
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10"))
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="frontend/dist", static_url_path="")
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 CORS(app, resources={r"/*": {"origins": CORS_ORIGINS}})
 
 
@@ -228,16 +234,11 @@ def _guess_type_from_filename(name):
 
 
 def analyze_with_gemini(image_bytes, mime_type):
-    """Real AI vision via Gemini REST API. Works two ways:
-    (1) GEMINI_API_KEY env var set -> adds ?key= (droplet/production).
-    (2) no env var but credential proxy active -> ?key= injected by the
-        custom-credential proxy (sandbox testing). Falls back to demo on failure.
-    """
-    if not HAS_REQUESTS:
+    """Real AI vision via Gemini REST API when GEMINI_API_KEY is configured."""
+    if not (HAS_REQUESTS and GEMINI_KEY):
         return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    if GEMINI_KEY:
-        url += f"?key={GEMINI_KEY}"
+    url += f"?key={GEMINI_KEY}"
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     prompt = (
         "You are a vintage apparel expert. Analyze this garment photo and return "
@@ -527,6 +528,33 @@ def save_to_appwrite(doc):
         return None
 
 
+def save_upload_locally(file_bytes, filename):
+    if not SAVE_UPLOADS:
+        return None
+    try:
+        os.makedirs(LOCAL_UPLOAD_DIR, exist_ok=True)
+        _, ext = os.path.splitext(filename or "")
+        ext = ext.lower() if ext else ".jpg"
+        safe_name = f"{uuid.uuid4()}{ext}"
+        path = os.path.join(LOCAL_UPLOAD_DIR, safe_name)
+        with open(path, "wb") as out:
+            out.write(file_bytes)
+        return safe_name
+    except Exception as e:
+        print(f"[storage] local upload save failed: {e}")
+        return None
+
+
+def normalize_mime_type(upload):
+    detected = upload.content_type
+    if detected in ALLOWED_IMAGE_TYPES:
+        return detected
+    guessed, _ = mimetypes.guess_type(upload.filename or "")
+    if guessed in ALLOWED_IMAGE_TYPES:
+        return guessed
+    return detected
+
+
 # =====================================================================
 # PIPELINE + ROUTES
 # =====================================================================
@@ -536,6 +564,7 @@ def run_pipeline(image_bytes, mime_type, filename):
     pricing = compute_pricing(vision_data)
     seo = build_seo(vision_data)
 
+    local_upload_id = save_upload_locally(image_bytes, filename)
     public_url = upload_to_spaces(image_bytes, mime_type, os.path.splitext(filename)[1])
     if public_url:
         sku["image_url"] = public_url
@@ -546,10 +575,24 @@ def run_pipeline(image_bytes, mime_type, filename):
         }
         save_to_appwrite(doc)
 
+    draft = {
+        "title": sku["title"],
+        "description": sku["description"],
+        "condition": sku["condition_id"],
+        "price_suggestion": pricing["list_price"],
+        "tags": seo["keywords"],
+        "sku": sku["code"],
+    }
+
     return {
         "demo": vision_data.get("provider") == "demo",
         "provider": vision_data.get("provider"),
         "fallback_triggered": vision_data.get("fallback_triggered", False),
+        "draft": draft,
+        "storage": {
+            "local_upload_id": local_upload_id,
+            "public_image_url": public_url,
+        },
         "vision": {
             "labels": vision_data.get("labels", []),
             "colors": vision_data.get("vision_colors", []),
@@ -565,12 +608,15 @@ def run_pipeline(image_bytes, mime_type, filename):
 def analyze():
     f = request.files.get("file") or request.files.get("files")
     if not f:
-        return jsonify({"error": "No files uploaded"}), 400
+        return jsonify({"error": "No image uploaded. Use multipart form field 'file'."}), 400
+    mime_type = normalize_mime_type(f)
+    if mime_type not in ALLOWED_IMAGE_TYPES:
+        return jsonify({"error": f"Unsupported file type '{f.content_type}'. Upload JPEG, PNG, WebP, or GIF."}), 415
     image_bytes = f.read()
     if not image_bytes:
         return jsonify({"error": "Empty file"}), 400
     try:
-        result = run_pipeline(image_bytes, f.content_type, f.filename)
+        result = run_pipeline(image_bytes, mime_type, f.filename)
         return jsonify(result)
     except Exception as e:
         print(f"[analyze] error: {e}")
@@ -588,10 +634,13 @@ def bulk_analyze():
     for f in files:
         entry = {"filename": f.filename, "status": "error", "error": None}
         try:
+            mime_type = normalize_mime_type(f)
+            if mime_type not in ALLOWED_IMAGE_TYPES:
+                raise ValueError(f"Unsupported file type '{f.content_type}'")
             data = f.read()
             if not data:
                 raise ValueError("Empty file")
-            entry.update(run_pipeline(data, f.content_type, f.filename))
+            entry.update(run_pipeline(data, mime_type, f.filename))
             entry["status"] = "ok"
             entry.pop("error", None)
         except Exception as e:
@@ -641,8 +690,33 @@ def health():
         "azure": bool(AZURE_ENDPOINT and AZURE_KEY),
         "spaces": bool(HAS_BOTO3 and DO_SPACES_KEY and DO_SPACES_BUCKET),
         "appwrite": bool(HAS_APPWRITE and APPWRITE_PROJECT),
+        "local_upload_dir": LOCAL_UPLOAD_DIR,
+        "save_uploads": SAVE_UPLOADS,
         "pil": HAS_PIL,
     })
+
+
+@app.errorhandler(413)
+def too_large(_err):
+    return jsonify({"error": f"Uploaded image is too large. Limit is {MAX_UPLOAD_MB} MB."}), 413
+
+
+@app.errorhandler(404)
+def not_found(_err):
+    if request.path.startswith("/api/") or request.path in {"/analyze", "/bulk-analyze", "/export/csv", "/health"}:
+        return jsonify({"error": "Not found"}), 404
+    index_path = os.path.join(app.static_folder or "", "index.html")
+    if os.path.exists(index_path):
+        return send_from_directory(app.static_folder, "index.html")
+    return jsonify({"status": "Backend running", "frontend": "not built"}), 200
+
+
+@app.route("/")
+def index():
+    index_path = os.path.join(app.static_folder or "", "index.html")
+    if os.path.exists(index_path):
+        return send_from_directory(app.static_folder, "index.html")
+    return jsonify({"status": "Backend running", "frontend": "not built"})
 
 
 if __name__ == "__main__":
