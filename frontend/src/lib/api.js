@@ -1,5 +1,8 @@
-// Optional in production because Flask serves the built frontend and API together.
-const PUBLIC_API_URL = import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || '';
+// Optional only for local frontend-only development. Production uses same-origin
+// paths because Flask serves the built frontend and API together.
+const PUBLIC_API_URL = import.meta.env.DEV
+    ? import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || ''
+    : '';
 
 function baseUrl() {
     const b = (PUBLIC_API_URL || '').replace(/\/+$/, '');
