@@ -238,7 +238,7 @@ def analyze_with_gemini(image_bytes, mime_type):
     if not (HAS_REQUESTS and GEMINI_KEY):
         return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    url += f"?key={GEMINI_KEY}"
+    headers = {"x-goog-api-key": GEMINI_KEY}
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     prompt = (
         "You are a vintage apparel expert. Analyze this garment photo and return "
@@ -255,7 +255,7 @@ def analyze_with_gemini(image_bytes, mime_type):
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 800},
     }
     try:
-        r = requests.post(url, json=body, timeout=30)
+        r = requests.post(url, headers=headers, json=body, timeout=30)
         r.raise_for_status()
         text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
         m = re.search(r"\{.*\}", text, re.S)
