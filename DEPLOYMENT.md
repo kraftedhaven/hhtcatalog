@@ -44,12 +44,14 @@ on a mounted disk at `/data/uploads`.
 `heroku.yml` builds the existing `Dockerfile` and runs the same production
 Gunicorn web process.
 
-1. Create a Heroku app.
-2. Connect the GitHub repository in Heroku, or deploy the image with Heroku
+1. Redeem your Heroku student credit in your Heroku account.
+2. Create one Heroku app.
+3. Connect the GitHub repository in Heroku, or deploy the image with Heroku
    Container Registry.
-3. Set `GEMINI_API_KEY` through Heroku Config Vars. Leave it blank only if you
-   want demo mode.
-4. Open `https://YOUR-HEROKU-APP.herokuapp.com/health` to verify deployment.
+4. Set config vars in Heroku, including `GEMINI_API_KEY`. Leave it blank only if
+   you want demo mode.
+5. Deploy the app.
+6. Open `https://YOUR-HEROKU-APP.herokuapp.com/health` to verify deployment.
 
 ## Environment Variables
 
