@@ -1,10 +1,19 @@
-// Use Vite env vars in dev/build: `VITE_PUBLIC_API_URL` or `VITE_API_BASE_URL`
+// Optional in production because Flask serves the built frontend and API together.
 const PUBLIC_API_URL = import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || '';
 
 function baseUrl() {
     const b = (PUBLIC_API_URL || '').replace(/\/+$/, '');
-    if (!b) throw new Error('PUBLIC_API_URL (VITE_PUBLIC_API_URL) is not defined. Copy .env.example to .env and set it.');
     return b;
+}
+
+async function parseResponse(res) {
+    const contentType = res.headers.get('content-type') || '';
+    const body = contentType.includes('application/json') ? await res.json() : await res.text();
+    if (!res.ok) {
+        const message = typeof body === 'object' ? body.error : body;
+        throw new Error(message || `Request failed: ${res.status}`);
+    }
+    return body;
 }
 
 export async function analyzeImage(file) {
@@ -12,11 +21,7 @@ export async function analyzeImage(file) {
     const form = new FormData();
     form.append('file', file);
     const res = await fetch(url, { method: 'POST', body: form });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Request failed: ${res.status}`);
-    }
-    return res.json();
+    return parseResponse(res);
 }
 
 export async function bulkAnalyze(files, onProgress) {
@@ -24,11 +29,16 @@ export async function bulkAnalyze(files, onProgress) {
     const form = new FormData();
     for (const f of files) form.append('files', f);
     const res = await fetch(url, { method: 'POST', body: form });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Request failed: ${res.status}`);
-    }
-    return res.json();
+    return parseResponse(res);
+}
+
+export function downloadDraftJSON(draft) {
+    const blob = new Blob([JSON.stringify({ draft, reviewed: true }, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "hht_listing_draft.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
 }
 
 export function downloadCSV(results) {

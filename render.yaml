@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: hht-catalog
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: ohio
+    healthCheckPath: /health
+    autoDeploy: false
+    disk:
+      name: hht-catalog-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: LOCAL_UPLOAD_DIR
+        value: /data/uploads
+      - key: SAVE_UPLOADS
+        value: "true"
+      - key: MAX_UPLOAD_MB
+        value: "10"
+      - key: GUNICORN_WORKERS
+        value: "2"
+      - key: GUNICORN_TIMEOUT
+        value: "120"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: AZURE_OPENAI_ENDPOINT
+        sync: false
+      - key: AZURE_OPENAI_KEY
+        sync: false
+      - key: AZURE_OPENAI_DEPLOYMENT
+        sync: false
+      - key: AZURE_OPENAI_API_VERSION
+        value: 2024-08-01-preview
+      - key: DO_SPACES_KEY
+        sync: false
+      - key: DO_SPACES_SECRET
+        sync: false
+      - key: DO_SPACES_REGION
+        value: nyc3
+      - key: DO_SPACES_BUCKET
+        sync: false
+      - key: APPWRITE_ENDPOINT
+        value: https://cloud.appwrite.io/v1
+      - key: APPWRITE_PROJECT_ID
+        sync: false
+      - key: APPWRITE_API_KEY
+        sync: false
+      - key: APPWRITE_DATABASE_ID
+        sync: false
+      - key: APPWRITE_COLLECTION_ID
+        sync: false

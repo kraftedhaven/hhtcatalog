@@ -14,5 +14,68 @@ body {
 }
 
 .card {
-    @apply bg-white shadow rounded-lg p-4
+    @apply bg-white border border-slate-200 shadow-sm rounded-lg p-4;
+}
+
+.brand-mark {
+    @apply w-10 h-10 bg-slate-900 rounded flex items-center justify-center text-white font-bold;
+}
+
+.review-pill {
+    @apply hidden sm:inline-flex text-xs font-medium text-amber-800 bg-amber-100 border border-amber-200 rounded px-2.5 py-1;
+}
+
+.panel-title {
+    @apply text-base font-semibold text-slate-900;
+}
+
+.notice {
+    @apply text-sm mb-4 rounded border px-3 py-2;
+}
+
+.notice.info {
+    @apply text-sky-800 bg-sky-50 border-sky-200;
+}
+
+.notice.error {
+    @apply text-red-800 bg-red-50 border-red-200;
+}
+
+.draft-header {
+    @apply flex flex-col sm:flex-row gap-3 sm:items-start sm:justify-between pb-4 border-b border-slate-200;
+}
+
+.draft-form {
+    @apply mt-4 space-y-4;
+}
+
+.draft-form label {
+    @apply block;
+}
+
+.draft-form span {
+    @apply block text-xs font-semibold uppercase text-slate-500 mb-1;
+}
+
+.draft-form input,
+.draft-form select,
+.draft-form textarea {
+    @apply w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-100;
+}
+
+.primary-button,
+.secondary-button {
+    @apply rounded px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.primary-button {
+    @apply bg-slate-900 text-white hover:bg-slate-700;
+}
+
+.secondary-button {
+    @apply border border-slate-300 text-slate-700 hover:bg-slate-50;
+}
+
+.empty-state {
+    @apply mt-4 rounded border border-dashed border-slate-300 bg-slate-50 p-6;
 }
