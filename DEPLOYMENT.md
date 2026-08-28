@@ -39,6 +39,18 @@ on a mounted disk at `/data/uploads`.
 9. Verify `https://YOUR-RENDER-HOST/health` returns `{"status":"ok", ...}`.
 10. Upload an image in the browser and confirm the listing draft is editable.
 
+## Production Host: Heroku
+
+`heroku.yml` builds the existing `Dockerfile` and runs the same production
+Gunicorn web process.
+
+1. Create a Heroku app.
+2. Connect the GitHub repository in Heroku, or deploy the image with Heroku
+   Container Registry.
+3. Set `GEMINI_API_KEY` through Heroku Config Vars. Leave it blank only if you
+   want demo mode.
+4. Open `https://YOUR-HEROKU-APP.herokuapp.com/health` to verify deployment.
+
 ## Environment Variables
 
 Set these exact names in the production host. Do not commit real values.
