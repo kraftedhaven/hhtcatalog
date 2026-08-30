@@ -1,12 +1,9 @@
-// Optional only for local frontend-only development. Production uses same-origin
-// paths because Flask serves the built frontend and API together.
 const PUBLIC_API_URL = import.meta.env.DEV
     ? import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || ''
     : '';
 
 function baseUrl() {
-    const b = (PUBLIC_API_URL || '').replace(/\/+$/, '');
-    return b;
+    return (PUBLIC_API_URL || '').replace(/\/+$/, '');
 }
 
 async function parseResponse(res) {
@@ -19,62 +16,71 @@ async function parseResponse(res) {
     return body;
 }
 
-export async function analyzeImage(file) {
-    const url = `${baseUrl()}/analyze`;
+export async function analyzeImages(files, sellerDefaults = {}) {
     const form = new FormData();
-    form.append('file', file);
-    const res = await fetch(url, { method: 'POST', body: form });
+    for (const file of files.slice(0, 5)) form.append('file', file);
+    form.append('sellerDefaults', JSON.stringify(sellerDefaults));
+    const res = await fetch(`${baseUrl()}/analyze`, { method: 'POST', body: form });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function health() {
+    const res = await fetch(`${baseUrl()}/health`);
     return parseResponse(res);
 }
 
-export async function bulkAnalyze(files, onProgress) {
-    const url = `${baseUrl()}/bulk-analyze`;
-    const form = new FormData();
-    for (const f of files) form.append('files', f);
-    const res = await fetch(url, { method: 'POST', body: form });
-    return parseResponse(res);
+export function normalizeClientItem(item) {
+    const out = { ...item };
+    out.price = Number.parseFloat(out.price) || 0;
+    out.title = String(out.title || '').slice(0, 80);
+    if (isBag(out)) {
+        out.slv = 'N/A - bag';
+        out.nk = 'N/A - bag';
+        out.size = 'N/A - bag';
+        out.st = 'N/A - bag';
+    } else if (isShoe(out)) {
+        out.slv = 'N/A - footwear';
+        out.nk = 'N/A - footwear';
+    }
+    if (out.vin !== 'Yes (pre-1999)') out.vin = 'No';
+    if (out.vin === 'Yes (pre-1999)' && !/vintage/i.test(out.title)) {
+        out.title = `Vintage ${out.title}`.slice(0, 80).trim();
+    }
+    return out;
 }
 
-export function downloadDraftJSON(draft) {
-    const blob = new Blob([JSON.stringify({ draft, reviewed: true }, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "hht_listing_draft.json";
-    a.click();
-    URL.revokeObjectURL(a.href);
-}
-
-export function downloadCSV(results) {
-    const cols = ["filename","title","sku_code","barcode","category","condition_id",
-        "list_price","floor","auction_start","accept_offer","decline_offer",
-        "ebay","depop","poshmark","etsy","mercari","platform_routing",
-        "seo_title","meta_description","description","demo"];
-    const rows = results.map(r => {
-        const sku = r.sku || {}, pr = r.pricing || {}, seo = r.seo || {};
-        return [r.filename, sku.title, sku.code, sku.barcode, sku.category, sku.condition_id,
-            pr.list_price, pr.floor, pr.auction_start, pr.accept_offer, pr.decline_offer,
-            pr.ebay, pr.depop, pr.poshmark, pr.etsy, pr.mercari,
-            (seo.platform_routing||[]).join("/"), seo.title, seo.meta_description, sku.description, r.demo];
+export async function downloadCSV(items, defaults = {}) {
+    const res = await fetch(`${baseUrl()}/export/csv`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items, sellerDefaults: defaults })
     });
-    const esc = v => {
-        if (v == null) return "";
-        const s = String(v).replace(/"/g, '""');
-        return /[",\n]/.test(s) ? `"${s}"` : s;
-    };
-    const csv = [cols, ...rows].map(r => r.map(esc).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const a = document.createElement("a");
+    if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `CSV export failed: ${res.status}`);
+    }
+    const blob = await res.blob();
+    const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = "hht_listings.csv";
+    a.download = `hht_ebay_listings_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
-    URL.revokeObjectURL(a.href);
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-export function downloadJSON(results) {
-    const blob = new Blob([JSON.stringify({ count: results.length, results }, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
+export function downloadJSON(data, filename = 'hht-listings-backup.json') {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = "hht_listings.json";
+    a.download = filename;
     a.click();
-    URL.revokeObjectURL(a.href);
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function isBag(item) {
+    return ['169291', '169284'].includes(String(item.cat || '')) || /handbag|crossbody|clutch|backpack|tote|purse/i.test(item.type || '');
+}
+
+function isShoe(item) {
+    return String(item.cat || '') === '93427' || /shoe|sneaker|boot|loafer|sandal/i.test(item.type || '');
 }

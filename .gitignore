@@ -2,12 +2,17 @@
 .env.*
 !.env.example
 .continue/.env
+uploads/
+test-output/
+*.csv
+*.log
 
 # Local editor/project state
 .vscode/
 __pycache__/
 *.pyc
-.env
 venv/
 __pycache__/
 *.pyc
+frontend/dist/
+frontend/node_modules/

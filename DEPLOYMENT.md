@@ -1,97 +1,67 @@
-# Deployment
+# HHT Catalog Heroku Deployment
 
-This app is designed for local Docker development and production hosting on a
-managed container service. Docker is not the production host by itself.
+This repository is the canonical Heroku source tree for the merged HHT eBay Listing Builder.
+The Flask app serves the built Svelte frontend and the same-origin API.
 
-## Local Development
+## Start Command
 
-1. Copy `.env.example` to `.env` and fill in only the values you need.
-2. Start the API and frontend:
+Heroku uses `heroku.yml` with the Dockerfile web process:
 
-   ```bash
-   docker compose up --build
-   ```
-
-3. Open `http://localhost:5173`.
-4. Check the backend health endpoint at `http://localhost:8080/health`.
-
-The app works without AI keys in demo mode. Real API keys stay in `.env` or the
-host dashboard and are never exposed through Vite/browser code.
-
-## Production Host: Render
-
-`render.yaml` defines one Docker web service. The container builds the Svelte
-frontend, serves it from Flask, exposes `/analyze`, and persists uploaded images
-on a mounted disk at `/data/uploads`.
-
-1. Push this branch to GitHub.
-2. In Render, choose **New +** then **Blueprint**.
-3. Connect the GitHub repository and select the branch that contains this PR.
-4. Render detects `render.yaml`. Create the `hht-catalog` service.
-5. When prompted for `sync: false` environment variables, enter real values only
-   in Render. Leave optional providers blank if unused.
-6. Confirm the disk from `render.yaml` is attached:
-   - Name: `hht-catalog-data`
-   - Mount path: `/data`
-   - Size: `1 GB` or larger
-7. Deploy the service.
-8. Open the Render URL from a phone or another computer while the laptop is off.
-9. Verify `https://YOUR-RENDER-HOST/health` returns `{"status":"ok", ...}`.
-10. Upload an image in the browser and confirm the listing draft is editable.
-
-## Production Host: Heroku
-
-`heroku.yml` builds the existing `Dockerfile` and runs the same production
-Gunicorn web process.
-
-1. Redeem your Heroku student credit in your Heroku account.
-2. Create one Heroku app.
-3. Connect the GitHub repository in Heroku, or deploy the image with Heroku
-   Container Registry.
-4. Set config vars in Heroku, including `GEMINI_API_KEY`. Leave it blank only if
-   you want demo mode.
-5. Deploy the app.
-6. Open `https://YOUR-HEROKU-APP.herokuapp.com/health` to verify deployment.
-
-## Environment Variables
-
-Set these exact names in the production host. Do not commit real values.
-
-```text
-PORT=8080
-CORS_ORIGINS=*
-LOCAL_UPLOAD_DIR=/data/uploads
-SAVE_UPLOADS=true
-MAX_UPLOAD_MB=10
-GUNICORN_WORKERS=2
-GUNICORN_TIMEOUT=120
-GEMINI_API_KEY=
-GEMINI_MODEL=gemini-2.5-flash
-AZURE_OPENAI_ENDPOINT=
-AZURE_OPENAI_KEY=
-AZURE_OPENAI_DEPLOYMENT=gpt-4o
-AZURE_OPENAI_API_VERSION=2024-08-01-preview
-DO_SPACES_KEY=
-DO_SPACES_SECRET=
-DO_SPACES_REGION=nyc3
-DO_SPACES_BUCKET=
-APPWRITE_ENDPOINT=https://cloud.appwrite.io/v1
-APPWRITE_PROJECT_ID=
-APPWRITE_API_KEY=
-APPWRITE_DATABASE_ID=default
-APPWRITE_COLLECTION_ID=inventory
+```sh
+gunicorn --bind 0.0.0.0:${PORT:-8080} --workers ${GUNICORN_WORKERS:-2} --timeout ${GUNICORN_TIMEOUT:-120} app:app
 ```
 
-## Persistence
+The app binds to `0.0.0.0` and `PORT`.
 
-For hosted storage, keep the Render disk mounted at `/data` and set:
+## Required Config Vars
+
+Set at least one hosted vision provider in Heroku Config Vars. Do not commit real values.
 
 ```text
-LOCAL_UPLOAD_DIR=/data/uploads
-SAVE_UPLOADS=true
+OPENROUTER_API_KEY
+OPENROUTER_MODEL
+GEMINI_API_KEY
+GEMINI_MODEL
+GROQ_API_KEY
+GROQ_MODEL
+DEMO_MODE=false
 ```
 
-The server creates `/data/uploads` automatically. Optional DigitalOcean Spaces
-and Appwrite variables can also be set when you want public image URLs or
-inventory document persistence, but marketplace publishing is intentionally not
-implemented. Drafts must be reviewed before copy or export.
+Provider priority is OpenRouter, then Gemini, then Groq. `DEMO_MODE=false` is the production default.
+When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
+
+Example commands:
+
+```sh
+heroku stack:set container -a hht-catalog-b34ed1b32417
+heroku config:set OPENROUTER_API_KEY=... OPENROUTER_MODEL=openrouter/free DEMO_MODE=false -a hht-catalog-b34ed1b32417
+git push heroku main
+```
+
+## API
+
+`POST /analyze` accepts `multipart/form-data` with one to five `file` fields.
+Files must be JPEG, PNG, WebP, or GIF and fit under `MAX_UPLOAD_MB`.
+
+`GET /health` returns provider availability booleans and never returns secrets.
+
+`POST /export/csv` accepts:
+
+```json
+{
+  "items": [],
+  "sellerDefaults": {}
+}
+```
+
+It returns an eBay Seller Hub fixed-price CSV using the exact 35-column header.
+
+## Migration Note
+
+The old Flask demo pipeline, cross-listing CSV, and Azure-specific provider path were replaced by:
+
+- `hht_app/providers.py` for hosted provider calls.
+- `hht_app/schema.py` for normalization, seller safeguards, title limits, and CSV generation.
+- `frontend/src/App.svelte` for the phone-first eBay queue workflow ported from `hhtmobile-main`.
+
+Rollback point: branch `backup-pre-hhtmobile-merge-20260830`.
