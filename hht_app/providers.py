@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +60,7 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
     if not images:
         raise ProviderError("At least one image is required.", 400)
     context = context or {}
+    context.setdefault("deadline", time.monotonic() + 24)
     compact_images = images[:3]
     failures: list[dict[str, str]] = []
     providers = _provider_plan()
@@ -71,6 +73,9 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
         )
 
     for name, caller in providers:
+        if _remaining_seconds(context) < 5:
+            failures.append({"provider": name, "error": "timeout_budget_exhausted"})
+            continue
         try:
             raw = caller(compact_images, context)
             result = normalize_listing(parse_model_json(raw))
@@ -120,7 +125,7 @@ def _openrouter(images: list[UploadedImage], context: dict[str, Any]) -> str:
             "max_tokens": 1400,
             "response_format": {"type": "json_object"},
         },
-        timeout=45,
+        timeout=_request_timeout(context),
     )
     return _chat_response(response)
 
@@ -146,7 +151,7 @@ def _gemini(images: list[UploadedImage], context: dict[str, Any]) -> str:
                 "responseMimeType": "application/json",
             },
         },
-        timeout=45,
+        timeout=_request_timeout(context),
     )
     if response.status_code >= 400:
         raise ProviderError(f"Gemini returned HTTP {response.status_code}", response.status_code)
@@ -168,7 +173,7 @@ def _groq(images: list[UploadedImage], context: dict[str, Any]) -> str:
             "max_completion_tokens": 1200,
             "response_format": {"type": "json_object"},
         },
-        timeout=45,
+        timeout=_request_timeout(context),
     )
     return _chat_response(response)
 
@@ -227,3 +232,14 @@ def _safe_error(message: str) -> str:
 
 def _log_provider(provider: str, status_code: int, message: str) -> None:
     print(f"[provider] {provider} status={status_code} category={_safe_error(message)}")
+
+
+def _remaining_seconds(context: dict[str, Any]) -> float:
+    return max(0.0, float(context.get("deadline", time.monotonic())) - time.monotonic())
+
+
+def _request_timeout(context: dict[str, Any]) -> float:
+    remaining = _remaining_seconds(context)
+    if remaining < 5:
+        raise ProviderError("Provider timeout budget exhausted before request.", 504)
+    return min(12.0, max(3.0, remaining - 2.0))
