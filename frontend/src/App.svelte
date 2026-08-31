@@ -89,7 +89,7 @@
             status = result.demo ? "Demo result loaded. Review required." : `Analysis complete via ${result.provider || engine}. Review required.`;
             tab = "edit";
         } catch (err) {
-            error = err.message || String(err);
+            error = friendlyAnalyzeError(err);
             status = "";
         } finally {
             loading = false;
@@ -119,11 +119,12 @@
     }
 
     async function compactHostedFiles(sourceFiles) {
-        const compacted = [];
-        for (const file of sourceFiles.slice(0, 3)) {
-            compacted.push(await resizeImage(file));
+        const resized = [];
+        for (const file of sourceFiles.slice(0, 5)) {
+            resized.push(await resizeImage(file));
         }
-        return compacted;
+        if (resized.length <= 3) return resized;
+        return makeContactSheets(resized);
     }
 
     function resizeImage(file) {
@@ -152,6 +153,77 @@
             reader.onerror = () => resolve(file);
             reader.readAsDataURL(file);
         });
+    }
+
+    async function makeContactSheets(sourceFiles) {
+        const dataUrls = await Promise.all(sourceFiles.map(fileToDataUrl));
+        const groups = [dataUrls.slice(0, 3), dataUrls.slice(3)];
+        const sheets = [];
+        for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+            const group = groups[groupIndex].filter(Boolean);
+            if (!group.length) continue;
+            sheets.push(await drawContactSheet(group, groupIndex));
+        }
+        return sheets;
+    }
+
+    function drawContactSheet(dataUrls, groupIndex) {
+        return new Promise((resolve) => {
+            const tile = 720;
+            const cols = dataUrls.length === 1 ? 1 : 2;
+            const rows = Math.ceil(dataUrls.length / cols);
+            const canvas = document.createElement("canvas");
+            canvas.width = cols * tile;
+            canvas.height = rows * tile;
+            const ctx = canvas.getContext("2d");
+            ctx.fillStyle = "#f8fafc";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            let done = 0;
+            dataUrls.forEach((url, index) => {
+                const image = new Image();
+                image.onload = () => {
+                    const scale = Math.min((tile - 36) / image.width, (tile - 56) / image.height);
+                    const width = image.width * scale;
+                    const height = image.height * scale;
+                    const left = (index % cols) * tile + (tile - width) / 2;
+                    const top = Math.floor(index / cols) * tile + 40 + (tile - 56 - height) / 2;
+                    ctx.drawImage(image, left, top, width, height);
+                    ctx.fillStyle = "#0f172a";
+                    ctx.font = "bold 26px system-ui, sans-serif";
+                    ctx.fillText(`Photo ${groupIndex * 3 + index + 1}`, (index % cols) * tile + 18, Math.floor(index / cols) * tile + 32);
+                    done += 1;
+                    if (done === dataUrls.length) {
+                        canvas.toBlob((blob) => {
+                            resolve(blob ? new File([blob], `contact-sheet-${groupIndex + 1}.jpg`, { type: "image/jpeg" }) : new File([], `contact-sheet-${groupIndex + 1}.jpg`, { type: "image/jpeg" }));
+                        }, "image/jpeg", 0.82);
+                    }
+                };
+                image.onerror = () => {
+                    done += 1;
+                    if (done === dataUrls.length) {
+                        canvas.toBlob((blob) => resolve(new File([blob], `contact-sheet-${groupIndex + 1}.jpg`, { type: "image/jpeg" })), "image/jpeg", 0.82);
+                    }
+                };
+                image.src = url;
+            });
+        });
+    }
+
+    function friendlyAnalyzeError(err) {
+        const failures = err.providerFailures || [];
+        if (!failures.length) return err.message || String(err);
+        const labels = {
+            rate_limit: "rate limit or free model unavailable",
+            auth_or_permission: "key, credits, or model access problem",
+            malformed_json: "provider returned unreadable JSON",
+            provider_error: "provider request failed",
+            timeout_budget_exhausted: "skipped to avoid Heroku timeout"
+        };
+        const lines = failures.map((failure) => {
+            const label = labels[failure.error] || failure.error || "failed";
+            return `${failure.provider}: ${label}`;
+        });
+        return `${err.message || "Analysis failed."} ${lines.join("; ")}. No demo data was shown. If Gemini is out of credits, remove GEMINI_API_KEY from Heroku Config Vars.`;
     }
 
     function parseModelJSON(raw) {

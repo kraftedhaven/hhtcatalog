@@ -155,6 +155,12 @@ class MergePipelineTests(unittest.TestCase):
                     providers.analyze_images([self.image])
         self.assertIn("All configured vision providers failed", str(ctx.exception))
 
+    def test_provider_request_timeout_stays_below_heroku_limit(self):
+        with env(OPENROUTER_API_KEY="or"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
+                providers.analyze_images([self.image])
+        self.assertLessEqual(post.call_args.kwargs["timeout"], 8.0)
+
     def test_mock_provider_response_normalizes(self):
         result = normalize_listing(json.loads(provider_payload()["choices"][0]["message"]["content"]))
         self.assertEqual(result["titleLength"], len(result["title"]))

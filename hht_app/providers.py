@@ -60,7 +60,7 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
     if not images:
         raise ProviderError("At least one image is required.", 400)
     context = context or {}
-    context.setdefault("deadline", time.monotonic() + 24)
+    context.setdefault("deadline", time.monotonic() + 20)
     compact_images = images[:3]
     failures: list[dict[str, str]] = []
     providers = _provider_plan()
@@ -242,4 +242,4 @@ def _request_timeout(context: dict[str, Any]) -> float:
     remaining = _remaining_seconds(context)
     if remaining < 5:
         raise ProviderError("Provider timeout budget exhausted before request.", 504)
-    return min(12.0, max(3.0, remaining - 2.0))
+    return min(8.0, max(3.0, remaining - 2.0))

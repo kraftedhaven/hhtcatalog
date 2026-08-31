@@ -29,6 +29,7 @@ DEMO_MODE=false
 
 Provider priority is OpenRouter, then Gemini, then Groq. `DEMO_MODE=false` is the production default.
 When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
+If Gemini credits are exhausted, unset `GEMINI_API_KEY` so the app skips Gemini instead of spending request time on a provider that cannot answer.
 
 Example commands:
 

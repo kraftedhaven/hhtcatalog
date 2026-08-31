@@ -11,7 +11,12 @@ async function parseResponse(res) {
     const body = contentType.includes('application/json') ? await res.json() : await res.text();
     if (!res.ok) {
         const message = typeof body === 'object' ? body.error : body;
-        throw new Error(message || `Request failed: ${res.status}`);
+        const error = new Error(message || `Request failed: ${res.status}`);
+        if (body && typeof body === 'object') {
+            error.providerFailures = body.providerFailures || [];
+            error.status = res.status;
+        }
+        throw error;
     }
     return body;
 }
