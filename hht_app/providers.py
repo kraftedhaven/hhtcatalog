@@ -32,11 +32,14 @@ sweatshirts/hoodies 155183; men's casual shoes 93427; handbags 169291; backpacks
 169284. Bags need sleeve length, neckline, size, and size type as N/A - bag. Shoes
 need sleeve length and neckline as N/A - footwear. Never claim luxury authentication."""
 
-ZAI_PROMPT = """Inspect the supplied resale item photos and return one JSON object only.
-Use these exact keys: title, price, cid, cnote, cat, brand, size, color, dept, type,
-style, mat, pat, slv, nk, sea, occ, st, vin, desc, notes, madeIn, serialNumber,
-measurements. Use Not visible for missing evidence. Do not guess authenticity,
-brand, size, condition, measurements, material, origin, or serial numbers."""
+ZAI_PROMPT = """Inspect all supplied resale item photos and return one JSON object only.
+Fill these exact keys: title, price, cid, cnote, cat, brand, size, color, dept,
+type, style, mat, pat, slv, nk, sea, occ, st, vin, desc, notes, madeIn,
+serialNumber, measurements. Use close-up labels/tags for brand, size, material,
+origin, serial, and measurements; use Not visible when evidence is missing.
+Set price as a conservative Buy It Now estimate from visible item type, brand,
+condition, and materials only. Do not claim checked sold comps or sold-through
+data. Put pricing uncertainty in notes. Never claim luxury authentication."""
 
 
 class ProviderError(RuntimeError):
@@ -369,7 +372,7 @@ def _prompt(context: dict[str, Any]) -> str:
 def _zai_prompt(context: dict[str, Any]) -> str:
     defaults = context.get("seller_defaults") or {}
     location = defaults.get("location") or "Kettering, Ohio"
-    return f"{ZAI_PROMPT}\nUse eBay category IDs from the existing allowed list. Seller location: {location}. Keep desc under 700 characters."
+    return f"{ZAI_PROMPT}\nUse only supported eBay category IDs. Seller location: {location}. Keep desc under 700 characters."
 
 
 def _demo_listing() -> dict[str, Any]:

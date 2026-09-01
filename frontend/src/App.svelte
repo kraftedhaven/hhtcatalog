@@ -123,8 +123,7 @@
         for (const file of sourceFiles.slice(0, 5)) {
             resized.push(await resizeImage(file));
         }
-        if (resized.length <= 3) return resized;
-        return makeContactSheets(resized);
+        return resized;
     }
 
     function resizeImage(file) {

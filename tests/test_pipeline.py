@@ -143,6 +143,9 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(content[0]["type"], "image_url")
         self.assertTrue(content[0]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
         self.assertEqual(content[-1]["type"], "text")
+        self.assertIn("Buy It Now estimate", content[-1]["text"])
+        self.assertIn("Do not claim checked sold comps", content[-1]["text"])
+        self.assertLess(len(content[-1]["text"]), 1200)
 
     def test_explicit_selection_does_not_call_every_provider(self):
         calls = []
