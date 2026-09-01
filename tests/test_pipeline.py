@@ -37,6 +37,7 @@ class FakeResponse:
 def env(**values):
     keys = [
         "PRIMARY_VISION_PROVIDER", "ZAI_API_KEY", "ZAI_BASE_URL", "ZAI_MODEL",
+        "ANALYZE_DEADLINE_SECONDS", "PROVIDER_REQUEST_TIMEOUT_SECONDS",
         "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_ENVIRONMENT", "EBAY_MARKETPLACE_ID", "EBAY_SITE_ID",
         "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL",
         "GROQ_API_KEY", "GROQ_MODEL", "DEMO_MODE"
@@ -183,7 +184,13 @@ class MergePipelineTests(unittest.TestCase):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 providers.analyze_images([self.image])
-        self.assertLessEqual(post.call_args.kwargs["timeout"], 8.0)
+        self.assertLessEqual(post.call_args.kwargs["timeout"], 24.0)
+
+    def test_provider_request_timeout_can_be_configured(self):
+        with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", PROVIDER_REQUEST_TIMEOUT_SECONDS="12"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
+                providers.analyze_images([self.image])
+        self.assertEqual(post.call_args.kwargs["timeout"], 12.0)
 
     def test_zai_accepts_one_to_five_images(self):
         images = [self.image] * 5

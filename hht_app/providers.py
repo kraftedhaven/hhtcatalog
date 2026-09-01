@@ -18,6 +18,8 @@ ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
 MAX_PROVIDER_IMAGES = 5
 MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
 TRANSIENT_STATUS_CODES = {429, 502, 503}
+DEFAULT_ANALYZE_DEADLINE_SECONDS = 28.0
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 24.0
 
 PROMPT = """You are an eBay listing assistant. Inspect every supplied clothing, shoe, or bag photo.
 Return one concise JSON object only with these keys:
@@ -97,7 +99,7 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
     if len(images) > MAX_PROVIDER_IMAGES:
         raise ProviderError("Upload one to five images.", 400, category="invalid_request")
     context = context or {}
-    context.setdefault("deadline", time.monotonic() + 20)
+    context.setdefault("deadline", time.monotonic() + _env_float("ANALYZE_DEADLINE_SECONDS", DEFAULT_ANALYZE_DEADLINE_SECONDS))
     compact_images = images[:MAX_PROVIDER_IMAGES]
     failures: list[dict[str, Any]] = []
     providers = _provider_plan()
@@ -449,7 +451,15 @@ def _request_timeout(context: dict[str, Any]) -> float:
     remaining = _remaining_seconds(context)
     if remaining < 5:
         raise ProviderError("Provider timeout budget exhausted before request.", 504)
-    return min(8.0, max(3.0, remaining - 2.0))
+    configured = _env_float("PROVIDER_REQUEST_TIMEOUT_SECONDS", DEFAULT_PROVIDER_TIMEOUT_SECONDS)
+    return min(configured, max(3.0, remaining - 2.0))
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return max(1.0, float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _zai_base_url() -> str:
