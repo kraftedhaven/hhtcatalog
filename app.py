@@ -34,14 +34,15 @@ def analyze():
     if not files:
         return jsonify({"error": "No image uploaded. Use multipart form field 'file' with one to five images."}), 400
     try:
-        images = [_uploaded_image(file) for file in files[:5]]
+        images = [_uploaded_image(file) for file in files]
         result = analyze_images(images, {"seller_defaults": _seller_defaults_from_form()})
         return jsonify({"result": result, "provider": result.get("provider"), "demo": result.get("demo", False)})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 415
     except ProviderError as exc:
-        body: dict[str, Any] = {"error": str(exc)}
+        body: dict[str, Any] = {"error": str(exc), "demo": False}
         if exc.failures:
+            body["provider_errors"] = exc.failures
             body["providerFailures"] = exc.failures
         return jsonify(body), exc.status_code
     except Exception:

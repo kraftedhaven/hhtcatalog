@@ -15,9 +15,13 @@ The app binds to `0.0.0.0` and `PORT`.
 
 ## Required Config Vars
 
-Set at least one hosted vision provider in Heroku Config Vars. Do not commit real values.
+Set the hosted vision provider explicitly in Heroku Config Vars. Do not commit real values.
 
 ```text
+PRIMARY_VISION_PROVIDER=zai
+ZAI_API_KEY
+ZAI_BASE_URL=https://api.z.ai/api/paas/v4/
+ZAI_MODEL=glm-4.6v-flash
 OPENROUTER_API_KEY
 OPENROUTER_MODEL
 GEMINI_API_KEY
@@ -27,15 +31,14 @@ GROQ_MODEL
 DEMO_MODE=false
 ```
 
-Provider priority is OpenRouter, then Gemini, then Groq. `DEMO_MODE=false` is the production default.
+`PRIMARY_VISION_PROVIDER=zai` calls only Z.AI and does not fan out to every configured provider. `DEMO_MODE=false` is the production default.
 When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
-If Gemini credits are exhausted, unset `GEMINI_API_KEY` so the app skips Gemini instead of spending request time on a provider that cannot answer.
 
 Example commands:
 
 ```sh
 heroku stack:set container -a hht-catalog-b34ed1b32417
-heroku config:set OPENROUTER_API_KEY=... OPENROUTER_MODEL=openrouter/free DEMO_MODE=false -a hht-catalog-b34ed1b32417
+heroku config:set PRIMARY_VISION_PROVIDER=zai ZAI_API_KEY=... ZAI_BASE_URL=https://api.z.ai/api/paas/v4/ ZAI_MODEL=glm-4.6v-flash DEMO_MODE=false -a hht-catalog-b34ed1b32417
 git push heroku main
 ```
 

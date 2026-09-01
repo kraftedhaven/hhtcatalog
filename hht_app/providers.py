@@ -4,11 +4,19 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
+from PIL import Image, UnidentifiedImageError
 
 from .schema import normalize_listing, parse_model_json
 
+
+ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
+ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
+MAX_PROVIDER_IMAGES = 5
+MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
+TRANSIENT_STATUS_CODES = {429, 502, 503}
 
 PROMPT = """You are an eBay listing assistant. Inspect every supplied clothing, shoe, or bag photo.
 Return one concise JSON object only with these keys:
@@ -24,12 +32,32 @@ sweatshirts/hoodies 155183; men's casual shoes 93427; handbags 169291; backpacks
 169284. Bags need sleeve length, neckline, size, and size type as N/A - bag. Shoes
 need sleeve length and neckline as N/A - footwear. Never claim luxury authentication."""
 
+ZAI_PROMPT = """Inspect the supplied resale item photos and return one JSON object only.
+Use these exact keys: title, price, cid, cnote, cat, brand, size, color, dept, type,
+style, mat, pat, slv, nk, sea, occ, st, vin, desc, notes, madeIn, serialNumber,
+measurements. Use Not visible for missing evidence. Do not guess authenticity,
+brand, size, condition, measurements, material, origin, or serial numbers."""
+
 
 class ProviderError(RuntimeError):
-    def __init__(self, message: str, status_code: int = 502, failures: list[dict[str, str]] | None = None):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        failures: list[dict[str, Any]] | None = None,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        category: str | None = None,
+        retryable: bool = False,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.failures = failures or []
+        self.provider = provider
+        self.model = model
+        self.category = category or _category_for_status(status_code)
+        self.retryable = retryable
 
 
 @dataclass
@@ -46,6 +74,7 @@ class UploadedImage:
 
 def configured_providers() -> dict[str, bool]:
     return {
+        "zai": bool(os.environ.get("ZAI_API_KEY")),
         "openrouter": bool(os.environ.get("OPENROUTER_API_KEY")),
         "gemini": bool(os.environ.get("GEMINI_API_KEY")),
         "groq": bool(os.environ.get("GROQ_API_KEY")),
@@ -59,52 +88,100 @@ def demo_mode() -> bool:
 def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None = None) -> dict[str, Any]:
     if not images:
         raise ProviderError("At least one image is required.", 400)
+    if len(images) > MAX_PROVIDER_IMAGES:
+        raise ProviderError("Upload one to five images.", 400, category="invalid_request")
     context = context or {}
     context.setdefault("deadline", time.monotonic() + 20)
-    compact_images = images[:3]
-    failures: list[dict[str, str]] = []
+    compact_images = images[:MAX_PROVIDER_IMAGES]
+    failures: list[dict[str, Any]] = []
     providers = _provider_plan()
     if not providers:
         if demo_mode():
             return _demo_listing()
         raise ProviderError(
-            "Hosted analysis is not configured. Set OPENROUTER_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY in Heroku Config Vars, or enable DEMO_MODE=true for development only.",
+            "Hosted analysis is not configured. Set PRIMARY_VISION_PROVIDER=zai with ZAI_API_KEY in Heroku Config Vars, or enable DEMO_MODE=true for development only.",
             503,
+            category="configuration",
+            retryable=False,
         )
 
     for name, caller in providers:
         if _remaining_seconds(context) < 5:
-            failures.append({"provider": name, "error": "timeout_budget_exhausted"})
+            failures.append(_failure(name, _model_for_provider(name), 504, "timeout", False))
             continue
         try:
             raw = caller(compact_images, context)
-            result = normalize_listing(parse_model_json(raw))
+            try:
+                parsed = parse_model_json(raw)
+            except ValueError as exc:
+                raise ProviderError(
+                    "Provider returned malformed JSON.",
+                    502,
+                    provider=name,
+                    model=_model_for_provider(name),
+                    category="malformed_json",
+                    retryable=False,
+                ) from exc
+            result = normalize_listing(parsed)
             result["provider"] = name
             result["demo"] = False
             return result
         except ProviderError as exc:
-            failures.append({"provider": name, "error": _safe_error(str(exc))})
-            _log_provider(name, exc.status_code, str(exc))
+            failures.append(_failure(name, exc.model or _model_for_provider(name), exc.status_code, exc.category, exc.retryable))
+            _log_provider(name, exc.status_code, exc.category, exc.retryable)
         except Exception as exc:
-            failures.append({"provider": name, "error": _safe_error(str(exc))})
-            _log_provider(name, 502, str(exc))
+            failures.append(_failure(name, _model_for_provider(name), 502, "provider_error", False))
+            _log_provider(name, 502, "provider_error", False)
 
     if demo_mode():
         demo = _demo_listing()
         demo["providerFailures"] = failures
         return demo
-    raise ProviderError("All configured vision providers failed. No demo listing was generated.", 502, failures)
+    raise ProviderError("Configured vision provider failed. No demo listing was generated.", 502, failures)
 
 
 def _provider_plan():
-    plan = []
-    if os.environ.get("OPENROUTER_API_KEY"):
-        plan.append(("openrouter", _openrouter))
-    if os.environ.get("GEMINI_API_KEY"):
-        plan.append(("gemini", _gemini))
-    if os.environ.get("GROQ_API_KEY"):
-        plan.append(("groq", _groq))
-    return plan
+    selected = os.environ.get("PRIMARY_VISION_PROVIDER", "").strip().lower()
+    callers = {
+        "zai": ("ZAI_API_KEY", _zai),
+        "openrouter": ("OPENROUTER_API_KEY", _openrouter),
+        "gemini": ("GEMINI_API_KEY", _gemini),
+        "groq": ("GROQ_API_KEY", _groq),
+    }
+    if not selected:
+        return []
+    if selected not in callers:
+        raise ProviderError(
+            "Unsupported PRIMARY_VISION_PROVIDER. Set PRIMARY_VISION_PROVIDER=zai.",
+            503,
+            category="configuration",
+        )
+    api_key, caller = callers[selected]
+    return [(selected, caller)] if os.environ.get(api_key) else []
+
+
+def _zai(images: list[UploadedImage], context: dict[str, Any]) -> str:
+    model = _zai_model()
+    if not _looks_like_vision_model(model):
+        raise ProviderError(
+            "Configured Z.AI model does not appear to support vision.",
+            400,
+            provider="zai",
+            model=model,
+            category="non_vision_model",
+            retryable=False,
+        )
+    content = [{"type": "image_url", "image_url": {"url": _compressed_data_url(image)}} for image in images]
+    content.append({"type": "text", "text": _zai_prompt(context)})
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.2,
+        "max_tokens": 1400,
+        "stream": False,
+    }
+    _reject_oversized_zai_payload(content, model)
+    return _post_openai_compatible("zai", model, _zai_chat_url(), os.environ["ZAI_API_KEY"], payload, context)
 
 
 def _openrouter(images: list[UploadedImage], context: dict[str, Any]) -> str:
@@ -178,16 +255,97 @@ def _groq(images: list[UploadedImage], context: dict[str, Any]) -> str:
     return _chat_response(response)
 
 
-def _chat_response(response: requests.Response) -> str:
+def _post_openai_compatible(
+    provider: str,
+    model: str,
+    url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    context: dict[str, Any],
+) -> str:
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            response = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept-Language": "en-US,en",
+                },
+                json=payload,
+                timeout=_request_timeout(context),
+            )
+        except requests.Timeout as exc:
+            raise ProviderError(
+                "Provider request timed out.",
+                504,
+                provider=provider,
+                model=model,
+                category="timeout",
+                retryable=True,
+            ) from exc
+        except requests.RequestException as exc:
+            raise ProviderError(
+                "Provider request failed.",
+                502,
+                provider=provider,
+                model=model,
+                category="transport",
+                retryable=True,
+            ) from exc
+
+        retryable = response.status_code in TRANSIENT_STATUS_CODES
+        if response.status_code >= 400:
+            category = _category_for_status(response.status_code)
+            if attempts == 1 and retryable and _remaining_seconds(context) >= 5:
+                _provider_backoff(attempts)
+                continue
+            raise ProviderError(
+                "Provider returned an error.",
+                response.status_code,
+                provider=provider,
+                model=model,
+                category=category,
+                retryable=retryable,
+            )
+        return _chat_response(response, provider=provider, model=model)
+
+
+def _chat_response(response: requests.Response, provider: str | None = None, model: str | None = None) -> str:
     if response.status_code >= 400:
-        raise ProviderError(f"Provider returned HTTP {response.status_code}", response.status_code)
-    body = response.json()
+        raise ProviderError(
+            "Provider returned an error.",
+            response.status_code,
+            provider=provider,
+            model=model,
+            category=_category_for_status(response.status_code),
+            retryable=response.status_code in TRANSIENT_STATUS_CODES,
+        )
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ProviderError(
+            "Provider returned malformed JSON.",
+            502,
+            provider=provider,
+            model=model,
+            category="malformed_json",
+        ) from exc
     message = body.get("choices", [{}])[0].get("message", {})
     content = message.get("content")
     if isinstance(content, list):
-        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
+        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
     if not content:
-        raise ProviderError("Provider returned no analysis.", 502)
+        raise ProviderError(
+            "Provider returned no analysis.",
+            502,
+            provider=provider,
+            model=model,
+            category="non_vision_model",
+            retryable=False,
+        )
     return content
 
 
@@ -195,6 +353,12 @@ def _prompt(context: dict[str, Any]) -> str:
     defaults = context.get("seller_defaults") or {}
     location = defaults.get("location") or "Kettering, Ohio"
     return f"{PROMPT}\nSeller location for description: {location}. Keep desc under 700 characters."
+
+
+def _zai_prompt(context: dict[str, Any]) -> str:
+    defaults = context.get("seller_defaults") or {}
+    location = defaults.get("location") or "Kettering, Ohio"
+    return f"{ZAI_PROMPT}\nUse eBay category IDs from the existing allowed list. Seller location: {location}. Keep desc under 700 characters."
 
 
 def _demo_listing() -> dict[str, Any]:
@@ -219,19 +383,40 @@ def _demo_listing() -> dict[str, Any]:
     return result
 
 
-def _safe_error(message: str) -> str:
-    lowered = message.lower()
-    if "429" in lowered or "rate" in lowered:
+def _failure(provider: str, model: str, status_code: int, category: str, retryable: bool) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "model": model,
+        "status": status_code,
+        "httpStatus": status_code,
+        "category": category,
+        "retryable": retryable,
+        "message": _safe_provider_message(provider, status_code, category),
+    }
+
+
+def _category_for_status(status_code: int) -> str:
+    if status_code == 401:
+        return "authentication"
+    if status_code == 403:
+        return "permission"
+    if status_code == 404:
+        return "not_found"
+    if status_code == 413:
+        return "payload_too_large"
+    if status_code == 429:
         return "rate_limit"
-    if "401" in lowered or "403" in lowered or "key" in lowered:
-        return "auth_or_permission"
-    if "json" in lowered:
-        return "malformed_json"
+    if status_code == 504:
+        return "timeout"
+    if status_code >= 500:
+        return "server_error"
+    if status_code >= 400:
+        return "request_error"
     return "provider_error"
 
 
-def _log_provider(provider: str, status_code: int, message: str) -> None:
-    print(f"[provider] {provider} status={status_code} category={_safe_error(message)}")
+def _log_provider(provider: str, status_code: int, category: str, retryable: bool) -> None:
+    print(f"[provider] {provider} status={status_code} category={category} retryable={retryable}")
 
 
 def _remaining_seconds(context: dict[str, Any]) -> float:
@@ -243,3 +428,87 @@ def _request_timeout(context: dict[str, Any]) -> float:
     if remaining < 5:
         raise ProviderError("Provider timeout budget exhausted before request.", 504)
     return min(8.0, max(3.0, remaining - 2.0))
+
+
+def _zai_base_url() -> str:
+    return (os.environ.get("ZAI_BASE_URL") or ZAI_DEFAULT_BASE_URL).rstrip("/") + "/"
+
+
+def _zai_chat_url() -> str:
+    base_url = _zai_base_url()
+    if base_url.lower().endswith("chat/completions/"):
+        base_url = base_url[: -len("chat/completions/")]
+    elif base_url.lower().endswith("chat/completions"):
+        base_url = base_url[: -len("chat/completions")]
+    return urljoin(base_url, "chat/completions")
+
+
+def _zai_model() -> str:
+    return os.environ.get("ZAI_MODEL") or ZAI_DEFAULT_MODEL
+
+
+def _model_for_provider(provider: str) -> str:
+    return {
+        "zai": _zai_model(),
+        "openrouter": os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
+        "gemini": os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
+        "groq": os.environ.get("GROQ_MODEL") or "meta-llama/llama-4-scout-17b-16e-instruct",
+    }.get(provider, "")
+
+
+def _looks_like_vision_model(model: str) -> bool:
+    lowered = model.lower()
+    return "vision" in lowered or "vl" in lowered or "4.6v" in lowered or "5v" in lowered
+
+
+def _compressed_data_url(image: UploadedImage) -> str:
+    try:
+        from io import BytesIO
+
+        with Image.open(BytesIO(image.data)) as source:
+            source.thumbnail((1280, 1280))
+            if source.mode not in {"RGB", "L"}:
+                source = source.convert("RGB")
+            out = BytesIO()
+            source.save(out, format="JPEG", quality=82, optimize=True)
+            encoded = base64.b64encode(out.getvalue()).decode("ascii")
+            return f"data:image/jpeg;base64,{encoded}"
+    except (UnidentifiedImageError, OSError, ValueError):
+        return image.data_url
+
+
+def _reject_oversized_zai_payload(content: list[dict[str, Any]], model: str) -> None:
+    size = len(json.dumps({"model": model, "messages": [{"role": "user", "content": content}]}, separators=(",", ":")).encode("utf-8"))
+    if size > MAX_ZAI_REQUEST_BYTES:
+        raise ProviderError(
+            "Compressed image payload is too large.",
+            413,
+            provider="zai",
+            model=model,
+            category="payload_too_large",
+            retryable=False,
+        )
+
+
+def _provider_backoff(attempt: int) -> None:
+    time.sleep(min(0.2, 0.1 * (2 ** max(0, attempt - 1))))
+
+
+def _safe_provider_message(provider: str, status_code: int, category: str) -> str:
+    if provider == "zai" and status_code == 401:
+        return "Z.AI rejected the API key."
+    if provider == "zai" and status_code == 403:
+        return "Z.AI denied access to this model or account."
+    if provider == "zai" and status_code == 404:
+        return "Z.AI endpoint or model was not found."
+    if category == "payload_too_large":
+        return "Image payload is too large after compression."
+    if category == "rate_limit":
+        return "Provider rate limit reached."
+    if category == "timeout":
+        return "Provider request timed out."
+    if category == "malformed_json":
+        return "Provider returned invalid JSON."
+    if category == "non_vision_model":
+        return "Configured model did not return a vision analysis."
+    return "Provider request failed."
