@@ -210,8 +210,9 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["json"]["model"], "custom-vision-4.6v")
 
     def _assert_zai_failure(self, status_code, category, retryable):
+        upstream_payload = {"error": {"code": "1001", "message": "Authentication parameter not received in Header, unable to authenticate"}}
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", DEMO_MODE="false"):
-            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=status_code)) as post:
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=status_code, payload=upstream_payload)) as post:
                 with self.assertRaises(providers.ProviderError) as ctx:
                     providers.analyze_images([self.image])
         failure = ctx.exception.failures[0]
@@ -222,7 +223,9 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(failure["category"], category)
         self.assertEqual(failure["retryable"], retryable)
         self.assertEqual(post.call_count, 2 if retryable else 1)
-        self.assertNotIn("zai", failure["message"].lower().replace("z.ai", ""))
+        if status_code != 413:
+            self.assertIn("code 1001", failure["message"])
+        self.assertNotIn("Authentication parameter not received", failure["message"])
 
     def test_zai_400_failure_is_sanitized(self):
         self._assert_zai_failure(400, "request_error", False)
@@ -299,7 +302,8 @@ class MergePipelineTests(unittest.TestCase):
 
     def test_analyze_returns_sanitized_provider_errors(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="super-secret", DEMO_MODE="false"):
-            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=401)):
+            upstream_payload = {"error": {"code": "1001", "message": "Authentication parameter not received in Header, unable to authenticate"}}
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=401, payload=upstream_payload)):
                 response = self.client.post(
                     "/analyze",
                     data={"file": (io.BytesIO(b"fake"), "photo.jpg")},
@@ -307,10 +311,14 @@ class MergePipelineTests(unittest.TestCase):
                 )
         body = response.get_json()
         self.assertEqual(response.status_code, 502)
+        self.assertEqual(body["error"], "Vision analysis failed")
         self.assertEqual(body["demo"], False)
         self.assertEqual(body["provider_errors"][0]["category"], "authentication")
+        self.assertEqual(body["provider_errors"][0]["message"], "Z.AI authentication failed (code 1001).")
+        self.assertEqual(body["providerFailures"], body["provider_errors"])
         self.assertNotIn("super-secret", response.get_data(as_text=True))
         self.assertNotIn("base64", response.get_data(as_text=True).lower())
+        self.assertNotIn("Authentication parameter not received", response.get_data(as_text=True))
 
     def test_analyze_rejects_more_than_five_images(self):
         data = {"file": [(io.BytesIO(b"fake"), f"photo-{index}.jpg") for index in range(6)]}

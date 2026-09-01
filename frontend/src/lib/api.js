@@ -13,7 +13,7 @@ async function parseResponse(res) {
         const message = typeof body === 'object' ? body.error : body;
         const error = new Error(message || `Request failed: ${res.status}`);
         if (body && typeof body === 'object') {
-            error.providerFailures = body.providerFailures || [];
+            error.providerFailures = body.provider_errors || body.providerFailures || [];
             error.status = res.status;
         }
         throw error;

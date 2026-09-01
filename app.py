@@ -40,7 +40,7 @@ def analyze():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 415
     except ProviderError as exc:
-        body: dict[str, Any] = {"error": str(exc), "demo": False}
+        body: dict[str, Any] = {"error": "Vision analysis failed" if exc.failures else str(exc), "demo": False}
         if exc.failures:
             body["provider_errors"] = exc.failures
             body["providerFailures"] = exc.failures

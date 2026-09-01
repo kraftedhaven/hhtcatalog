@@ -213,17 +213,31 @@
         const failures = err.providerFailures || [];
         if (!failures.length) return err.message || String(err);
         const labels = {
+            authentication: "API key authentication failed",
+            permission: "model or account access problem",
+            not_found: "endpoint or model was not found",
+            payload_too_large: "image upload is too large after compression",
             rate_limit: "rate limit or free model unavailable",
-            auth_or_permission: "key, credits, or model access problem",
+            request_error: "request parameters were rejected",
+            server_error: "provider server error",
             malformed_json: "provider returned unreadable JSON",
+            non_vision_model: "configured model did not return a vision analysis",
+            transport: "provider connection failed",
+            timeout: "provider timed out",
             provider_error: "provider request failed",
-            timeout_budget_exhausted: "skipped to avoid Heroku timeout"
+            timeout_budget_exhausted: "skipped to avoid Heroku timeout",
+            invalid_request: "invalid upload request"
         };
         const lines = failures.map((failure) => {
-            const label = labels[failure.error] || failure.error || "failed";
-            return `${failure.provider}: ${label}`;
+            const category = failure.category || failure.error;
+            const label = failure.message || labels[category] || category || "failed";
+            const status = failure.status || failure.httpStatus;
+            return `${failure.provider}: ${label}${status ? ` (${status})` : ""}`;
         });
-        return `${err.message || "Analysis failed."} ${lines.join("; ")}. No demo data was shown. If Gemini is out of credits, remove GEMINI_API_KEY from Heroku Config Vars.`;
+        const geminiHint = failures.some((failure) => failure.provider === "gemini")
+            ? " If Gemini is out of credits, remove GEMINI_API_KEY from Heroku Config Vars."
+            : "";
+        return `${err.message || "Analysis failed."} ${lines.join("; ")}. No demo data was shown.${geminiHint}`;
     }
 
     function parseModelJSON(raw) {

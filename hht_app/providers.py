@@ -50,6 +50,7 @@ class ProviderError(RuntimeError):
         model: str | None = None,
         category: str | None = None,
         retryable: bool = False,
+        safe_message: str | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
@@ -58,6 +59,7 @@ class ProviderError(RuntimeError):
         self.model = model
         self.category = category or _category_for_status(status_code)
         self.retryable = retryable
+        self.safe_message = safe_message
 
 
 @dataclass
@@ -127,7 +129,14 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
             result["demo"] = False
             return result
         except ProviderError as exc:
-            failures.append(_failure(name, exc.model or _model_for_provider(name), exc.status_code, exc.category, exc.retryable))
+            failures.append(_failure(
+                name,
+                exc.model or _model_for_provider(name),
+                exc.status_code,
+                exc.category,
+                exc.retryable,
+                exc.safe_message,
+            ))
             _log_provider(name, exc.status_code, exc.category, exc.retryable)
         except Exception as exc:
             failures.append(_failure(name, _model_for_provider(name), 502, "provider_error", False))
@@ -302,6 +311,7 @@ def _post_openai_compatible(
             if attempts == 1 and retryable and _remaining_seconds(context) >= 5:
                 _provider_backoff(attempts)
                 continue
+            upstream_error = _upstream_error_info(response)
             raise ProviderError(
                 "Provider returned an error.",
                 response.status_code,
@@ -309,6 +319,7 @@ def _post_openai_compatible(
                 model=model,
                 category=category,
                 retryable=retryable,
+                safe_message=_safe_provider_message(provider, response.status_code, category, upstream_error),
             )
         return _chat_response(response, provider=provider, model=model)
 
@@ -383,7 +394,14 @@ def _demo_listing() -> dict[str, Any]:
     return result
 
 
-def _failure(provider: str, model: str, status_code: int, category: str, retryable: bool) -> dict[str, Any]:
+def _failure(
+    provider: str,
+    model: str,
+    status_code: int,
+    category: str,
+    retryable: bool,
+    safe_message: str | None = None,
+) -> dict[str, Any]:
     return {
         "provider": provider,
         "model": model,
@@ -391,7 +409,7 @@ def _failure(provider: str, model: str, status_code: int, category: str, retryab
         "httpStatus": status_code,
         "category": category,
         "retryable": retryable,
-        "message": _safe_provider_message(provider, status_code, category),
+        "message": safe_message or _safe_provider_message(provider, status_code, category),
     }
 
 
@@ -494,21 +512,48 @@ def _provider_backoff(attempt: int) -> None:
     time.sleep(min(0.2, 0.1 * (2 ** max(0, attempt - 1))))
 
 
-def _safe_provider_message(provider: str, status_code: int, category: str) -> str:
+def _upstream_error_info(response: requests.Response) -> dict[str, str]:
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return {}
+    info: dict[str, str] = {}
+    code = error.get("code")
+    if code is not None:
+        info["code"] = str(code)[:32]
+    message = error.get("message")
+    if message is not None:
+        info["message"] = str(message)[:160]
+    return info
+
+
+def _safe_provider_message(
+    provider: str,
+    status_code: int,
+    category: str,
+    upstream_error: dict[str, str] | None = None,
+) -> str:
+    upstream_error = upstream_error or {}
+    suffix = f" (code {upstream_error['code']})." if upstream_error.get("code") else "."
     if provider == "zai" and status_code == 401:
-        return "Z.AI rejected the API key."
+        return f"Z.AI authentication failed{suffix}"
     if provider == "zai" and status_code == 403:
-        return "Z.AI denied access to this model or account."
+        return f"Z.AI denied access to this model or account{suffix}"
     if provider == "zai" and status_code == 404:
-        return "Z.AI endpoint or model was not found."
+        return f"Z.AI endpoint or model was not found{suffix}"
+    if provider == "zai" and status_code == 400:
+        return f"Z.AI rejected the request parameters{suffix}"
     if category == "payload_too_large":
         return "Image payload is too large after compression."
     if category == "rate_limit":
-        return "Provider rate limit reached."
+        return f"Provider rate limit reached{suffix}"
     if category == "timeout":
         return "Provider request timed out."
     if category == "malformed_json":
         return "Provider returned invalid JSON."
     if category == "non_vision_model":
         return "Configured model did not return a vision analysis."
-    return "Provider request failed."
+    return f"Provider request failed{suffix}"
