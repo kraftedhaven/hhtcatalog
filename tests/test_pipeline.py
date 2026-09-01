@@ -11,7 +11,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app
 from hht_app import providers
-from hht_app.pricing import comp_search_keywords, enrich_with_pricing_comps
+from hht_app.ebay_pricing import (
+    active_listing_keywords,
+    clear_token_cache,
+    ebay_access_token,
+    enrich_with_ebay_active_pricing,
+)
 from hht_app.providers import UploadedImage
 from hht_app.schema import HEADERS, export_ebay_csv, fit_title, normalize_listing
 
@@ -32,7 +37,7 @@ class FakeResponse:
 def env(**values):
     keys = [
         "PRIMARY_VISION_PROVIDER", "ZAI_API_KEY", "ZAI_BASE_URL", "ZAI_MODEL",
-        "COMPSNIPER_API_KEY", "COMPSNIPER_BASE_URL", "COMPS_EBAY_SITE",
+        "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_ENVIRONMENT", "EBAY_MARKETPLACE_ID", "EBAY_SITE_ID",
         "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL",
         "GROQ_API_KEY", "GROQ_MODEL", "DEMO_MODE"
     ]
@@ -86,6 +91,7 @@ class MergePipelineTests(unittest.TestCase):
     def setUp(self):
         self.client = app.app.test_client()
         self.image = UploadedImage(b"fake image data", "image/jpeg", "test.jpg")
+        clear_token_cache()
 
     def test_health_is_safe(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="secret"):
@@ -148,8 +154,8 @@ class MergePipelineTests(unittest.TestCase):
         self.assertIn("Buy It Now estimate", content[-1]["text"])
         self.assertIn("Do not claim checked sold comps", content[-1]["text"])
         self.assertLess(len(content[-1]["text"]), 1200)
-        self.assertEqual(result["pricingSource"], "photo_estimate")
-        self.assertEqual(result["compSearchKeywords"], "Levi's Jacket L Cotton Trucker")
+        self.assertEqual(result["pricingSource"], "ai_estimate")
+        self.assertEqual(result["pricingSearchKeywords"], "Levi's Jacket L Cotton Trucker")
 
     def test_explicit_selection_does_not_call_every_provider(self):
         calls = []
@@ -339,7 +345,7 @@ class MergePipelineTests(unittest.TestCase):
         self.assertLessEqual(len(result["title"]), 80)
         self.assertEqual(result["brand"], "Levi's")
 
-    def test_comp_keywords_use_brand_type_size_material_style(self):
+    def test_active_listing_keywords_use_brand_type_size_material_style(self):
         listing = normalize_listing({
             "brand": "Patagonia",
             "type": "Fleece Jacket",
@@ -347,9 +353,31 @@ class MergePipelineTests(unittest.TestCase):
             "mat": "Polyester",
             "style": "Full Zip",
         })
-        self.assertEqual(comp_search_keywords(listing), "Patagonia Fleece Jacket M Polyester Full Zip")
+        self.assertEqual(active_listing_keywords(listing), "Patagonia Fleece Jacket M Polyester Full Zip")
 
-    def test_pricing_comps_sets_price_from_real_sold_median(self):
+    def test_ebay_token_success_is_cached(self):
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret"):
+            token_response = FakeResponse(payload={"access_token": "token-1", "expires_in": 7200})
+            with mock.patch("hht_app.ebay_pricing.requests.post", return_value=token_response) as post:
+                first = ebay_access_token()
+                second = ebay_access_token()
+        self.assertEqual(first, "token-1")
+        self.assertEqual(second, "token-1")
+        self.assertEqual(post.call_count, 1)
+        self.assertTrue(post.call_args.kwargs["headers"]["Authorization"].startswith("Basic "))
+
+    def test_ebay_token_failure_is_sanitized(self):
+        with env(EBAY_CLIENT_ID="real-client-id", EBAY_CLIENT_SECRET="real-secret"):
+            with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(status_code=401, payload={"error": "invalid_client"})):
+                result = enrich_with_ebay_active_pricing(normalize_listing({"brand": "Nike", "type": "Shoes", "size": "9", "price": 25}))
+        self.assertEqual(result["pricingSource"], "ai_estimate")
+        self.assertEqual(result["pricingError"]["provider"], "ebay_browse")
+        self.assertEqual(result["pricingError"]["category"], "authentication")
+        self.assertNotIn("real-client-id", json.dumps(result))
+        self.assertNotIn("real-secret", json.dumps(result))
+        self.assertNotIn("Basic ", json.dumps(result))
+
+    def test_ebay_browse_price_range_sets_active_listing_estimate(self):
         listing = normalize_listing({
             "title": "Patagonia Fleece Jacket",
             "brand": "Patagonia",
@@ -361,24 +389,27 @@ class MergePipelineTests(unittest.TestCase):
             "cid": "3000",
             "cat": "57988",
         })
-        payload = {
-            "items": [
-                {"soldPrice": "29.99", "bestOfferAccepted": False},
-                {"soldPrice": "35.00", "bestOfferAccepted": False},
-                {"soldPrice": "41.00", "bestOfferAccepted": False},
-                {"soldPrice": "100.00", "bestOfferAccepted": True},
+        browse_payload = {
+            "itemSummaries": [
+                {"categoryId": "57988", "price": {"value": "29.99", "currency": "USD"}},
+                {"categoryId": "57988", "price": {"value": "35.00", "currency": "USD"}},
+                {"categoryId": "57988", "price": {"value": "41.00", "currency": "USD"}},
             ]
         }
-        with env(COMPSNIPER_API_KEY="cs_secret"):
-            with mock.patch("hht_app.pricing.requests.get", return_value=FakeResponse(payload=payload)) as get:
-                result = enrich_with_pricing_comps(listing)
-        self.assertEqual(result["pricingSource"], "sold_comps")
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret"):
+            with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(payload={"access_token": "token", "expires_in": 7200})):
+                with mock.patch("hht_app.ebay_pricing.requests.get", return_value=FakeResponse(payload=browse_payload)) as get:
+                    result = enrich_with_ebay_active_pricing(listing)
+        self.assertEqual(result["pricingSource"], "active_listing_estimate")
         self.assertEqual(result["price"], 35.00)
-        self.assertEqual(result["pricingComps"]["sampleSize"], 3)
-        self.assertEqual(get.call_args.kwargs["headers"]["Authorization"], "Bearer cs_secret")
-        self.assertEqual(get.call_args.kwargs["params"]["keyword"], "Patagonia Fleece Jacket M Polyester Full Zip")
+        self.assertEqual(result["activeListingEstimate"]["lowActivePrice"], 29.99)
+        self.assertEqual(result["activeListingEstimate"]["highActivePrice"], 41.00)
+        self.assertEqual(result["activeListingEstimate"]["sampleSize"], 3)
+        self.assertEqual(get.call_args.kwargs["headers"]["Authorization"], "Bearer token")
+        self.assertEqual(get.call_args.kwargs["params"]["q"], "Patagonia Fleece Jacket M Polyester Full Zip")
+        self.assertEqual(get.call_args.kwargs["params"]["category_ids"], "57988")
 
-    def test_pricing_comps_falls_back_without_key(self):
+    def test_ebay_browse_falls_back_without_credentials(self):
         listing = normalize_listing({
             "brand": "Patagonia",
             "type": "Fleece Jacket",
@@ -388,10 +419,98 @@ class MergePipelineTests(unittest.TestCase):
             "price": 20,
         })
         with env():
-            result = enrich_with_pricing_comps(listing)
-        self.assertEqual(result["pricingSource"], "photo_estimate")
+            result = enrich_with_ebay_active_pricing(listing)
+        self.assertEqual(result["pricingSource"], "ai_estimate")
         self.assertEqual(result["price"], 20)
-        self.assertIn("Search sold comps before listing", result["notes"])
+        self.assertIn("Search active eBay listings", result["notes"])
+
+    def _assert_ebay_browse_failure(self, status_code, category):
+        listing = normalize_listing({
+            "brand": "Patagonia",
+            "type": "Fleece Jacket",
+            "size": "M",
+            "mat": "Polyester",
+            "style": "Full Zip",
+            "price": 20,
+        })
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret"):
+            with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(payload={"access_token": "token", "expires_in": 7200})):
+                with mock.patch("hht_app.ebay_pricing.requests.get", return_value=FakeResponse(status_code=status_code, payload={"errors": [{"errorId": 12345}]})):
+                    result = enrich_with_ebay_active_pricing(listing)
+        self.assertEqual(result["pricingSource"], "ai_estimate")
+        self.assertEqual(result["price"], 20)
+        self.assertEqual(result["pricingError"]["provider"], "ebay_browse")
+        self.assertEqual(result["pricingError"]["status"], status_code)
+        self.assertEqual(result["pricingError"]["category"], category)
+        self.assertEqual(result["pricingError"]["code"], "12345")
+
+    def test_ebay_browse_401_falls_back_to_ai_estimate(self):
+        self._assert_ebay_browse_failure(401, "authentication")
+
+    def test_ebay_browse_403_falls_back_to_ai_estimate(self):
+        self._assert_ebay_browse_failure(403, "authentication")
+
+    def test_ebay_browse_429_falls_back_to_ai_estimate(self):
+        self._assert_ebay_browse_failure(429, "rate_limit")
+
+    def test_ebay_browse_500_falls_back_to_ai_estimate(self):
+        self._assert_ebay_browse_failure(500, "server_error")
+
+    def test_ebay_browse_empty_results_keeps_ai_estimate(self):
+        listing = normalize_listing({"brand": "Patagonia", "type": "Fleece Jacket", "size": "M", "price": 20})
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret"):
+            with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(payload={"access_token": "token", "expires_in": 7200})):
+                with mock.patch("hht_app.ebay_pricing.requests.get", return_value=FakeResponse(payload={"itemSummaries": []})):
+                    result = enrich_with_ebay_active_pricing(listing)
+        self.assertEqual(result["pricingSource"], "ai_estimate")
+        self.assertEqual(result["activeListingEstimate"]["sampleSize"], 0)
+        self.assertEqual(result["price"], 20)
+
+    def test_ebay_browse_malformed_results_keeps_ai_estimate(self):
+        listing = normalize_listing({"brand": "Patagonia", "type": "Fleece Jacket", "size": "M", "price": 20})
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret"):
+            with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(payload={"access_token": "token", "expires_in": 7200})):
+                with mock.patch("hht_app.ebay_pricing.requests.get", return_value=FakeResponse(payload={"bad": []})):
+                    result = enrich_with_ebay_active_pricing(listing)
+        self.assertEqual(result["pricingSource"], "ai_estimate")
+        self.assertEqual(result["pricingError"]["category"], "malformed_json")
+
+    def test_ebay_browse_mismatched_category_is_ignored(self):
+        listing = normalize_listing({"brand": "Patagonia", "type": "Fleece Jacket", "size": "M", "price": 20, "cat": "57988"})
+        browse_payload = {"itemSummaries": [{"categoryId": "15687", "price": {"value": "99.00", "currency": "USD"}}]}
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret"):
+            with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(payload={"access_token": "token", "expires_in": 7200})):
+                with mock.patch("hht_app.ebay_pricing.requests.get", return_value=FakeResponse(payload=browse_payload)):
+                    result = enrich_with_ebay_active_pricing(listing)
+        self.assertEqual(result["pricingSource"], "ai_estimate")
+        self.assertEqual(result["activeListingEstimate"]["sampleSize"], 0)
+        self.assertEqual(result["price"], 20)
+
+    def test_ebay_browse_does_not_overwrite_seller_edited_price(self):
+        listing = normalize_listing({
+            "brand": "Patagonia",
+            "type": "Fleece Jacket",
+            "size": "M",
+            "mat": "Polyester",
+            "style": "Full Zip",
+            "price": 50,
+            "cat": "57988",
+        })
+        listing["sellerEditedPrice"] = True
+        browse_payload = {
+            "itemSummaries": [
+                {"categoryId": "57988", "price": {"value": "29.99", "currency": "USD"}},
+                {"categoryId": "57988", "price": {"value": "35.00", "currency": "USD"}},
+                {"categoryId": "57988", "price": {"value": "41.00", "currency": "USD"}},
+            ]
+        }
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret"):
+            with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(payload={"access_token": "token", "expires_in": 7200})):
+                with mock.patch("hht_app.ebay_pricing.requests.get", return_value=FakeResponse(payload=browse_payload)):
+                    result = enrich_with_ebay_active_pricing(listing)
+        self.assertEqual(result["pricingSource"], "seller_price")
+        self.assertEqual(result["price"], 50)
+        self.assertEqual(result["activeListingEstimate"]["sampleSize"], 3)
 
     def test_bag_rules(self):
         result = normalize_listing({"title": "Coach Tote", "brand": "Coach", "type": "Tote", "cat": "169291"})

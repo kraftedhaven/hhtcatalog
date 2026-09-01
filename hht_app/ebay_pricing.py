@@ -41,6 +41,12 @@ def enrich_with_ebay_active_pricing(listing: dict[str, Any], timeout: float = 5.
         result["notes"] = _append_note(result.get("notes"), f"Only {summary['sampleSize']} matching active eBay listings found for '{keywords}'. AI price estimate kept.")
         return result
 
+    if result.get("sellerEditedPrice") is True:
+        result["pricingSource"] = "seller_price"
+        result["activeListingEstimate"] = summary
+        result["notes"] = _append_note(result.get("notes"), f"Seller price kept. Active eBay listings for '{keywords}' range ${summary['lowActivePrice']:.2f}-${summary['highActivePrice']:.2f}.")
+        return result
+
     result["price"] = summary["medianActivePrice"]
     result["pricingSource"] = "active_listing_estimate"
     result["activeListingEstimate"] = summary
@@ -157,15 +163,15 @@ def _browse_params(listing: dict[str, Any], keywords: str) -> dict[str, str]:
     if filters:
         params["filter"] = ",".join(filters)
 
-    aspect_filters = []
+    aspects = []
     brand = _clean_aspect(listing.get("brand"))
     if category and brand:
-        aspect_filters.append(f"categoryId:{category},Brand:{{{brand}}}")
+        aspects.append(f"Brand:{{{brand}}}")
     size = _clean_aspect(listing.get("size"))
     if category and size:
-        aspect_filters.append(f"categoryId:{category},Size:{{{size}}}")
-    if aspect_filters:
-        params["aspect_filter"] = ",".join(aspect_filters)
+        aspects.append(f"Size:{{{size}}}")
+    if category and aspects:
+        params["aspect_filter"] = ",".join([f"categoryId:{category}", *aspects])
     return params
 
 
@@ -173,7 +179,8 @@ def _active_listing_price(item: Any, expected_category: str) -> float | None:
     if not isinstance(item, dict):
         return None
     if expected_category:
-        item_category = str(item.get("categoryId") or item.get("leafCategoryIds", [""])[0] if item.get("leafCategoryIds") else "")
+        leaf_categories = item.get("leafCategoryIds") if isinstance(item.get("leafCategoryIds"), list) else []
+        item_category = str(item.get("categoryId") or (leaf_categories[0] if leaf_categories else ""))
         if item_category and item_category != expected_category:
             return None
     price = item.get("price") or {}

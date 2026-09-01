@@ -22,9 +22,11 @@ PRIMARY_VISION_PROVIDER=zai
 ZAI_API_KEY
 ZAI_BASE_URL=https://api.z.ai/api/paas/v4/
 ZAI_MODEL=glm-4.6v-flash
-COMPSNIPER_API_KEY
-COMPSNIPER_BASE_URL=https://api.compsniper.com/
-COMPS_EBAY_SITE=ebay.com
+EBAY_CLIENT_ID
+EBAY_CLIENT_SECRET
+EBAY_ENVIRONMENT=production
+EBAY_MARKETPLACE_ID=EBAY_US
+EBAY_SITE_ID=0
 OPENROUTER_API_KEY
 OPENROUTER_MODEL
 GEMINI_API_KEY
@@ -36,13 +38,13 @@ DEMO_MODE=false
 
 `PRIMARY_VISION_PROVIDER=zai` calls only Z.AI and does not fan out to every configured provider. `DEMO_MODE=false` is the production default.
 When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
-`COMPSNIPER_API_KEY` is optional. When present, `/analyze` uses generated item keywords to fetch real sold comps and set price from the median exact sold price. Without it, the app returns generated comp-search keywords and keeps the photo-based estimate for seller review.
+Official eBay Browse pricing is optional. When `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` are present, `/analyze` uses generated item keywords to fetch active eBay listings and labels the result `active_listing_estimate`. These are active listings, not sold comps. Without Browse access, the app keeps the Z.AI `ai_estimate`.
 
 Example commands:
 
 ```sh
 heroku stack:set container -a hht-catalog-b34ed1b32417
-heroku config:set PRIMARY_VISION_PROVIDER=zai ZAI_API_KEY=... ZAI_BASE_URL=https://api.z.ai/api/paas/v4/ ZAI_MODEL=glm-4.6v-flash COMPSNIPER_API_KEY=... DEMO_MODE=false -a hht-catalog-b34ed1b32417
+heroku config:set PRIMARY_VISION_PROVIDER=zai ZAI_API_KEY=... ZAI_BASE_URL=https://api.z.ai/api/paas/v4/ ZAI_MODEL=glm-4.6v-flash EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... EBAY_ENVIRONMENT=production EBAY_MARKETPLACE_ID=EBAY_US EBAY_SITE_ID=0 DEMO_MODE=false -a hht-catalog-b34ed1b32417
 git push heroku main
 ```
 
