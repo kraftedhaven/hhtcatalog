@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app
 from hht_app import providers
+from hht_app.pricing import comp_search_keywords, enrich_with_pricing_comps
 from hht_app.providers import UploadedImage
 from hht_app.schema import HEADERS, export_ebay_csv, fit_title, normalize_listing
 
@@ -31,6 +32,7 @@ class FakeResponse:
 def env(**values):
     keys = [
         "PRIMARY_VISION_PROVIDER", "ZAI_API_KEY", "ZAI_BASE_URL", "ZAI_MODEL",
+        "COMPSNIPER_API_KEY", "COMPSNIPER_BASE_URL", "COMPS_EBAY_SITE",
         "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL",
         "GROQ_API_KEY", "GROQ_MODEL", "DEMO_MODE"
     ]
@@ -146,6 +148,8 @@ class MergePipelineTests(unittest.TestCase):
         self.assertIn("Buy It Now estimate", content[-1]["text"])
         self.assertIn("Do not claim checked sold comps", content[-1]["text"])
         self.assertLess(len(content[-1]["text"]), 1200)
+        self.assertEqual(result["pricingSource"], "photo_estimate")
+        self.assertEqual(result["compSearchKeywords"], "Levi's Jacket L Cotton Trucker")
 
     def test_explicit_selection_does_not_call_every_provider(self):
         calls = []
@@ -334,6 +338,60 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(result["titleLength"], len(result["title"]))
         self.assertLessEqual(len(result["title"]), 80)
         self.assertEqual(result["brand"], "Levi's")
+
+    def test_comp_keywords_use_brand_type_size_material_style(self):
+        listing = normalize_listing({
+            "brand": "Patagonia",
+            "type": "Fleece Jacket",
+            "size": "M",
+            "mat": "Polyester",
+            "style": "Full Zip",
+        })
+        self.assertEqual(comp_search_keywords(listing), "Patagonia Fleece Jacket M Polyester Full Zip")
+
+    def test_pricing_comps_sets_price_from_real_sold_median(self):
+        listing = normalize_listing({
+            "title": "Patagonia Fleece Jacket",
+            "brand": "Patagonia",
+            "type": "Fleece Jacket",
+            "size": "M",
+            "mat": "Polyester",
+            "style": "Full Zip",
+            "price": 20,
+            "cid": "3000",
+            "cat": "57988",
+        })
+        payload = {
+            "items": [
+                {"soldPrice": "29.99", "bestOfferAccepted": False},
+                {"soldPrice": "35.00", "bestOfferAccepted": False},
+                {"soldPrice": "41.00", "bestOfferAccepted": False},
+                {"soldPrice": "100.00", "bestOfferAccepted": True},
+            ]
+        }
+        with env(COMPSNIPER_API_KEY="cs_secret"):
+            with mock.patch("hht_app.pricing.requests.get", return_value=FakeResponse(payload=payload)) as get:
+                result = enrich_with_pricing_comps(listing)
+        self.assertEqual(result["pricingSource"], "sold_comps")
+        self.assertEqual(result["price"], 35.00)
+        self.assertEqual(result["pricingComps"]["sampleSize"], 3)
+        self.assertEqual(get.call_args.kwargs["headers"]["Authorization"], "Bearer cs_secret")
+        self.assertEqual(get.call_args.kwargs["params"]["keyword"], "Patagonia Fleece Jacket M Polyester Full Zip")
+
+    def test_pricing_comps_falls_back_without_key(self):
+        listing = normalize_listing({
+            "brand": "Patagonia",
+            "type": "Fleece Jacket",
+            "size": "M",
+            "mat": "Polyester",
+            "style": "Full Zip",
+            "price": 20,
+        })
+        with env():
+            result = enrich_with_pricing_comps(listing)
+        self.assertEqual(result["pricingSource"], "photo_estimate")
+        self.assertEqual(result["price"], 20)
+        self.assertIn("Search sold comps before listing", result["notes"])
 
     def test_bag_rules(self):
         result = normalize_listing({"title": "Coach Tote", "brand": "Coach", "type": "Tote", "cat": "169291"})

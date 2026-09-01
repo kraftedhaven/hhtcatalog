@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 import requests
 from PIL import Image, UnidentifiedImageError
 
+from .pricing import enrich_with_pricing_comps
 from .schema import normalize_listing, parse_model_json
 
 
@@ -127,7 +128,7 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
                     category="malformed_json",
                     retryable=False,
                 ) from exc
-            result = normalize_listing(parsed)
+            result = enrich_with_pricing_comps(normalize_listing(parsed), timeout=min(5.0, _request_timeout(context)))
             result["provider"] = name
             result["demo"] = False
             return result
