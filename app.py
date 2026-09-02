@@ -11,7 +11,11 @@ from hht_app.schema import HEADERS, export_ebay_csv, normalize_listing
 
 PORT = int(os.environ.get("PORT", 8080))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10"))
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+HEIC_IMAGE_TYPES = {"image/heic", "image/heif"}
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", *HEIC_IMAGE_TYPES}
+
+mimetypes.add_type("image/heic", ".heic")
+mimetypes.add_type("image/heif", ".heif")
 
 app = Flask(__name__, static_folder="frontend/dist", static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
@@ -121,7 +125,7 @@ def _request_files():
 def _uploaded_image(file) -> UploadedImage:
     mime_type = _mime_type(file)
     if mime_type not in ALLOWED_IMAGE_TYPES:
-        raise ValueError(f"Unsupported file type '{file.content_type or file.filename}'. Upload JPEG, PNG, WebP, or GIF.")
+        raise ValueError(f"Unsupported file type '{file.content_type or file.filename}'. Upload JPEG, PNG, WebP, GIF, or HEIC.")
     data = file.read()
     if not data:
         raise ValueError("Empty image upload.")

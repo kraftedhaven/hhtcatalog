@@ -117,6 +117,23 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(response.status_code, 415)
         self.assertIn("Unsupported file type", response.get_json()["error"])
 
+    def test_analyze_accepts_iphone_heic_by_filename(self):
+        captured = []
+
+        def fake_analyze(images, _context):
+            captured.extend(images)
+            return {"provider": "zai", "demo": False, "title": "HEIC Item"}
+
+        with mock.patch.object(app, "analyze_images", side_effect=fake_analyze):
+            response = self.client.post(
+                "/analyze",
+                data={"file": (io.BytesIO(b"heic bytes"), "IMG_1001.HEIC")},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured[0].mime_type, "image/heic")
+        self.assertEqual(captured[0].filename, "IMG_1001.HEIC")
+
     def test_analyze_rejects_oversized_file(self):
         original_limit = app.app.config["MAX_CONTENT_LENGTH"]
         app.app.config["MAX_CONTENT_LENGTH"] = 4
@@ -146,7 +163,8 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["headers"]["Authorization"], "Bearer zai-key")
         self.assertNotIn("zai-key", json.dumps(calls[0][1]["json"]))
         self.assertEqual(calls[0][1]["json"]["model"], "glm-4.6v-flash")
-        self.assertEqual(calls[0][1]["json"]["temperature"], 0.2)
+        self.assertEqual(calls[0][1]["json"]["temperature"], 0.1)
+        self.assertEqual(calls[0][1]["json"]["max_tokens"], 1000)
         self.assertNotIn("thinking", calls[0][1]["json"])
         content = calls[0][1]["json"]["messages"][0]["content"]
         self.assertEqual(content[0]["type"], "image_url")
@@ -184,13 +202,19 @@ class MergePipelineTests(unittest.TestCase):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 providers.analyze_images([self.image])
-        self.assertLessEqual(post.call_args.kwargs["timeout"], 24.0)
+        self.assertLessEqual(post.call_args.kwargs["timeout"], 18.0)
 
     def test_provider_request_timeout_can_be_configured(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", PROVIDER_REQUEST_TIMEOUT_SECONDS="12"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 providers.analyze_images([self.image])
         self.assertEqual(post.call_args.kwargs["timeout"], 12.0)
+
+    def test_provider_request_timeout_caps_old_high_config(self):
+        with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", PROVIDER_REQUEST_TIMEOUT_SECONDS="24"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
+                providers.analyze_images([self.image])
+        self.assertLessEqual(post.call_args.kwargs["timeout"], 18.0)
 
     def test_zai_accepts_one_to_five_images(self):
         images = [self.image] * 5
@@ -303,14 +327,14 @@ class MergePipelineTests(unittest.TestCase):
                     providers.analyze_images([self.image])
         self.assertEqual(ctx.exception.failures[0]["category"], "non_vision_model")
 
-    def test_zai_timeout_failure_does_not_auto_retry(self):
+    def test_zai_timeout_retries_once_with_smaller_images(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
             with mock.patch.object(providers.requests, "post", side_effect=providers.requests.Timeout) as post:
                 with self.assertRaises(providers.ProviderError) as ctx:
                     providers.analyze_images([self.image])
         self.assertEqual(ctx.exception.failures[0]["category"], "timeout")
         self.assertEqual(ctx.exception.failures[0]["retryable"], True)
-        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_count, 2)
 
     def test_zai_non_vision_model_response_is_sanitized(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", ZAI_MODEL="glm-4.6"):

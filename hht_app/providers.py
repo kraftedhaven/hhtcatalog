@@ -13,13 +13,29 @@ from .ebay_pricing import enrich_with_ebay_active_pricing
 from .schema import normalize_listing, parse_model_json
 
 
+def _register_heic_support() -> bool:
+    try:
+        from pillow_heif import register_heif_opener
+    except ImportError:
+        return False
+    register_heif_opener()
+    return True
+
+
+HEIC_SUPPORT_ENABLED = _register_heic_support()
+
+
 ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
 MAX_PROVIDER_IMAGES = 5
 MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
 TRANSIENT_STATUS_CODES = {429, 502, 503}
 DEFAULT_ANALYZE_DEADLINE_SECONDS = 28.0
-DEFAULT_PROVIDER_TIMEOUT_SECONDS = 24.0
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 18.0
+ZAI_IMAGE_MAX_EDGE = 896
+ZAI_IMAGE_RETRY_MAX_EDGE = 640
+ZAI_IMAGE_QUALITY = 72
+ZAI_IMAGE_RETRY_QUALITY = 64
 
 PROMPT = """You are an eBay listing assistant. Inspect every supplied clothing, shoe, or bag photo.
 Return one concise JSON object only with these keys:
@@ -186,13 +202,23 @@ def _zai(images: list[UploadedImage], context: dict[str, Any]) -> str:
             category="non_vision_model",
             retryable=False,
         )
-    content = [{"type": "image_url", "image_url": {"url": _compressed_data_url(image)}} for image in images]
+    try:
+        return _zai_once(images, context, model, ZAI_IMAGE_MAX_EDGE, ZAI_IMAGE_QUALITY)
+    except ProviderError as exc:
+        if exc.category != "timeout" or _remaining_seconds(context) < 8:
+            raise
+        print(f"[provider] zai retrying timeout with smaller images model={model}")
+        return _zai_once(images, context, model, ZAI_IMAGE_RETRY_MAX_EDGE, ZAI_IMAGE_RETRY_QUALITY)
+
+
+def _zai_once(images: list[UploadedImage], context: dict[str, Any], model: str, max_edge: int, quality: int) -> str:
+    content = [{"type": "image_url", "image_url": {"url": _compressed_data_url(image, max_edge, quality)}} for image in images]
     content.append({"type": "text", "text": _zai_prompt(context)})
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
-        "temperature": 0.2,
-        "max_tokens": 1400,
+        "temperature": 0.1,
+        "max_tokens": 1000,
         "stream": False,
     }
     _reject_oversized_zai_payload(content, model)
@@ -452,7 +478,7 @@ def _request_timeout(context: dict[str, Any]) -> float:
     if remaining < 5:
         raise ProviderError("Provider timeout budget exhausted before request.", 504)
     configured = _env_float("PROVIDER_REQUEST_TIMEOUT_SECONDS", DEFAULT_PROVIDER_TIMEOUT_SECONDS)
-    return min(configured, max(3.0, remaining - 2.0))
+    return min(configured, DEFAULT_PROVIDER_TIMEOUT_SECONDS, max(3.0, remaining - 4.0))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -493,16 +519,16 @@ def _looks_like_vision_model(model: str) -> bool:
     return "vision" in lowered or "vl" in lowered or "4.6v" in lowered or "5v" in lowered
 
 
-def _compressed_data_url(image: UploadedImage) -> str:
+def _compressed_data_url(image: UploadedImage, max_edge: int = ZAI_IMAGE_MAX_EDGE, quality: int = ZAI_IMAGE_QUALITY) -> str:
     try:
         from io import BytesIO
 
         with Image.open(BytesIO(image.data)) as source:
-            source.thumbnail((1280, 1280))
+            source.thumbnail((max_edge, max_edge))
             if source.mode not in {"RGB", "L"}:
                 source = source.convert("RGB")
             out = BytesIO()
-            source.save(out, format="JPEG", quality=82, optimize=True)
+            source.save(out, format="JPEG", quality=quality, optimize=True)
             encoded = base64.b64encode(out.getvalue()).decode("ascii")
             return f"data:image/jpeg;base64,{encoded}"
     except (UnidentifiedImageError, OSError, ValueError):

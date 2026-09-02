@@ -5,3 +5,4 @@ appwrite
 boto3
 gunicorn
 Pillow
+pillow-heif
