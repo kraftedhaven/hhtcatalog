@@ -15,16 +15,21 @@ async function parseResponse(res) {
         if (body && typeof body === 'object') {
             error.providerFailures = body.provider_errors || body.providerFailures || [];
             error.status = res.status;
+            error.retryAfterSeconds = body.retry_after_seconds || body.retryAfterSeconds || null;
+            error.canTryAlternate = Boolean(body.can_try_alternate || body.canTryAlternate);
+            error.alternateProvider = body.alternate_provider || body.alternateProvider || '';
+            error.allProvidersUnavailable = Boolean(body.all_providers_unavailable || body.allProvidersUnavailable);
         }
         throw error;
     }
     return body;
 }
 
-export async function analyzeImages(files, sellerDefaults = {}) {
+export async function analyzeImages(files, sellerDefaults = {}, options = {}) {
     const form = new FormData();
     for (const file of files.slice(0, 5)) form.append('file', file);
     form.append('sellerDefaults', JSON.stringify(sellerDefaults));
+    if (options.tryAlternate) form.append('tryAlternate', '1');
     const res = await fetch(`${baseUrl()}/analyze`, { method: 'POST', body: form });
     const body = await parseResponse(res);
     return body.result || body;

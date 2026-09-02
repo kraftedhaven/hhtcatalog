@@ -3,6 +3,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin
 
@@ -29,9 +30,20 @@ ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
 MAX_PROVIDER_IMAGES = 5
 MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
-TRANSIENT_STATUS_CODES = {429, 502, 503}
+TRANSIENT_STATUS_CODES = {502, 503}
 DEFAULT_ANALYZE_DEADLINE_SECONDS = 28.0
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 18.0
+DEFAULT_PROVIDER_COOLDOWN_SECONDS = 90
+DEFAULT_HOSTED_PROVIDER_ORDER = ("openrouter", "groq", "gemini")
+PROVIDER_CALLERS = {
+    "zai": ("ZAI_API_KEY", "_zai"),
+    "openrouter": ("OPENROUTER_API_KEY", "_openrouter"),
+    "gemini": ("GEMINI_API_KEY", "_gemini"),
+    "groq": ("GROQ_API_KEY", "_groq"),
+}
+RATE_LIMIT_CODES = {"1305"}
+UNAVAILABLE_HINTS = ("rate limit", "too many requests", "unavailable", "overloaded", "capacity")
+PROVIDER_COOLDOWNS: dict[str, float] = {}
 ZAI_IMAGE_MAX_EDGE = 896
 ZAI_IMAGE_RETRY_MAX_EDGE = 640
 ZAI_IMAGE_QUALITY = 72
@@ -73,6 +85,11 @@ class ProviderError(RuntimeError):
         category: str | None = None,
         retryable: bool = False,
         safe_message: str | None = None,
+        retry_after_seconds: int | None = None,
+        can_try_alternate: bool = False,
+        alternate_provider: str | None = None,
+        all_providers_unavailable: bool = False,
+        upstream_error: dict[str, str] | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
@@ -82,6 +99,11 @@ class ProviderError(RuntimeError):
         self.category = category or _category_for_status(status_code)
         self.retryable = retryable
         self.safe_message = safe_message
+        self.retry_after_seconds = retry_after_seconds
+        self.can_try_alternate = can_try_alternate
+        self.alternate_provider = alternate_provider
+        self.all_providers_unavailable = all_providers_unavailable
+        self.upstream_error = upstream_error or {}
 
 
 @dataclass
@@ -118,21 +140,26 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
     context.setdefault("deadline", time.monotonic() + _env_float("ANALYZE_DEADLINE_SECONDS", DEFAULT_ANALYZE_DEADLINE_SECONDS))
     compact_images = images[:MAX_PROVIDER_IMAGES]
     failures: list[dict[str, Any]] = []
-    providers = _provider_plan()
-    if not providers:
+    plan = _provider_plan(context)
+    if not plan:
         if demo_mode():
             return _demo_listing()
         raise ProviderError(
-            "Hosted analysis is not configured. Set PRIMARY_VISION_PROVIDER=zai with ZAI_API_KEY in Heroku Config Vars, or enable DEMO_MODE=true for development only.",
+            "Hosted analysis is not configured. Set OPENROUTER_API_KEY and/or GROQ_API_KEY (or opt in to ZAI/Gemini) in Config Vars, or enable DEMO_MODE=true for development only.",
             503,
             category="configuration",
             retryable=False,
         )
 
-    for name, caller in providers:
-        if _remaining_seconds(context) < 5:
-            failures.append(_failure(name, _model_for_provider(name), 504, "timeout", False))
-            continue
+    selected = plan["selected"]
+    caller = plan["caller"]
+    retry_after_from_cooldown = _cooldown_remaining_seconds(selected)
+    if retry_after_from_cooldown > 0:
+        raise _rate_limited_error(plan, selected, retry_after_from_cooldown, failures)
+
+    if _remaining_seconds(context) < 5:
+        failures.append(_failure(selected, _model_for_provider(selected), 504, "timeout", False))
+    else:
         try:
             raw = caller(compact_images, context)
             try:
@@ -141,28 +168,31 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
                 raise ProviderError(
                     "Provider returned malformed JSON.",
                     502,
-                    provider=name,
-                    model=_model_for_provider(name),
+                    provider=selected,
+                    model=_model_for_provider(selected),
                     category="malformed_json",
                     retryable=False,
                 ) from exc
             result = enrich_with_ebay_active_pricing(normalize_listing(parsed), timeout=min(5.0, _request_timeout(context)))
-            result["provider"] = name
+            result["provider"] = selected
             result["demo"] = False
             return result
         except ProviderError as exc:
             failures.append(_failure(
-                name,
-                exc.model or _model_for_provider(name),
+                selected,
+                exc.model or _model_for_provider(selected),
                 exc.status_code,
                 exc.category,
                 exc.retryable,
                 exc.safe_message,
             ))
-            _log_provider(name, exc.status_code, exc.category, exc.retryable)
-        except Exception as exc:
-            failures.append(_failure(name, _model_for_provider(name), 502, "provider_error", False))
-            _log_provider(name, 502, "provider_error", False)
+            _log_provider(selected, exc.status_code, exc.category, exc.retryable)
+            if _should_trip_circuit(exc.status_code, exc.category, exc.upstream_error):
+                cooldown_seconds = _set_provider_cooldown(selected, exc.retry_after_seconds)
+                raise _rate_limited_error(plan, selected, cooldown_seconds, failures) from exc
+        except Exception:
+            failures.append(_failure(selected, _model_for_provider(selected), 502, "provider_error", False))
+            _log_provider(selected, 502, "provider_error", False)
 
     if demo_mode():
         demo = _demo_listing()
@@ -171,7 +201,9 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
     raise ProviderError("Configured vision provider failed. No demo listing was generated.", 502, failures)
 
 
-def _provider_plan():
+def _provider_plan(context: dict[str, Any] | None = None):
+    context = context or {}
+    try_alternate = bool(context.get("try_alternate"))
     selected = os.environ.get("PRIMARY_VISION_PROVIDER", "").strip().lower()
     callers = {
         "zai": ("ZAI_API_KEY", _zai),
@@ -179,16 +211,38 @@ def _provider_plan():
         "gemini": ("GEMINI_API_KEY", _gemini),
         "groq": ("GROQ_API_KEY", _groq),
     }
-    if not selected:
-        return []
-    if selected not in callers:
+    if selected and selected not in callers:
         raise ProviderError(
-            "Unsupported PRIMARY_VISION_PROVIDER. Set PRIMARY_VISION_PROVIDER=zai.",
+            "Unsupported PRIMARY_VISION_PROVIDER. Use zai, openrouter, groq, or gemini.",
             503,
             category="configuration",
         )
-    api_key, caller = callers[selected]
-    return [(selected, caller)] if os.environ.get(api_key) else []
+    configured = _configured_provider_order(callers)
+    if not configured:
+        return None
+    if selected and selected in configured:
+        primary = selected
+    elif selected and selected not in configured:
+        return None
+    else:
+        primary = configured[0]
+    alternates = [name for name in configured if name != primary]
+    chosen = alternates[0] if (try_alternate and alternates) else primary
+    if try_alternate and not alternates:
+        raise ProviderError(
+            "No alternate hosted provider is configured. Configure both OpenRouter and Groq to enable one-click failover.",
+            503,
+            category="configuration",
+            retryable=False,
+        )
+    return {
+        "selected": chosen,
+        "caller": callers[chosen][1],
+        "primary": primary,
+        "alternate": alternates[0] if alternates else None,
+        "configured": configured,
+        "try_alternate": try_alternate,
+    }
 
 
 def _zai(images: list[UploadedImage], context: dict[str, Any]) -> str:
@@ -337,35 +391,19 @@ def _post_openai_compatible(
                 retryable=True,
             ) from exc
 
-        retryable = response.status_code in TRANSIENT_STATUS_CODES
         if response.status_code >= 400:
-            category = _category_for_status(response.status_code)
+            error = _provider_error_from_response(provider, model, response)
+            retryable = error.retryable
             if attempts == 1 and retryable and _remaining_seconds(context) >= 5:
                 _provider_backoff(attempts)
                 continue
-            upstream_error = _upstream_error_info(response)
-            raise ProviderError(
-                "Provider returned an error.",
-                response.status_code,
-                provider=provider,
-                model=model,
-                category=category,
-                retryable=retryable,
-                safe_message=_safe_provider_message(provider, response.status_code, category, upstream_error),
-            )
+            raise error
         return _chat_response(response, provider=provider, model=model)
 
 
 def _chat_response(response: requests.Response, provider: str | None = None, model: str | None = None) -> str:
     if response.status_code >= 400:
-        raise ProviderError(
-            "Provider returned an error.",
-            response.status_code,
-            provider=provider,
-            model=model,
-            category=_category_for_status(response.status_code),
-            retryable=response.status_code in TRANSIENT_STATUS_CODES,
-        )
+        raise _provider_error_from_response(provider, model, response)
     try:
         body = response.json()
     except ValueError as exc:
@@ -463,6 +501,12 @@ def _category_for_status(status_code: int) -> str:
     if status_code >= 400:
         return "request_error"
     return "provider_error"
+
+
+def _category_for_response(status_code: int, upstream_error: dict[str, str] | None = None) -> str:
+    if _is_rate_limited_or_unavailable(status_code, upstream_error):
+        return "rate_limit"
+    return _category_for_status(status_code)
 
 
 def _log_provider(provider: str, status_code: int, category: str, retryable: bool) -> None:
@@ -568,6 +612,146 @@ def _upstream_error_info(response: requests.Response) -> dict[str, str]:
     if message is not None:
         info["message"] = str(message)[:160]
     return info
+
+
+def _provider_error_from_response(provider: str | None, model: str | None, response: requests.Response) -> ProviderError:
+    upstream_error = _upstream_error_info(response)
+    category = _category_for_response(response.status_code, upstream_error)
+    retryable = response.status_code in TRANSIENT_STATUS_CODES and category != "rate_limit"
+    retry_after = _parse_retry_after_header(_header_value(response, "Retry-After"))
+    return ProviderError(
+        "Provider returned an error.",
+        response.status_code,
+        provider=provider,
+        model=model,
+        category=category,
+        retryable=retryable,
+        safe_message=_safe_provider_message(provider or "", response.status_code, category, upstream_error),
+        retry_after_seconds=retry_after,
+        upstream_error=upstream_error,
+    )
+
+
+def _header_value(response: requests.Response, name: str) -> str:
+    headers = getattr(response, "headers", None) or {}
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if str(key).lower() == name.lower():
+                return str(value)
+        return ""
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        return str(getter(name, "") or "")
+    return ""
+
+
+def _configured_provider_order(callers: dict[str, tuple[str, Any]]) -> list[str]:
+    configured = [name for name, (api_key, _caller) in callers.items() if os.environ.get(api_key)]
+    if not configured:
+        return []
+    desired = _provider_order_env()
+    ordered = [name for name in desired if name in configured]
+    for provider in configured:
+        if provider not in ordered:
+            ordered.append(provider)
+    return ordered
+
+
+def _provider_order_env() -> list[str]:
+    raw = os.environ.get("HOSTED_PROVIDER_ORDER", "").strip()
+    if not raw:
+        return list(DEFAULT_HOSTED_PROVIDER_ORDER)
+    ordered: list[str] = []
+    for value in raw.split(","):
+        provider = value.strip().lower()
+        if provider in PROVIDER_CALLERS and provider not in ordered:
+            ordered.append(provider)
+    return ordered or list(DEFAULT_HOSTED_PROVIDER_ORDER)
+
+
+def _is_rate_limited_or_unavailable(status_code: int, upstream_error: dict[str, str] | None = None) -> bool:
+    if status_code == 429:
+        return True
+    upstream_error = upstream_error or {}
+    if upstream_error.get("code") in RATE_LIMIT_CODES:
+        return True
+    message = (upstream_error.get("message") or "").lower()
+    if status_code in {502, 503} and any(hint in message for hint in UNAVAILABLE_HINTS):
+        return True
+    return False
+
+
+def _should_trip_circuit(status_code: int, category: str, upstream_error: dict[str, str] | None = None) -> bool:
+    return category == "rate_limit" or _is_rate_limited_or_unavailable(status_code, upstream_error)
+
+
+def _set_provider_cooldown(provider: str, retry_after_seconds: int | None = None) -> int:
+    seconds = retry_after_seconds if retry_after_seconds is not None else int(_env_float("PROVIDER_COOLDOWN_SECONDS", float(DEFAULT_PROVIDER_COOLDOWN_SECONDS)))
+    seconds = max(1, seconds)
+    PROVIDER_COOLDOWNS[provider] = time.monotonic() + float(seconds)
+    return seconds
+
+
+def _cooldown_remaining_seconds(provider: str) -> int:
+    until = PROVIDER_COOLDOWNS.get(provider, 0.0)
+    remaining = int(until - time.monotonic() + 0.999)
+    if remaining <= 0:
+        PROVIDER_COOLDOWNS.pop(provider, None)
+        return 0
+    return remaining
+
+
+def _next_retry_after_seconds(providers: list[str]) -> int:
+    windows = [_cooldown_remaining_seconds(provider) for provider in providers]
+    active = [seconds for seconds in windows if seconds > 0]
+    return min(active) if active else 0
+
+
+def _all_configured_providers_unavailable(providers: list[str]) -> bool:
+    return bool(providers) and all(_cooldown_remaining_seconds(provider) > 0 for provider in providers)
+
+
+def _parse_retry_after_header(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return max(0, int(text))
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:
+        return None
+    delta = int(when.timestamp() - time.time() + 0.999)
+    return max(0, delta)
+
+
+def _rate_limited_error(plan: dict[str, Any], provider: str, retry_after_seconds: int, failures: list[dict[str, Any]]) -> ProviderError:
+    can_try_alternate = bool(plan.get("alternate")) and not plan.get("try_alternate")
+    all_unavailable = _all_configured_providers_unavailable(plan["configured"])
+    next_retry = _next_retry_after_seconds(plan["configured"]) or retry_after_seconds
+    retry_text = f" Retry after about {next_retry} second{'s' if next_retry != 1 else ''}." if next_retry else " Retry after cooldown expires."
+    if all_unavailable:
+        message = f"All hosted providers are temporarily unavailable.{retry_text} Use browser-local SmolVLM where supported."
+    elif can_try_alternate:
+        message = f"{provider} is temporarily unavailable.{retry_text} Try alternate provider once."
+    else:
+        message = f"{provider} is temporarily unavailable.{retry_text}"
+    return ProviderError(
+        message,
+        429,
+        failures=failures,
+        provider=provider,
+        model=_model_for_provider(provider),
+        category="rate_limit",
+        retryable=True,
+        safe_message=message,
+        retry_after_seconds=next_retry or retry_after_seconds,
+        can_try_alternate=can_try_alternate,
+        alternate_provider=plan.get("alternate") if can_try_alternate else None,
+        all_providers_unavailable=all_unavailable,
+    )
 
 
 def _safe_provider_message(

@@ -29,6 +29,8 @@
     let status = "";
     let error = "";
     let loading = false;
+    let canTryAlternate = false;
+    let alternateProvider = "";
     let restoreInput;
     let localPipeline = null;
 
@@ -65,6 +67,8 @@
         previews = files.map((file) => ({ name: file.name, url: URL.createObjectURL(file) }));
         status = files.length ? `${files.length} photo${files.length === 1 ? "" : "s"} ready.` : "";
         error = files.length ? "" : "Choose one to five image files.";
+        canTryAlternate = false;
+        alternateProvider = "";
     }
 
     function removeFile(index) {
@@ -73,8 +77,10 @@
         setFiles(next);
     }
 
-    async function analyze() {
+    async function analyze(options = {}) {
         error = "";
+        canTryAlternate = false;
+        alternateProvider = "";
         if (!files.length) {
             error = "Upload at least one item photo first.";
             return;
@@ -84,12 +90,14 @@
             status = engine === "hosted" ? "Compressing and uploading photos..." : "Starting browser-local model...";
             const hostedFiles = engine === "hosted" ? await compactHostedFiles(files) : files;
             status = engine === "hosted" ? "Uploading compressed photos for secure analysis..." : status;
-            const result = engine === "hosted" ? await analyzeImages(hostedFiles, seller) : await localAnalyze();
+            const result = engine === "hosted" ? await analyzeImages(hostedFiles, seller, options) : await localAnalyze();
             item = normalizeForForm(result);
             status = result.demo ? "Demo result loaded. Review required." : `Analysis complete via ${result.provider || engine}. Review required.`;
             tab = "edit";
         } catch (err) {
             error = friendlyAnalyzeError(err);
+            canTryAlternate = engine === "hosted" && Boolean(err.canTryAlternate) && !options.tryAlternate;
+            alternateProvider = canTryAlternate ? (err.alternateProvider || "") : "";
             status = "";
         } finally {
             loading = false;
@@ -376,7 +384,16 @@
         <button class:on={tab === "settings"} on:click={() => tab = "settings"}>Settings</button>
     </nav>
 
-    {#if error}<div class="notice error">{error}</div>{/if}
+    {#if error}
+        <div class="notice error">
+            <p>{error}</p>
+            {#if canTryAlternate}
+                <button type="button" class="mt-2 underline" disabled={loading} on:click={() => analyze({ tryAlternate: true })}>
+                    Try alternate provider{alternateProvider ? ` (${alternateProvider})` : ""}
+                </button>
+            {/if}
+        </div>
+    {/if}
     {#if status}<div class="notice info">{status}</div>{/if}
 
     {#if tab === "analyze"}
