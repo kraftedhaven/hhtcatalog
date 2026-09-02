@@ -22,10 +22,11 @@ from hht_app.schema import HEADERS, export_ebay_csv, fit_title, normalize_listin
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, json_error=None):
+    def __init__(self, status_code=200, payload=None, json_error=None, headers=None):
         self.status_code = status_code
         self._payload = payload or {}
         self._json_error = json_error
+        self.headers = headers or {}
 
     def json(self):
         if self._json_error:
@@ -38,6 +39,7 @@ def env(**values):
     keys = [
         "PRIMARY_VISION_PROVIDER", "ZAI_API_KEY", "ZAI_BASE_URL", "ZAI_MODEL",
         "ANALYZE_DEADLINE_SECONDS", "PROVIDER_REQUEST_TIMEOUT_SECONDS",
+        "HOSTED_PROVIDER_ORDER", "PROVIDER_COOLDOWN_SECONDS",
         "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_ENVIRONMENT", "EBAY_MARKETPLACE_ID", "EBAY_SITE_ID",
         "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL",
         "GROQ_API_KEY", "GROQ_MODEL", "DEMO_MODE"
@@ -93,6 +95,7 @@ class MergePipelineTests(unittest.TestCase):
         self.client = app.app.test_client()
         self.image = UploadedImage(b"fake image data", "image/jpeg", "test.jpg")
         clear_token_cache()
+        providers.PROVIDER_COOLDOWNS.clear()
 
     def test_health_is_safe(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="secret"):
@@ -286,8 +289,9 @@ class MergePipelineTests(unittest.TestCase):
     def test_zai_413_failure_is_sanitized(self):
         self._assert_zai_failure(413, "payload_too_large", False)
 
-    def test_zai_429_failure_retries_once(self):
-        self._assert_zai_failure(429, "rate_limit", True)
+    def test_zai_429_failure_marks_provider_unavailable_without_retry(self):
+        self._assert_zai_failure(429, "rate_limit", False)
+        self.assertGreater(providers._cooldown_remaining_seconds("zai"), 0)
 
     def test_zai_500_failure_does_not_retry(self):
         self._assert_zai_failure(500, "server_error", False)
@@ -355,7 +359,7 @@ class MergePipelineTests(unittest.TestCase):
                 )
         body = response.get_json()
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(body["error"], "Vision analysis failed")
+        self.assertEqual(body["error"], "Configured vision provider failed. No demo listing was generated.")
         self.assertEqual(body["demo"], False)
         self.assertEqual(body["provider_errors"][0]["category"], "authentication")
         self.assertEqual(body["provider_errors"][0]["message"], "Z.AI authentication failed (code 1001).")
@@ -363,6 +367,90 @@ class MergePipelineTests(unittest.TestCase):
         self.assertNotIn("super-secret", response.get_data(as_text=True))
         self.assertNotIn("base64", response.get_data(as_text=True).lower())
         self.assertNotIn("Authentication parameter not received", response.get_data(as_text=True))
+
+    def test_provider_cooldown_activation_and_expiration(self):
+        providers._set_provider_cooldown("openrouter", 2)
+        self.assertGreater(providers._cooldown_remaining_seconds("openrouter"), 0)
+        providers.PROVIDER_COOLDOWNS["openrouter"] = providers.time.monotonic() - 1
+        self.assertEqual(providers._cooldown_remaining_seconds("openrouter"), 0)
+
+    def test_retry_after_seconds_and_http_date_are_parsed(self):
+        self.assertEqual(providers._parse_retry_after_header("7"), 7)
+        http_date = providers.parsedate_to_datetime("Wed, 21 Oct 2015 07:28:00 GMT")
+        with mock.patch("hht_app.providers.time.time", return_value=http_date.timestamp() - 30):
+            self.assertEqual(providers._parse_retry_after_header("Wed, 21 Oct 2015 07:28:00 GMT"), 30)
+
+    def test_retry_after_header_controls_cooldown_and_response(self):
+        with env(PRIMARY_VISION_PROVIDER="openrouter", OPENROUTER_API_KEY="or", HOSTED_PROVIDER_ORDER="openrouter,groq", GROQ_API_KEY="gr"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=429, payload={"error": {"message": "rate limit"}}, headers={"Retry-After": "11"})):
+                response = self.client.post(
+                    "/analyze",
+                    data={"file": (io.BytesIO(b"fake"), "photo.jpg")},
+                    content_type="multipart/form-data",
+                )
+        self.assertEqual(response.status_code, 429)
+        body = response.get_json()
+        self.assertEqual(body["retry_after_seconds"], 11)
+        self.assertTrue(body["can_try_alternate"])
+        self.assertEqual(body["alternate_provider"], "groq")
+        self.assertGreaterEqual(providers._cooldown_remaining_seconds("openrouter"), 10)
+
+    def test_try_alternate_provider_is_user_controlled_and_single_switch(self):
+        calls = []
+
+        def fake_post(url, **_kwargs):
+            calls.append(url)
+            if "openrouter.ai" in url:
+                return FakeResponse(status_code=429, payload={"error": {"message": "rate limit"}}, headers={"Retry-After": "9"})
+            return FakeResponse(payload=provider_payload("Patagonia Fleece"))
+
+        with env(OPENROUTER_API_KEY="or", GROQ_API_KEY="gr", HOSTED_PROVIDER_ORDER="openrouter,groq"):
+            with mock.patch.object(providers.requests, "post", side_effect=fake_post):
+                first = self.client.post(
+                    "/analyze",
+                    data={"file": (io.BytesIO(b"fake"), "photo.jpg")},
+                    content_type="multipart/form-data",
+                )
+                second = self.client.post(
+                    "/analyze",
+                    data={"file": (io.BytesIO(b"fake"), "photo.jpg"), "tryAlternate": "1"},
+                    content_type="multipart/form-data",
+                )
+        first_body = first.get_json()
+        self.assertEqual(first.status_code, 429)
+        self.assertTrue(first_body["can_try_alternate"])
+        self.assertEqual(first_body["alternate_provider"], "groq")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.get_json()["result"]["provider"], "groq")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("openrouter.ai", calls[0])
+        self.assertIn("api.groq.com", calls[1])
+
+    def test_all_hosted_providers_rate_limited_returns_clear_retry_message(self):
+        with env(OPENROUTER_API_KEY="or", GROQ_API_KEY="gr", HOSTED_PROVIDER_ORDER="openrouter,groq"):
+            providers._set_provider_cooldown("openrouter", 20)
+            providers._set_provider_cooldown("groq", 18)
+            response = self.client.post(
+                "/analyze",
+                data={"file": (io.BytesIO(b"fake"), "photo.jpg")},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(response.status_code, 429)
+        body = response.get_json()
+        self.assertTrue(body["all_providers_unavailable"])
+        self.assertIn("SmolVLM", body["error"])
+        self.assertGreaterEqual(body["retry_after_seconds"], 1)
+
+    def test_no_infinite_provider_loop_when_primary_rate_limited(self):
+        with env(OPENROUTER_API_KEY="or", GROQ_API_KEY="gr", GEMINI_API_KEY="gm", HOSTED_PROVIDER_ORDER="openrouter,groq,gemini"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=429, payload={"error": {"message": "rate limit"}})) as post:
+                response = self.client.post(
+                    "/analyze",
+                    data={"file": (io.BytesIO(b"fake"), "photo.jpg")},
+                    content_type="multipart/form-data",
+                )
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(post.call_count, 1)
 
     def test_analyze_rejects_more_than_five_images(self):
         data = {"file": [(io.BytesIO(b"fake"), f"photo-{index}.jpg") for index in range(6)]}
@@ -609,7 +697,7 @@ class MergePipelineTests(unittest.TestCase):
                 content_type="multipart/form-data",
             )
         self.assertEqual(response.status_code, 503)
-        self.assertIn("PRIMARY_VISION_PROVIDER=zai", response.get_json()["error"])
+        self.assertIn("OPENROUTER_API_KEY", response.get_json()["error"])
 
 
 if __name__ == "__main__":

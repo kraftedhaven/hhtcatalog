@@ -39,15 +39,25 @@ def analyze():
         return jsonify({"error": "No image uploaded. Use multipart form field 'file' with one to five images."}), 400
     try:
         images = [_uploaded_image(file) for file in files]
-        result = analyze_images(images, {"seller_defaults": _seller_defaults_from_form()})
+        result = analyze_images(images, {
+            "seller_defaults": _seller_defaults_from_form(),
+            "try_alternate": _truthy(request.form.get("tryAlternate")),
+        })
         return jsonify({"result": result, "provider": result.get("provider"), "demo": result.get("demo", False)})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 415
     except ProviderError as exc:
-        body: dict[str, Any] = {"error": "Vision analysis failed" if exc.failures else str(exc), "demo": False}
+        body: dict[str, Any] = {"error": str(exc.safe_message or exc), "demo": False}
         if exc.failures:
             body["provider_errors"] = exc.failures
             body["providerFailures"] = exc.failures
+        if exc.retry_after_seconds is not None:
+            body["retry_after_seconds"] = exc.retry_after_seconds
+        if exc.can_try_alternate:
+            body["can_try_alternate"] = True
+            body["alternate_provider"] = exc.alternate_provider
+        if exc.all_providers_unavailable:
+            body["all_providers_unavailable"] = True
         return jsonify(body), exc.status_code
     except Exception:
         return jsonify({"error": "Analysis failed before a listing could be generated. Please retry or check provider configuration."}), 500
@@ -150,6 +160,10 @@ def _seller_defaults_from_form() -> dict[str, str]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _truthy(raw: str | None) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 if __name__ == "__main__":
