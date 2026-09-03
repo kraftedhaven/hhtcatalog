@@ -23,7 +23,7 @@ async function parseResponse(res) {
 
 export async function analyzeImages(files, sellerDefaults = {}) {
     const form = new FormData();
-    for (const file of files.slice(0, 5)) form.append('file', file);
+    for (const file of files.slice(0, 3)) form.append('file', file);
     form.append('sellerDefaults', JSON.stringify(sellerDefaults));
     const res = await fetch(`${baseUrl()}/analyze`, { method: 'POST', body: form });
     const body = await parseResponse(res);

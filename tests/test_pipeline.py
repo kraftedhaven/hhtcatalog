@@ -18,14 +18,15 @@ from hht_app.ebay_pricing import (
     enrich_with_ebay_active_pricing,
 )
 from hht_app.providers import UploadedImage
-from hht_app.schema import HEADERS, export_ebay_csv, fit_title, normalize_listing
+from hht_app.schema import EBAY_DRAFT_COLUMNS, HEADERS, build_ebay_draft_csv_row, csv_from_draft_row, export_ebay_csv, export_ebay_draft_csv, fit_title, normalize_listing
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, json_error=None):
+    def __init__(self, status_code=200, payload=None, json_error=None, headers=None):
         self.status_code = status_code
         self._payload = payload or {}
         self._json_error = json_error
+        self.headers = headers or {}
 
     def json(self):
         if self._json_error:
@@ -164,15 +165,15 @@ class MergePipelineTests(unittest.TestCase):
         self.assertNotIn("zai-key", json.dumps(calls[0][1]["json"]))
         self.assertEqual(calls[0][1]["json"]["model"], "glm-4.6v-flash")
         self.assertEqual(calls[0][1]["json"]["temperature"], 0.1)
-        self.assertEqual(calls[0][1]["json"]["max_tokens"], 1000)
+        self.assertEqual(calls[0][1]["json"]["max_tokens"], 800)
         self.assertNotIn("thinking", calls[0][1]["json"])
         content = calls[0][1]["json"]["messages"][0]["content"]
         self.assertEqual(content[0]["type"], "image_url")
         self.assertTrue(content[0]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
         self.assertEqual(content[-1]["type"], "text")
         self.assertIn("Buy It Now estimate", content[-1]["text"])
-        self.assertIn("Do not claim checked sold comps", content[-1]["text"])
-        self.assertLess(len(content[-1]["text"]), 1200)
+        self.assertIn("not sold comps", content[-1]["text"])
+        self.assertLess(len(content[-1]["text"]), 900)
         self.assertEqual(result["pricingSource"], "ai_estimate")
         self.assertEqual(result["pricingSearchKeywords"], "Levi's Jacket L Cotton Trucker")
 
@@ -222,7 +223,7 @@ class MergePipelineTests(unittest.TestCase):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 providers.analyze_images(images)
         content = post.call_args.kwargs["json"]["messages"][0]["content"]
-        self.assertEqual(len([part for part in content if part["type"] == "image_url"]), 5)
+        self.assertEqual(len([part for part in content if part["type"] == "image_url"]), 3)
 
     def test_zai_rejects_more_than_five_images(self):
         with self.assertRaises(providers.ProviderError) as ctx:
@@ -287,7 +288,32 @@ class MergePipelineTests(unittest.TestCase):
         self._assert_zai_failure(413, "payload_too_large", False)
 
     def test_zai_429_failure_retries_once(self):
-        self._assert_zai_failure(429, "rate_limit", True)
+        self._assert_zai_failure(429, "rate_limited", True)
+
+    def test_zai_429_honors_retry_after_once(self):
+        payload = {"error": {"code": "1305", "message": "rate limited"}}
+        with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", DEMO_MODE="false"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=429, payload=payload, headers={"Retry-After": "2"})) as post:
+                with mock.patch.object(providers.time, "sleep") as sleep:
+                    with self.assertRaises(providers.ProviderError) as ctx:
+                        providers.analyze_images([self.image])
+        failure = ctx.exception.failures[0]
+        self.assertEqual(failure["category"], "rate_limited")
+        self.assertEqual(failure["retryable"], True)
+        self.assertEqual(failure["message"], "Z.AI rate limit reached. Wait a few minutes, then retry one small photo (code 1305).")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(2.0)
+
+    def test_zai_429_without_retry_after_uses_bounded_backoff(self):
+        payload = {"error": {"code": "1305", "message": "rate limited"}}
+        with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", DEMO_MODE="false"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=429, payload=payload)) as post:
+                with mock.patch.object(providers.time, "sleep") as sleep:
+                    with self.assertRaises(providers.ProviderError) as ctx:
+                        providers.analyze_images([self.image])
+        self.assertEqual(ctx.exception.failures[0]["category"], "rate_limited")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(0.25)
 
     def test_zai_500_failure_does_not_retry(self):
         self._assert_zai_failure(500, "server_error", False)
@@ -335,6 +361,23 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(ctx.exception.failures[0]["category"], "timeout")
         self.assertEqual(ctx.exception.failures[0]["retryable"], True)
         self.assertEqual(post.call_count, 2)
+
+    def test_zai_concurrency_lock_blocks_overlapping_request(self):
+        acquired = providers.ZAI_REQUEST_LOCK.acquire(timeout=0.1)
+        self.assertTrue(acquired)
+        try:
+            with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
+                context = {"deadline": providers.time.monotonic() + 6}
+                with mock.patch.object(providers.requests, "post") as post:
+                    with self.assertRaises(providers.ProviderError) as ctx:
+                        providers.analyze_images([self.image], context)
+        finally:
+            providers.ZAI_REQUEST_LOCK.release()
+        failure = ctx.exception.failures[0]
+        self.assertEqual(failure["category"], "rate_limited")
+        self.assertEqual(failure["retryable"], True)
+        self.assertIn("already analyzing", failure["message"])
+        post.assert_not_called()
 
     def test_zai_non_vision_model_response_is_sanitized(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", ZAI_MODEL="glm-4.6"):
@@ -591,6 +634,39 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(len(rows[0]), 35)
         self.assertEqual(len(rows[1]), 35)
         self.assertIn('"<p>HTML description</p>"', text)
+
+    def test_draft_csv_helper_is_separate_from_exact_35_column_export(self):
+        item = {
+            "sku": "LEVIS-123",
+            "title": "Levi's Jacket",
+            "price": 24.99,
+            "cid": "3000",
+            "cnote": "Pre-owned",
+            "cat": "57988",
+            "brand": "Levi's",
+            "type": "Jacket",
+            "pic": "https://example.com/photo.jpg",
+        }
+        row = build_ebay_draft_csv_row(item)
+        text = csv_from_draft_row(row)
+        rows = list(csv.DictReader(io.StringIO(text)))
+        self.assertEqual(list(csv.reader(io.StringIO(text)))[0], EBAY_DRAFT_COLUMNS)
+        self.assertEqual(rows[0]["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"], "Draft")
+        self.assertEqual(rows[0]["Custom label (SKU)"], "LEVIS-123")
+        self.assertEqual(rows[0]["Category ID"], "57988")
+        self.assertEqual(rows[0]["Condition ID"], "3000")
+        self.assertEqual(rows[0]["Format"], "FixedPrice")
+        self.assertEqual(len(HEADERS), 35)
+
+    def test_export_draft_csv_endpoint_returns_11_column_template(self):
+        response = self.client.post(
+            "/export/draft-csv",
+            json={"items": [{"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}]},
+        )
+        self.assertEqual(response.status_code, 200)
+        rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
+        self.assertEqual(rows[0], EBAY_DRAFT_COLUMNS)
+        self.assertEqual(len(rows[1]), 11)
 
     def test_multiple_rows_export(self):
         text = export_ebay_csv([

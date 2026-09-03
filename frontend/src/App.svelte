@@ -120,7 +120,7 @@
 
     async function compactHostedFiles(sourceFiles) {
         const resized = [];
-        for (const file of sourceFiles.slice(0, 5)) {
+        for (const file of sourceFiles.slice(0, 3)) {
             resized.push(await resizeImage(file));
         }
         return resized;
@@ -217,6 +217,7 @@
             not_found: "endpoint or model was not found",
             payload_too_large: "image upload is too large after compression",
             rate_limit: "rate limit or free model unavailable",
+            rate_limited: "Z.AI rate limit reached; wait a few minutes and retry one small photo",
             request_error: "request parameters were rejected",
             server_error: "provider server error",
             malformed_json: "provider returned unreadable JSON",

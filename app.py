@@ -6,7 +6,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
-from hht_app.schema import HEADERS, export_ebay_csv, normalize_listing
+from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
 
 
 PORT = int(os.environ.get("PORT", 8080))
@@ -86,6 +86,23 @@ def export_csv():
     )
 
 
+@app.route("/export/draft-csv", methods=["POST"])
+def export_draft_csv():
+    body = request.get_json(silent=True) or {}
+    items = body.get("items") or body.get("results") or []
+    if not isinstance(items, list):
+        return jsonify({"error": "Request body must include an items array."}), 400
+    try:
+        csv_text = export_ebay_draft_csv(items)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+    return Response(
+        csv_text,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=hht_ebay_draft_template.csv"},
+    )
+
+
 @app.route("/normalize", methods=["POST"])
 def normalize():
     body = request.get_json(silent=True) or {}
@@ -99,7 +116,7 @@ def too_large(_err):
 
 @app.errorhandler(404)
 def not_found(_err):
-    if request.path in {"/analyze", "/bulk-analyze", "/export/csv", "/health", "/normalize"}:
+    if request.path in {"/analyze", "/bulk-analyze", "/export/csv", "/export/draft-csv", "/health", "/normalize"}:
         return jsonify({"error": "Not found"}), 404
     return _serve_frontend()
 
