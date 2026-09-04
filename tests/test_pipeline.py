@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app
 from hht_app import providers
+from hht_app import ebay_auth
 from hht_app.ebay_pricing import (
     active_listing_keywords,
     clear_token_cache,
@@ -40,6 +41,7 @@ def env(**values):
         "PRIMARY_VISION_PROVIDER", "ZAI_API_KEY", "ZAI_BASE_URL", "ZAI_MODEL",
         "ANALYZE_DEADLINE_SECONDS", "PROVIDER_REQUEST_TIMEOUT_SECONDS",
         "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_ENVIRONMENT", "EBAY_MARKETPLACE_ID", "EBAY_SITE_ID",
+        "EBAY_REDIRECT_URI", "EBAY_REFRESH_TOKEN", "EBAY_USER_SCOPES", "EBAY_AUTH_STATE",
         "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL",
         "GROQ_API_KEY", "GROQ_MODEL", "DEMO_MODE"
     ]
@@ -94,6 +96,7 @@ class MergePipelineTests(unittest.TestCase):
         self.client = app.app.test_client()
         self.image = UploadedImage(b"fake image data", "image/jpeg", "test.jpg")
         clear_token_cache()
+        ebay_auth.clear_seller_token_cache()
 
     def test_health_is_safe(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="secret"):
@@ -190,6 +193,38 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(result["provider"], "zai")
         self.assertEqual(len(calls), 1)
         self.assertIn("api.z.ai", calls[0])
+
+    def test_groq_mock_success_uses_compressed_multimodal_json_mode(self):
+        with env(PRIMARY_VISION_PROVIDER="groq", GROQ_API_KEY="groq-key"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
+                result = providers.analyze_images([self.image] * 5)
+        self.assertEqual(result["provider"], "groq")
+        self.assertEqual(post.call_args.args[0], "https://api.groq.com/openai/v1/chat/completions")
+        headers = post.call_args.kwargs["headers"]
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(headers["Authorization"], "Bearer groq-key")
+        self.assertNotIn("groq-key", json.dumps(payload))
+        self.assertEqual(payload["model"], "meta-llama/llama-4-scout-17b-16e-instruct")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_completion_tokens"], 900)
+        content = payload["messages"][0]["content"]
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(len([part for part in content if part["type"] == "image_url"]), 3)
+
+    def test_groq_429_honors_retry_after_once(self):
+        payload = {"error": {"code": "rate_limit_exceeded", "message": "too many requests"}}
+        with env(PRIMARY_VISION_PROVIDER="groq", GROQ_API_KEY="groq-key", DEMO_MODE="false"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=429, payload=payload, headers={"retry-after": "2"})) as post:
+                with mock.patch.object(providers.time, "sleep") as sleep:
+                    with self.assertRaises(providers.ProviderError) as ctx:
+                        providers.analyze_images([self.image])
+        failure = ctx.exception.failures[0]
+        self.assertEqual(failure["provider"], "groq")
+        self.assertEqual(failure["category"], "rate_limited")
+        self.assertEqual(failure["retryable"], True)
+        self.assertEqual(failure["message"], "Groq rate limit reached. Wait briefly, then retry one small photo (code rate_limit_exceeded).")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(2.0)
 
     def test_provider_failure_is_non_demo(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", DEMO_MODE="false"):
@@ -440,6 +475,83 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
         self.assertTrue(post.call_args.kwargs["headers"]["Authorization"].startswith("Basic "))
 
+    def test_ebay_seller_oauth_start_url_uses_user_scopes(self):
+        with env(
+            EBAY_CLIENT_ID="client",
+            EBAY_CLIENT_SECRET="secret",
+            EBAY_REDIRECT_URI="https://hht.example/api/ebay/oauth/callback",
+            EBAY_AUTH_STATE="setup-state",
+            EBAY_ENVIRONMENT="sandbox",
+        ):
+            response = self.client.get("/api/ebay/oauth/start")
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("https://auth.sandbox.ebay.com/oauth2/authorize?", body["authorizationUrl"])
+        self.assertIn("client_id=client", body["authorizationUrl"])
+        self.assertIn("redirect_uri=https%3A%2F%2Fhht.example%2Fapi%2Febay%2Foauth%2Fcallback", body["authorizationUrl"])
+        self.assertIn("sell.inventory", body["authorizationUrl"])
+        self.assertIn("state=setup-state", body["authorizationUrl"])
+        self.assertNotIn("secret", body["authorizationUrl"])
+
+    def test_ebay_seller_exchange_code_returns_refresh_token_once(self):
+        token_payload = {
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+            "expires_in": 7200,
+            "token_type": "User Access Token",
+        }
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret", EBAY_REDIRECT_URI="https://hht.example/callback"):
+            with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(payload=token_payload)) as post:
+                result = ebay_auth.exchange_authorization_code("code-1")
+        self.assertEqual(result["refresh_token"], "refresh-1")
+        self.assertEqual(post.call_args.args[0], "https://api.ebay.com/identity/v1/oauth2/token")
+        self.assertTrue(post.call_args.kwargs["headers"]["Authorization"].startswith("Basic "))
+        self.assertEqual(post.call_args.kwargs["data"]["grant_type"], "authorization_code")
+        self.assertEqual(post.call_args.kwargs["data"]["code"], "code-1")
+        self.assertNotIn("secret", json.dumps(post.call_args.kwargs["data"]))
+
+    def test_ebay_seller_refresh_token_is_cached(self):
+        token_payload = {"access_token": "seller-access", "expires_in": 7200}
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret", EBAY_REDIRECT_URI="https://hht.example/callback", EBAY_REFRESH_TOKEN="refresh-1"):
+            with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(payload=token_payload)) as post:
+                first = ebay_auth.seller_access_token()
+                second = ebay_auth.seller_access_token()
+        self.assertEqual(first, "seller-access")
+        self.assertEqual(second, "seller-access")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["data"]["grant_type"], "refresh_token")
+        self.assertEqual(post.call_args.kwargs["data"]["refresh_token"], "refresh-1")
+
+    def test_ebay_seller_oauth_failure_is_sanitized(self):
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="super-secret", EBAY_REDIRECT_URI="https://hht.example/callback"):
+            with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(status_code=401, payload={"error": "invalid_client", "error_description": "Client authentication failed"})):
+                with self.assertRaises(ebay_auth.EbayAuthError) as ctx:
+                    ebay_auth.exchange_authorization_code("bad-code")
+        public = ctx.exception.to_public()
+        self.assertEqual(public["provider"], "ebay_oauth")
+        self.assertEqual(public["category"], "authentication")
+        self.assertEqual(public["message"], "eBay OAuth authentication failed (invalid_client).")
+        self.assertNotIn("super-secret", json.dumps(public))
+        self.assertNotIn("Client authentication failed", json.dumps(public))
+
+    def test_ebay_oauth_callback_validates_state_and_returns_refresh_token(self):
+        token_payload = {
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+            "expires_in": 7200,
+            "token_type": "User Access Token",
+        }
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret", EBAY_REDIRECT_URI="https://hht.example/callback", EBAY_AUTH_STATE="state-1"):
+            bad = self.client.post("/api/ebay/oauth/callback", json={"code": "code-1", "state": "wrong"})
+            with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(payload=token_payload)):
+                good = self.client.post("/api/ebay/oauth/callback", json={"code": "code-1", "state": "state-1"})
+        self.assertEqual(bad.status_code, 400)
+        self.assertEqual(good.status_code, 200)
+        body = good.get_json()
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["refreshToken"], "refresh-1")
+        self.assertNotIn("access-1", good.get_data(as_text=True))
+
     def test_ebay_token_failure_is_sanitized(self):
         with env(EBAY_CLIENT_ID="real-client-id", EBAY_CLIENT_SECRET="real-secret"):
             with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(status_code=401, payload={"error": "invalid_client"})):
@@ -685,7 +797,7 @@ class MergePipelineTests(unittest.TestCase):
                 content_type="multipart/form-data",
             )
         self.assertEqual(response.status_code, 503)
-        self.assertIn("PRIMARY_VISION_PROVIDER=zai", response.get_json()["error"])
+        self.assertIn("PRIMARY_VISION_PROVIDER=groq", response.get_json()["error"])
 
 
 if __name__ == "__main__":

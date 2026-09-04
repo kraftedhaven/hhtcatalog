@@ -385,13 +385,13 @@
             <label class="field">
                 <span>Analysis engine</span>
                 <select bind:value={engine}>
-                    <option value="hosted">Hosted secure analysis</option>
+                    <option value="hosted">Fast hosted Groq vision</option>
                     <option value="local">Browser-local SmolVLM experimental</option>
                 </select>
             </label>
             <p class="help">
                 {engine === "hosted"
-                    ? "Photos go to this Heroku app, which calls server-side provider keys only."
+                    ? "Photos go to this Heroku app, which calls Groq with server-side provider keys only."
                     : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
             </p>
             <label class="dropzone">

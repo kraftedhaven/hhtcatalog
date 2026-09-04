@@ -30,9 +30,12 @@ HEIC_SUPPORT_ENABLED = _register_heic_support()
 
 ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
+GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 MAX_PROVIDER_IMAGES = 5
 MAX_ZAI_IMAGES = 3
 MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
+MAX_GROQ_IMAGES = 3
+MAX_GROQ_REQUEST_BYTES = 4 * 1024 * 1024
 TRANSIENT_STATUS_CODES = {429, 502, 503}
 DEFAULT_ANALYZE_DEADLINE_SECONDS = 28.0
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 18.0
@@ -127,7 +130,7 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
         if demo_mode():
             return _demo_listing()
         raise ProviderError(
-            "Hosted analysis is not configured. Set PRIMARY_VISION_PROVIDER=zai with ZAI_API_KEY in Heroku Config Vars, or enable DEMO_MODE=true for development only.",
+            "Hosted analysis is not configured. Set PRIMARY_VISION_PROVIDER=groq with GROQ_API_KEY in Heroku Config Vars, or enable DEMO_MODE=true for development only.",
             503,
             category="configuration",
             retryable=False,
@@ -187,7 +190,7 @@ def _provider_plan():
         return []
     if selected not in callers:
         raise ProviderError(
-            "Unsupported PRIMARY_VISION_PROVIDER. Set PRIMARY_VISION_PROVIDER=zai.",
+            "Unsupported PRIMARY_VISION_PROVIDER. Set PRIMARY_VISION_PROVIDER=groq.",
             503,
             category="configuration",
         )
@@ -297,22 +300,18 @@ def _gemini(images: list[UploadedImage], context: dict[str, Any]) -> str:
 
 
 def _groq(images: list[UploadedImage], context: dict[str, Any]) -> str:
-    model = os.environ.get("GROQ_MODEL") or "meta-llama/llama-4-scout-17b-16e-instruct"
-    content = [{"type": "text", "text": _prompt(context)}]
-    content.extend({"type": "image_url", "image_url": {"url": image.data_url}} for image in images[:2])
-    response = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": content}],
-            "temperature": 0.1,
-            "max_completion_tokens": 1200,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=_request_timeout(context),
-    )
-    return _chat_response(response)
+    model = _groq_model()
+    content = [{"type": "text", "text": _groq_prompt(context)}]
+    content.extend({"type": "image_url", "image_url": {"url": _compressed_data_url(image)}} for image in images[:MAX_GROQ_IMAGES])
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.1,
+        "max_completion_tokens": 900,
+        "response_format": {"type": "json_object"},
+    }
+    _reject_oversized_payload("groq", model, content, MAX_GROQ_REQUEST_BYTES)
+    return _post_openai_compatible("groq", model, "https://api.groq.com/openai/v1/chat/completions", os.environ["GROQ_API_KEY"], payload, context)
 
 
 def _post_openai_compatible(
@@ -423,6 +422,12 @@ def _zai_prompt(context: dict[str, Any]) -> str:
     return f"{ZAI_PROMPT}\nUse only supported eBay category IDs. Seller location: {location}. Keep desc under 700 characters."
 
 
+def _groq_prompt(context: dict[str, Any]) -> str:
+    defaults = context.get("seller_defaults") or {}
+    location = defaults.get("location") or "Kettering, Ohio"
+    return f"{ZAI_PROMPT}\nUse supported eBay category IDs. Seller location: {location}. Keep desc under 700 characters."
+
+
 def _demo_listing() -> dict[str, Any]:
     result = normalize_listing({
         "title": "Demo No Brand Denim Jacket",
@@ -485,7 +490,7 @@ def _category_for_status(status_code: int) -> str:
 
 
 def _provider_category(provider: str, status_code: int, upstream_error: dict[str, str] | None = None) -> str:
-    if provider == "zai" and status_code == 429:
+    if provider in {"zai", "groq"} and status_code == 429:
         return "rate_limited"
     return _category_for_status(status_code)
 
@@ -538,12 +543,16 @@ def _zai_model() -> str:
     return os.environ.get("ZAI_MODEL") or ZAI_DEFAULT_MODEL
 
 
+def _groq_model() -> str:
+    return os.environ.get("GROQ_MODEL") or GROQ_DEFAULT_MODEL
+
+
 def _model_for_provider(provider: str) -> str:
     return {
         "zai": _zai_model(),
         "openrouter": os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
         "gemini": os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
-        "groq": os.environ.get("GROQ_MODEL") or "meta-llama/llama-4-scout-17b-16e-instruct",
+        "groq": _groq_model(),
     }.get(provider, "")
 
 
@@ -569,12 +578,16 @@ def _compressed_data_url(image: UploadedImage, max_edge: int = ZAI_IMAGE_MAX_EDG
 
 
 def _reject_oversized_zai_payload(content: list[dict[str, Any]], model: str) -> None:
+    _reject_oversized_payload("zai", model, content, MAX_ZAI_REQUEST_BYTES)
+
+
+def _reject_oversized_payload(provider: str, model: str, content: list[dict[str, Any]], max_bytes: int) -> None:
     size = len(json.dumps({"model": model, "messages": [{"role": "user", "content": content}]}, separators=(",", ":")).encode("utf-8"))
-    if size > MAX_ZAI_REQUEST_BYTES:
+    if size > max_bytes:
         raise ProviderError(
             "Compressed image payload is too large.",
             413,
-            provider="zai",
+            provider=provider,
             model=model,
             category="payload_too_large",
             retryable=False,
@@ -588,7 +601,8 @@ def _provider_backoff(attempt: int, response: requests.Response | None = None) -
 
 
 def _retry_after_seconds(response: requests.Response) -> float | None:
-    value = getattr(response, "headers", {}).get("Retry-After")
+    headers = getattr(response, "headers", {})
+    value = headers.get("Retry-After") or headers.get("retry-after")
     if not value:
         return None
     try:
@@ -638,11 +652,21 @@ def _safe_provider_message(
         return f"Z.AI endpoint or model was not found{suffix}"
     if provider == "zai" and status_code == 400:
         return f"Z.AI rejected the request parameters{suffix}"
+    if provider == "groq" and status_code == 401:
+        return f"Groq authentication failed{suffix}"
+    if provider == "groq" and status_code == 403:
+        return f"Groq denied access to this model or account{suffix}"
+    if provider == "groq" and status_code == 404:
+        return f"Groq endpoint or model was not found{suffix}"
+    if provider == "groq" and status_code in {400, 422}:
+        return f"Groq rejected the request parameters{suffix}"
     if category == "payload_too_large":
         return "Image payload is too large after compression."
     if category in {"rate_limit", "rate_limited"}:
         if provider == "zai":
             return f"Z.AI rate limit reached. Wait a few minutes, then retry one small photo{suffix}"
+        if provider == "groq":
+            return f"Groq rate limit reached. Wait briefly, then retry one small photo{suffix}"
         return f"Provider rate limit reached{suffix}"
     if category == "timeout":
         return "Provider request timed out."
