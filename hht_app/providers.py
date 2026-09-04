@@ -736,7 +736,7 @@ def _parse_retry_after_header(value: str) -> int | None:
 def _rate_limited_error(plan: dict[str, Any], provider: str, retry_after_seconds: int, failures: list[dict[str, Any]]) -> ProviderError:
     can_try_alternate = bool(plan.get("alternate")) and not plan.get("try_alternate")
     all_unavailable = _all_configured_providers_unavailable(plan["configured"])
-    next_retry = _next_retry_after_seconds(plan["configured"]) or retry_after_seconds
+    next_retry = retry_after_seconds
     retry_text = f" Retry after about {next_retry} second{'s' if next_retry != 1 else ''}." if next_retry else " Retry after cooldown expires."
     if all_unavailable:
         message = f"All hosted providers are temporarily unavailable.{retry_text} Use browser-local SmolVLM where supported."
