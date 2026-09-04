@@ -1,6 +1,6 @@
 <script>
     import "./app.css";
-    import { analyzeImages, downloadCSV, downloadJSON } from "$lib/api";
+    import { analyzeImages, createEbayDraft, downloadCSV, downloadJSON } from "$lib/api";
 
     const emptyItem = {
         title: "", price: "", cid: "3000", cnote: "", cat: "", brand: "",
@@ -29,6 +29,7 @@
     let status = "";
     let error = "";
     let loading = false;
+    let draftLoading = -1;
     let restoreInput;
     let localPipeline = null;
 
@@ -240,6 +241,14 @@
         return `${err.message || "Analysis failed."} ${lines.join("; ")}. No demo data was shown.${geminiHint}`;
     }
 
+    function friendlyEbayError(err) {
+        const failures = err.providerFailures || [];
+        if (!failures.length) return err.message || "eBay draft creation failed.";
+        const failure = failures[0];
+        const statusText = failure.status ? ` (${failure.status})` : "";
+        return `${failure.provider || "eBay"}: ${failure.message || failure.category || "draft creation failed"}${statusText}`;
+    }
+
     function parseModelJSON(raw) {
         const text = String(raw || "").replace(/```json|```/gi, "");
         const start = text.indexOf("{");
@@ -310,6 +319,22 @@
             await downloadCSV(queue, seller);
         } catch (err) {
             error = err.message || String(err);
+        }
+    }
+
+    async function createDraft(index) {
+        error = "";
+        const queued = queue[index];
+        if (!queued) return;
+        draftLoading = index;
+        try {
+            const result = await createEbayDraft(queued);
+            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferId: result.offerId, ebayDraftStatus: result.status } : entry);
+            status = `eBay draft created for ${queued.title}: offer ${result.offerId}. Review it in eBay before publishing.`;
+        } catch (err) {
+            error = friendlyEbayError(err);
+        } finally {
+            draftLoading = -1;
         }
     }
 
@@ -468,7 +493,8 @@
             {:else}
                 {#each queue as queued, index}
                     <div class="queue-row">
-                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}</span></div>
+                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayOfferId ? ` / eBay offer ${queued.ebayOfferId}` : ""}</span></div>
+                        <button type="button" disabled={draftLoading === index} on:click={() => createDraft(index)}>{draftLoading === index ? "Creating..." : "Create eBay Draft"}</button>
                         <button type="button" on:click={() => editQueued(index)}>Edit</button>
                         <button type="button" on:click={() => queue = queue.filter((_, i) => i !== index)}>Remove</button>
                     </div>

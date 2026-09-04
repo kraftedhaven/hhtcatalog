@@ -32,6 +32,12 @@ EBAY_REDIRECT_URI
 EBAY_REFRESH_TOKEN
 EBAY_AUTH_STATE
 EBAY_USER_SCOPES
+EBAY_MERCHANT_LOCATION_KEY
+EBAY_PAYMENT_POLICY_ID
+EBAY_FULFILLMENT_POLICY_ID
+EBAY_RETURN_POLICY_ID
+EBAY_CURRENCY=USD
+EBAY_LISTING_DURATION=GTC
 EBAY_ENVIRONMENT=production
 EBAY_MARKETPLACE_ID=EBAY_US
 EBAY_SITE_ID=0
@@ -46,6 +52,7 @@ DEMO_MODE=false
 When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
 Official eBay Browse pricing is optional. When `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` are present, `/analyze` uses generated item keywords to fetch active eBay listings and labels the result `active_listing_estimate`. These are active listings, not sold comps. Without Browse access, the app keeps the vision provider's `ai_estimate`.
 Seller OAuth for future inventory/offer work uses `EBAY_REDIRECT_URI`, `EBAY_REFRESH_TOKEN`, and optional `EBAY_AUTH_STATE`/`EBAY_USER_SCOPES`. Use `GET /api/ebay/oauth/start` to generate a consent URL and `GET` or `POST /api/ebay/oauth/callback` to exchange the returned code. The callback returns the refresh token once so it can be copied into `EBAY_REFRESH_TOKEN`; it does not call eBay publish endpoints.
+Direct eBay draft creation uses `POST /api/ebay/drafts` after an item has been reviewed. It creates or replaces the Inventory item and creates an unpublished Inventory offer using `EBAY_MERCHANT_LOCATION_KEY`, `EBAY_PAYMENT_POLICY_ID`, `EBAY_FULFILLMENT_POLICY_ID`, and `EBAY_RETURN_POLICY_ID`. It intentionally does not call `/publish`, so the app cannot create a live listing from this endpoint.
 `ANALYZE_DEADLINE_SECONDS` and `PROVIDER_REQUEST_TIMEOUT_SECONDS` keep the synchronous `/analyze` call below Heroku's normal 30-second router limit while giving Groq enough time for multi-photo vision requests. Phone images are resized server-side before they are sent to a hosted provider.
 
 Example commands:
@@ -68,6 +75,23 @@ Files must be JPEG, PNG, WebP, GIF, or HEIC and fit under `MAX_UPLOAD_MB`.
 `GET` or `POST /api/ebay/oauth/callback` exchanges an eBay authorization code for a refresh token during setup.
 
 `GET /api/ebay/oauth/status` verifies that `EBAY_REFRESH_TOKEN` can mint a seller access token.
+
+`POST /api/ebay/drafts` accepts a reviewed item and returns an unpublished eBay Inventory offer ID:
+
+```json
+{
+  "item": {
+    "sku": "LEVIS-123",
+    "title": "Levi's Denim Jacket",
+    "price": 24.99,
+    "cat": "57988",
+    "cid": "3000",
+    "brand": "Levi's",
+    "type": "Jacket",
+    "pic": "https://example.com/photo.jpg"
+  }
+}
+```
 
 `POST /export/csv` accepts:
 

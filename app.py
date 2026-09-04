@@ -6,6 +6,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, seller_access_token
+from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
 from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
 
@@ -149,6 +150,19 @@ def ebay_oauth_status():
     return jsonify({"configured": True, "provider": "ebay_oauth"})
 
 
+@app.route("/api/ebay/drafts", methods=["POST"])
+def ebay_drafts():
+    body = request.get_json(silent=True) or {}
+    item = body.get("item") or body.get("listing") or body
+    if not isinstance(item, dict):
+        return jsonify({"error": "Request body must include an item object."}), 400
+    try:
+        result = create_ebay_draft(item)
+    except EbayDraftError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    return jsonify({"result": result})
+
+
 @app.errorhandler(413)
 def too_large(_err):
     return jsonify({"error": f"Uploaded image is too large. Limit is {MAX_UPLOAD_MB} MB."}), 413
@@ -156,7 +170,7 @@ def too_large(_err):
 
 @app.errorhandler(404)
 def not_found(_err):
-    if request.path in {"/analyze", "/bulk-analyze", "/export/csv", "/export/draft-csv", "/health", "/normalize", "/api/ebay/oauth/start", "/api/ebay/oauth/callback", "/api/ebay/oauth/status"}:
+    if request.path in {"/analyze", "/bulk-analyze", "/export/csv", "/export/draft-csv", "/health", "/normalize", "/api/ebay/oauth/start", "/api/ebay/oauth/callback", "/api/ebay/oauth/status", "/api/ebay/drafts"}:
         return jsonify({"error": "Not found"}), 404
     return _serve_frontend()
 

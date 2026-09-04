@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import app
 from hht_app import providers
 from hht_app import ebay_auth
+from hht_app import ebay_drafts
 from hht_app.ebay_pricing import (
     active_listing_keywords,
     clear_token_cache,
@@ -42,6 +43,8 @@ def env(**values):
         "ANALYZE_DEADLINE_SECONDS", "PROVIDER_REQUEST_TIMEOUT_SECONDS",
         "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_ENVIRONMENT", "EBAY_MARKETPLACE_ID", "EBAY_SITE_ID",
         "EBAY_REDIRECT_URI", "EBAY_REFRESH_TOKEN", "EBAY_USER_SCOPES", "EBAY_AUTH_STATE",
+        "EBAY_MERCHANT_LOCATION_KEY", "EBAY_PAYMENT_POLICY_ID", "EBAY_FULFILLMENT_POLICY_ID",
+        "EBAY_RETURN_POLICY_ID", "EBAY_CURRENCY", "EBAY_LISTING_DURATION",
         "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL",
         "GROQ_API_KEY", "GROQ_MODEL", "DEMO_MODE"
     ]
@@ -551,6 +554,109 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["refreshToken"], "refresh-1")
         self.assertNotIn("access-1", good.get_data(as_text=True))
+
+    def test_ebay_draft_creation_creates_unpublished_inventory_offer(self):
+        item = {
+            "sku": "LEVIS-123",
+            "title": "Levi's Denim Jacket",
+            "price": 24.99,
+            "cid": "3000",
+            "cnote": "Pre-owned with light wear.",
+            "cat": "57988",
+            "brand": "Levi's",
+            "size": "L",
+            "color": "Blue",
+            "dept": "Men",
+            "type": "Jacket",
+            "style": "Trucker",
+            "mat": "Cotton",
+            "pat": "Solid",
+            "pic": "https://example.com/photo.jpg",
+        }
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if method == "PUT":
+                return FakeResponse(status_code=204)
+            return FakeResponse(status_code=201, payload={"offerId": "offer-123"})
+
+        with env(
+            EBAY_MERCHANT_LOCATION_KEY="warehouse-1",
+            EBAY_PAYMENT_POLICY_ID="pay-1",
+            EBAY_FULFILLMENT_POLICY_ID="ship-1",
+            EBAY_RETURN_POLICY_ID="return-1",
+            EBAY_MARKETPLACE_ID="EBAY_US",
+            EBAY_ENVIRONMENT="sandbox",
+        ):
+            with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-token"):
+                with mock.patch("hht_app.ebay_drafts.requests.request", side_effect=fake_request):
+                    result = ebay_drafts.create_ebay_draft(item)
+
+        self.assertEqual(result["status"], "draft_created")
+        self.assertEqual(result["offerId"], "offer-123")
+        self.assertFalse(result["published"])
+        self.assertEqual(result["sku"], "LEVIS-123")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], "PUT")
+        self.assertEqual(calls[0][1], "https://api.sandbox.ebay.com/sell/inventory/v1/inventory_item/LEVIS-123")
+        self.assertEqual(calls[1][0], "POST")
+        self.assertEqual(calls[1][1], "https://api.sandbox.ebay.com/sell/inventory/v1/offer")
+        self.assertFalse(any("/publish" in call[1] for call in calls))
+        self.assertEqual(calls[0][2]["headers"]["Authorization"], "Bearer seller-token")
+        self.assertEqual(calls[0][2]["json"]["condition"], "USED_EXCELLENT")
+        self.assertEqual(calls[0][2]["json"]["product"]["imageUrls"], ["https://example.com/photo.jpg"])
+        self.assertEqual(calls[1][2]["json"]["listingPolicies"]["paymentPolicyId"], "pay-1")
+        self.assertEqual(calls[1][2]["json"]["merchantLocationKey"], "warehouse-1")
+        self.assertEqual(calls[1][2]["json"]["pricingSummary"]["price"]["value"], "24.99")
+
+    def test_ebay_draft_endpoint_returns_result(self):
+        with mock.patch("app.create_ebay_draft", return_value={"status": "draft_created", "offerId": "offer-1", "published": False}) as create:
+            response = self.client.post("/api/ebay/drafts", json={"item": {"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["result"]["offerId"], "offer-1")
+        self.assertFalse(response.get_json()["result"]["published"])
+        create.assert_called_once()
+
+    def test_ebay_draft_missing_policy_config_fails_before_write(self):
+        item = {"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}
+        with env(EBAY_PAYMENT_POLICY_ID="pay-1", EBAY_FULFILLMENT_POLICY_ID="ship-1", EBAY_RETURN_POLICY_ID="return-1"):
+            with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-token") as token:
+                with mock.patch("hht_app.ebay_drafts.requests.request") as request:
+                    with self.assertRaises(ebay_drafts.EbayDraftError) as ctx:
+                        ebay_drafts.create_ebay_draft(item)
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.category, "configuration")
+        self.assertIn("EBAY_MERCHANT_LOCATION_KEY", ctx.exception.safe_message)
+        token.assert_not_called()
+        request.assert_not_called()
+
+    def test_ebay_draft_upstream_error_is_sanitized(self):
+        item = {
+            "sku": "LEVIS-123",
+            "title": "Levi's Jacket",
+            "price": 24.99,
+            "cat": "57988",
+            "brand": "Levi's",
+            "type": "Jacket",
+        }
+        with env(
+            EBAY_MERCHANT_LOCATION_KEY="warehouse-1",
+            EBAY_PAYMENT_POLICY_ID="pay-1",
+            EBAY_FULFILLMENT_POLICY_ID="ship-1",
+            EBAY_RETURN_POLICY_ID="return-1",
+        ):
+            with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-secret-token"):
+                with mock.patch("hht_app.ebay_drafts.requests.request", return_value=FakeResponse(status_code=403, payload={"errors": [{"errorId": "25002", "message": "Bad auth"}]})):
+                    with self.assertRaises(ebay_drafts.EbayDraftError) as ctx:
+                        ebay_drafts.create_ebay_draft(item)
+        public = ctx.exception.to_public()
+        self.assertEqual(public["provider"], "ebay_inventory")
+        self.assertEqual(public["status"], 403)
+        self.assertEqual(public["category"], "authentication")
+        self.assertEqual(public["code"], "25002")
+        self.assertNotIn("seller-secret-token", json.dumps(public))
+        self.assertNotIn("Bad auth", json.dumps(public))
 
     def test_ebay_token_failure_is_sanitized(self):
         with env(EBAY_CLIENT_ID="real-client-id", EBAY_CLIENT_SECRET="real-secret"):
