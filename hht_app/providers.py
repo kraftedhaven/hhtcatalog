@@ -223,7 +223,13 @@ def _provider_plan(context: dict[str, Any] | None = None):
     if selected and selected in configured:
         primary = selected
     elif selected and selected not in configured:
-        return None
+        missing_key = callers[selected][0]
+        raise ProviderError(
+            f"PRIMARY_VISION_PROVIDER={selected} is set but {missing_key} is not configured.",
+            503,
+            category="configuration",
+            retryable=False,
+        )
     else:
         primary = configured[0]
     alternates = [name for name in configured if name != primary]
