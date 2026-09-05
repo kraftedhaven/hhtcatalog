@@ -39,7 +39,7 @@ class EbayAuthError(RuntimeError):
 
 def ebay_authorization_url(state: str | None = None) -> str:
     client_id = _client_id()
-    redirect_uri = _redirect_uri()
+    redirect_uri = _oauth_redirect_uri()
     query = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -59,7 +59,7 @@ def exchange_authorization_code(code: str, timeout: float = DEFAULT_TIMEOUT_SECO
         {
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": _redirect_uri(),
+            "redirect_uri": _oauth_redirect_uri(),
         },
         timeout,
     )
@@ -160,8 +160,8 @@ def _client_secret() -> str:
     return _required_env("EBAY_CLIENT_SECRET")
 
 
-def _redirect_uri() -> str:
-    return _required_env("EBAY_REDIRECT_URI")
+def _oauth_redirect_uri() -> str:
+    return _optional_env("EBAY_RUNAME") or _required_env("EBAY_REDIRECT_URI")
 
 
 def _refresh_token() -> str:
@@ -169,10 +169,14 @@ def _refresh_token() -> str:
 
 
 def _required_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
+    value = _optional_env(name)
     if not value:
         raise EbayAuthError(503, "configuration", f"{name} is not configured.")
     return value
+
+
+def _optional_env(name: str) -> str:
+    return os.environ.get(name, "").strip()
 
 
 def _basic_credentials() -> str:

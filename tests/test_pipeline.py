@@ -42,7 +42,7 @@ def env(**values):
         "PRIMARY_VISION_PROVIDER", "ZAI_API_KEY", "ZAI_BASE_URL", "ZAI_MODEL",
         "ANALYZE_DEADLINE_SECONDS", "PROVIDER_REQUEST_TIMEOUT_SECONDS",
         "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_ENVIRONMENT", "EBAY_MARKETPLACE_ID", "EBAY_SITE_ID",
-        "EBAY_REDIRECT_URI", "EBAY_REFRESH_TOKEN", "EBAY_USER_SCOPES", "EBAY_AUTH_STATE",
+        "EBAY_REDIRECT_URI", "EBAY_RUNAME", "EBAY_REFRESH_TOKEN", "EBAY_USER_SCOPES", "EBAY_AUTH_STATE",
         "EBAY_MERCHANT_LOCATION_KEY", "EBAY_PAYMENT_POLICY_ID", "EBAY_FULFILLMENT_POLICY_ID",
         "EBAY_RETURN_POLICY_ID", "EBAY_CURRENCY", "EBAY_LISTING_DURATION",
         "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL",
@@ -483,6 +483,7 @@ class MergePipelineTests(unittest.TestCase):
             EBAY_CLIENT_ID="client",
             EBAY_CLIENT_SECRET="secret",
             EBAY_REDIRECT_URI="https://hht.example/api/ebay/oauth/callback",
+            EBAY_RUNAME="Korin_KraftedHaven-KraftedHHT-PRD-abc",
             EBAY_AUTH_STATE="setup-state",
             EBAY_ENVIRONMENT="sandbox",
         ):
@@ -491,7 +492,8 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("https://auth.sandbox.ebay.com/oauth2/authorize?", body["authorizationUrl"])
         self.assertIn("client_id=client", body["authorizationUrl"])
-        self.assertIn("redirect_uri=https%3A%2F%2Fhht.example%2Fapi%2Febay%2Foauth%2Fcallback", body["authorizationUrl"])
+        self.assertIn("redirect_uri=Korin_KraftedHaven-KraftedHHT-PRD-abc", body["authorizationUrl"])
+        self.assertNotIn("hht.example", body["authorizationUrl"])
         self.assertIn("sell.inventory", body["authorizationUrl"])
         self.assertIn("state=setup-state", body["authorizationUrl"])
         self.assertNotIn("secret", body["authorizationUrl"])
@@ -503,7 +505,7 @@ class MergePipelineTests(unittest.TestCase):
             "expires_in": 7200,
             "token_type": "User Access Token",
         }
-        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret", EBAY_REDIRECT_URI="https://hht.example/callback"):
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret", EBAY_REDIRECT_URI="https://hht.example/callback", EBAY_RUNAME="Korin_KraftedHaven-KraftedHHT-PRD-abc"):
             with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(payload=token_payload)) as post:
                 result = ebay_auth.exchange_authorization_code("code-1")
         self.assertEqual(result["refresh_token"], "refresh-1")
@@ -511,7 +513,20 @@ class MergePipelineTests(unittest.TestCase):
         self.assertTrue(post.call_args.kwargs["headers"]["Authorization"].startswith("Basic "))
         self.assertEqual(post.call_args.kwargs["data"]["grant_type"], "authorization_code")
         self.assertEqual(post.call_args.kwargs["data"]["code"], "code-1")
+        self.assertEqual(post.call_args.kwargs["data"]["redirect_uri"], "Korin_KraftedHaven-KraftedHHT-PRD-abc")
         self.assertNotIn("secret", json.dumps(post.call_args.kwargs["data"]))
+
+    def test_ebay_seller_oauth_falls_back_to_redirect_uri_for_existing_setup(self):
+        with env(
+            EBAY_CLIENT_ID="client",
+            EBAY_CLIENT_SECRET="secret",
+            EBAY_REDIRECT_URI="https://hht.example/api/ebay/oauth/callback",
+            EBAY_ENVIRONMENT="sandbox",
+        ):
+            response = self.client.get("/api/ebay/oauth/start")
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("redirect_uri=https%3A%2F%2Fhht.example%2Fapi%2Febay%2Foauth%2Fcallback", body["authorizationUrl"])
 
     def test_ebay_seller_refresh_token_is_cached(self):
         token_payload = {"access_token": "seller-access", "expires_in": 7200}

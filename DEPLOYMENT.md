@@ -29,6 +29,7 @@ PROVIDER_REQUEST_TIMEOUT_SECONDS=18
 EBAY_CLIENT_ID
 EBAY_CLIENT_SECRET
 EBAY_REDIRECT_URI
+EBAY_RUNAME
 EBAY_REFRESH_TOKEN
 EBAY_AUTH_STATE
 EBAY_USER_SCOPES
@@ -51,7 +52,7 @@ DEMO_MODE=false
 `PRIMARY_VISION_PROVIDER=groq` calls only Groq and does not fan out to every configured provider. Z.AI can remain configured but unused until you want to test it again. `DEMO_MODE=false` is the production default.
 When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
 Official eBay Browse pricing is optional. When `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` are present, `/analyze` uses generated item keywords to fetch active eBay listings and labels the result `active_listing_estimate`. These are active listings, not sold comps. Without Browse access, the app keeps the vision provider's `ai_estimate`.
-Seller OAuth for future inventory/offer work uses `EBAY_REDIRECT_URI`, `EBAY_REFRESH_TOKEN`, and optional `EBAY_AUTH_STATE`/`EBAY_USER_SCOPES`. Use `GET /api/ebay/oauth/start` to generate a consent URL and `GET` or `POST /api/ebay/oauth/callback` to exchange the returned code. The callback returns the refresh token once so it can be copied into `EBAY_REFRESH_TOKEN`; it does not call eBay publish endpoints.
+Seller OAuth for future inventory/offer work uses `EBAY_REDIRECT_URI`, `EBAY_RUNAME`, `EBAY_REFRESH_TOKEN`, and optional `EBAY_AUTH_STATE`/`EBAY_USER_SCOPES`. `EBAY_REDIRECT_URI` is the public callback URL that eBay sends the browser back to. `EBAY_RUNAME` is the OAuth-enabled RuName from the eBay Developer portal, and it is the value sent to eBay as the OAuth `redirect_uri` parameter. Use `GET /api/ebay/oauth/start` to generate a consent URL and `GET` or `POST /api/ebay/oauth/callback` to exchange the returned code. The callback returns the refresh token once so it can be copied into `EBAY_REFRESH_TOKEN`; it does not call eBay publish endpoints.
 Direct eBay draft creation uses `POST /api/ebay/drafts` after an item has been reviewed. It creates or replaces the Inventory item and creates an unpublished Inventory offer using `EBAY_MERCHANT_LOCATION_KEY`, `EBAY_PAYMENT_POLICY_ID`, `EBAY_FULFILLMENT_POLICY_ID`, and `EBAY_RETURN_POLICY_ID`. It intentionally does not call `/publish`, so the app cannot create a live listing from this endpoint.
 `ANALYZE_DEADLINE_SECONDS` and `PROVIDER_REQUEST_TIMEOUT_SECONDS` keep the synchronous `/analyze` call below Heroku's normal 30-second router limit while giving Groq enough time for multi-photo vision requests. Phone images are resized server-side before they are sent to a hosted provider.
 
@@ -59,7 +60,7 @@ Example commands:
 
 ```sh
 heroku stack:set container -a hht-catalog-b34ed1b32417
-heroku config:set PRIMARY_VISION_PROVIDER=groq GROQ_API_KEY=... GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct ANALYZE_DEADLINE_SECONDS=28 PROVIDER_REQUEST_TIMEOUT_SECONDS=18 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... EBAY_REDIRECT_URI=https://hht.ebbiehq.me/api/ebay/oauth/callback EBAY_AUTH_STATE=... EBAY_ENVIRONMENT=production EBAY_MARKETPLACE_ID=EBAY_US EBAY_SITE_ID=0 DEMO_MODE=false -a hht-catalog-b34ed1b32417
+heroku config:set PRIMARY_VISION_PROVIDER=groq GROQ_API_KEY=... GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct ANALYZE_DEADLINE_SECONDS=28 PROVIDER_REQUEST_TIMEOUT_SECONDS=18 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... EBAY_REDIRECT_URI=https://hht.ebbiehq.me/api/ebay/oauth/callback EBAY_RUNAME=... EBAY_AUTH_STATE=... EBAY_ENVIRONMENT=production EBAY_MARKETPLACE_ID=EBAY_US EBAY_SITE_ID=0 DEMO_MODE=false -a hht-catalog-b34ed1b32417
 git push heroku main
 ```
 
