@@ -208,6 +208,8 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Bearer groq-key")
         self.assertNotIn("groq-key", json.dumps(payload))
         self.assertEqual(payload["model"], "qwen/qwen3.6-27b")
+        self.assertEqual(payload["temperature"], 0.7)
+        self.assertEqual(payload["reasoning_format"], "hidden")
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["max_completion_tokens"], 900)
         content = payload["messages"][0]["content"]

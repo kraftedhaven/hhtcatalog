@@ -306,10 +306,12 @@ def _groq(images: list[UploadedImage], context: dict[str, Any]) -> str:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
-        "temperature": 0.1,
+        "temperature": 0.7 if model.startswith("qwen/") else 0.1,
         "max_completion_tokens": 900,
         "response_format": {"type": "json_object"},
     }
+    if model.startswith("qwen/"):
+        payload["reasoning_format"] = "hidden"
     _reject_oversized_payload("groq", model, content, MAX_GROQ_REQUEST_BYTES)
     return _post_openai_compatible("groq", model, "https://api.groq.com/openai/v1/chat/completions", os.environ["GROQ_API_KEY"], payload, context)
 
