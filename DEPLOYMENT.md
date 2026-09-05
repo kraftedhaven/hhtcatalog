@@ -20,7 +20,7 @@ Set the hosted vision provider explicitly in Heroku Config Vars. Do not commit r
 ```text
 PRIMARY_VISION_PROVIDER=groq
 GROQ_API_KEY
-GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+GROQ_MODEL=qwen/qwen3.6-27b
 ZAI_API_KEY
 ZAI_BASE_URL=https://api.z.ai/api/paas/v4/
 ZAI_MODEL=glm-4.6v-flash
@@ -60,7 +60,7 @@ Example commands:
 
 ```sh
 heroku stack:set container -a hht-catalog-b34ed1b32417
-heroku config:set PRIMARY_VISION_PROVIDER=groq GROQ_API_KEY=... GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct ANALYZE_DEADLINE_SECONDS=28 PROVIDER_REQUEST_TIMEOUT_SECONDS=18 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... EBAY_REDIRECT_URI=https://hht.ebbiehq.me/api/ebay/oauth/callback EBAY_RUNAME=... EBAY_AUTH_STATE=... EBAY_ENVIRONMENT=production EBAY_MARKETPLACE_ID=EBAY_US EBAY_SITE_ID=0 DEMO_MODE=false -a hht-catalog-b34ed1b32417
+heroku config:set PRIMARY_VISION_PROVIDER=groq GROQ_API_KEY=... GROQ_MODEL=qwen/qwen3.6-27b ANALYZE_DEADLINE_SECONDS=28 PROVIDER_REQUEST_TIMEOUT_SECONDS=18 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... EBAY_REDIRECT_URI=https://hht.ebbiehq.me/api/ebay/oauth/callback EBAY_RUNAME=... EBAY_AUTH_STATE=... EBAY_ENVIRONMENT=production EBAY_MARKETPLACE_ID=EBAY_US EBAY_SITE_ID=0 DEMO_MODE=false -a hht-catalog-b34ed1b32417
 git push heroku main
 ```
 
