@@ -5,8 +5,10 @@ from typing import Any
 from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
+from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, seller_access_token
+from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
-from hht_app.schema import HEADERS, export_ebay_csv, normalize_listing
+from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
 
 
 PORT = int(os.environ.get("PORT", 8080))
@@ -96,10 +98,79 @@ def export_csv():
     )
 
 
+@app.route("/export/draft-csv", methods=["POST"])
+def export_draft_csv():
+    body = request.get_json(silent=True) or {}
+    items = body.get("items") or body.get("results") or []
+    if not isinstance(items, list):
+        return jsonify({"error": "Request body must include an items array."}), 400
+    try:
+        csv_text = export_ebay_draft_csv(items)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+    return Response(
+        csv_text,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=hht_ebay_draft_template.csv"},
+    )
+
+
 @app.route("/normalize", methods=["POST"])
 def normalize():
     body = request.get_json(silent=True) or {}
     return jsonify({"result": normalize_listing(body)})
+
+
+@app.route("/api/ebay/oauth/start", methods=["GET"])
+def ebay_oauth_start():
+    try:
+        state = os.environ.get("EBAY_AUTH_STATE", "").strip() or None
+        return jsonify({"authorizationUrl": ebay_authorization_url(state), "stateRequired": bool(state)})
+    except EbayAuthError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+
+
+@app.route("/api/ebay/oauth/callback", methods=["GET", "POST"])
+def ebay_oauth_callback():
+    payload = request.get_json(silent=True) or {}
+    code = payload.get("code") or request.form.get("code") or request.args.get("code")
+    state = payload.get("state") or request.form.get("state") or request.args.get("state")
+    expected_state = os.environ.get("EBAY_AUTH_STATE", "").strip()
+    if expected_state and state != expected_state:
+        return jsonify({"error": "Invalid eBay OAuth state."}), 400
+    try:
+        tokens = exchange_authorization_code(str(code or ""))
+    except EbayAuthError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    return jsonify({
+        "status": "ok",
+        "message": "Copy refreshToken into Heroku Config Var EBAY_REFRESH_TOKEN, then remove this setup response from your history.",
+        "expiresIn": tokens["expires_in"],
+        "tokenType": tokens["token_type"],
+        "refreshToken": tokens["refresh_token"],
+    })
+
+
+@app.route("/api/ebay/oauth/status", methods=["GET"])
+def ebay_oauth_status():
+    try:
+        seller_access_token()
+    except EbayAuthError as exc:
+        return jsonify({"configured": False, "provider_errors": [exc.to_public()]}), exc.status_code
+    return jsonify({"configured": True, "provider": "ebay_oauth"})
+
+
+@app.route("/api/ebay/drafts", methods=["POST"])
+def ebay_drafts():
+    body = request.get_json(silent=True) or {}
+    item = body.get("item") or body.get("listing") or body
+    if not isinstance(item, dict):
+        return jsonify({"error": "Request body must include an item object."}), 400
+    try:
+        result = create_ebay_draft(item)
+    except EbayDraftError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    return jsonify({"result": result})
 
 
 @app.errorhandler(413)
@@ -109,7 +180,7 @@ def too_large(_err):
 
 @app.errorhandler(404)
 def not_found(_err):
-    if request.path in {"/analyze", "/bulk-analyze", "/export/csv", "/health", "/normalize"}:
+    if request.path in {"/analyze", "/bulk-analyze", "/export/csv", "/export/draft-csv", "/health", "/normalize", "/api/ebay/oauth/start", "/api/ebay/oauth/callback", "/api/ebay/oauth/status", "/api/ebay/drafts"}:
         return jsonify({"error": "Not found"}), 404
     return _serve_frontend()
 

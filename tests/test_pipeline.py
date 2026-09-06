@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app
 from hht_app import providers
+from hht_app import ebay_auth
+from hht_app import ebay_drafts
 from hht_app.ebay_pricing import (
     active_listing_keywords,
     clear_token_cache,
@@ -18,7 +20,7 @@ from hht_app.ebay_pricing import (
     enrich_with_ebay_active_pricing,
 )
 from hht_app.providers import UploadedImage
-from hht_app.schema import HEADERS, export_ebay_csv, fit_title, normalize_listing
+from hht_app.schema import EBAY_DRAFT_COLUMNS, HEADERS, build_ebay_draft_csv_row, csv_from_draft_row, export_ebay_csv, export_ebay_draft_csv, fit_title, normalize_listing
 
 
 class FakeResponse:
@@ -41,6 +43,9 @@ def env(**values):
         "ANALYZE_DEADLINE_SECONDS", "PROVIDER_REQUEST_TIMEOUT_SECONDS",
         "HOSTED_PROVIDER_ORDER", "PROVIDER_COOLDOWN_SECONDS",
         "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_ENVIRONMENT", "EBAY_MARKETPLACE_ID", "EBAY_SITE_ID",
+        "EBAY_REDIRECT_URI", "EBAY_RUNAME", "EBAY_REFRESH_TOKEN", "EBAY_USER_SCOPES", "EBAY_AUTH_STATE",
+        "EBAY_MERCHANT_LOCATION_KEY", "EBAY_PAYMENT_POLICY_ID", "EBAY_FULFILLMENT_POLICY_ID",
+        "EBAY_RETURN_POLICY_ID", "EBAY_CURRENCY", "EBAY_LISTING_DURATION",
         "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL",
         "GROQ_API_KEY", "GROQ_MODEL", "DEMO_MODE"
     ]
@@ -95,7 +100,7 @@ class MergePipelineTests(unittest.TestCase):
         self.client = app.app.test_client()
         self.image = UploadedImage(b"fake image data", "image/jpeg", "test.jpg")
         clear_token_cache()
-        providers.PROVIDER_COOLDOWNS.clear()
+        ebay_auth.clear_seller_token_cache()
 
     def test_health_is_safe(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="secret"):
@@ -167,15 +172,15 @@ class MergePipelineTests(unittest.TestCase):
         self.assertNotIn("zai-key", json.dumps(calls[0][1]["json"]))
         self.assertEqual(calls[0][1]["json"]["model"], "glm-4.6v-flash")
         self.assertEqual(calls[0][1]["json"]["temperature"], 0.1)
-        self.assertEqual(calls[0][1]["json"]["max_tokens"], 1000)
+        self.assertEqual(calls[0][1]["json"]["max_tokens"], 800)
         self.assertNotIn("thinking", calls[0][1]["json"])
         content = calls[0][1]["json"]["messages"][0]["content"]
         self.assertEqual(content[0]["type"], "image_url")
         self.assertTrue(content[0]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
         self.assertEqual(content[-1]["type"], "text")
         self.assertIn("Buy It Now estimate", content[-1]["text"])
-        self.assertIn("Do not claim checked sold comps", content[-1]["text"])
-        self.assertLess(len(content[-1]["text"]), 1200)
+        self.assertIn("not sold comps", content[-1]["text"])
+        self.assertLess(len(content[-1]["text"]), 900)
         self.assertEqual(result["pricingSource"], "ai_estimate")
         self.assertEqual(result["pricingSearchKeywords"], "Levi's Jacket L Cotton Trucker")
 
@@ -192,6 +197,41 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(result["provider"], "zai")
         self.assertEqual(len(calls), 1)
         self.assertIn("api.z.ai", calls[0])
+
+    def test_groq_mock_success_uses_compressed_multimodal_non_thinking_request(self):
+        with env(PRIMARY_VISION_PROVIDER="groq", GROQ_API_KEY="groq-key"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
+                result = providers.analyze_images([self.image] * 5)
+        self.assertEqual(result["provider"], "groq")
+        self.assertEqual(post.call_args.args[0], "https://api.groq.com/openai/v1/chat/completions")
+        headers = post.call_args.kwargs["headers"]
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(headers["Authorization"], "Bearer groq-key")
+        self.assertNotIn("groq-key", json.dumps(payload))
+        self.assertEqual(payload["model"], "qwen/qwen3.6-27b")
+        self.assertEqual(payload["temperature"], 0.7)
+        self.assertEqual(payload["reasoning_effort"], "none")
+        self.assertEqual(payload["reasoning_format"], "hidden")
+        self.assertNotIn("response_format", payload)
+        self.assertEqual(payload["max_completion_tokens"], 900)
+        content = payload["messages"][0]["content"]
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(len([part for part in content if part["type"] == "image_url"]), 3)
+
+    def test_groq_429_honors_retry_after_once(self):
+        payload = {"error": {"code": "rate_limit_exceeded", "message": "too many requests"}}
+        with env(PRIMARY_VISION_PROVIDER="groq", GROQ_API_KEY="groq-key", DEMO_MODE="false"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=429, payload=payload, headers={"retry-after": "2"})) as post:
+                with mock.patch.object(providers.time, "sleep") as sleep:
+                    with self.assertRaises(providers.ProviderError) as ctx:
+                        providers.analyze_images([self.image])
+        failure = ctx.exception.failures[0]
+        self.assertEqual(failure["provider"], "groq")
+        self.assertEqual(failure["category"], "rate_limited")
+        self.assertEqual(failure["retryable"], True)
+        self.assertEqual(failure["message"], "Groq rate limit reached. Wait briefly, then retry one small photo (code rate_limit_exceeded).")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(2.0)
 
     def test_provider_failure_is_non_demo(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", DEMO_MODE="false"):
@@ -225,7 +265,7 @@ class MergePipelineTests(unittest.TestCase):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 providers.analyze_images(images)
         content = post.call_args.kwargs["json"]["messages"][0]["content"]
-        self.assertEqual(len([part for part in content if part["type"] == "image_url"]), 5)
+        self.assertEqual(len([part for part in content if part["type"] == "image_url"]), 3)
 
     def test_zai_rejects_more_than_five_images(self):
         with self.assertRaises(providers.ProviderError) as ctx:
@@ -289,9 +329,33 @@ class MergePipelineTests(unittest.TestCase):
     def test_zai_413_failure_is_sanitized(self):
         self._assert_zai_failure(413, "payload_too_large", False)
 
-    def test_zai_429_failure_marks_provider_unavailable_without_retry(self):
-        self._assert_zai_failure(429, "rate_limit", False)
-        self.assertGreater(providers._cooldown_remaining_seconds("zai"), 0)
+    def test_zai_429_failure_retries_once(self):
+        self._assert_zai_failure(429, "rate_limited", True)
+
+    def test_zai_429_honors_retry_after_once(self):
+        payload = {"error": {"code": "1305", "message": "rate limited"}}
+        with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", DEMO_MODE="false"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=429, payload=payload, headers={"Retry-After": "2"})) as post:
+                with mock.patch.object(providers.time, "sleep") as sleep:
+                    with self.assertRaises(providers.ProviderError) as ctx:
+                        providers.analyze_images([self.image])
+        failure = ctx.exception.failures[0]
+        self.assertEqual(failure["category"], "rate_limited")
+        self.assertEqual(failure["retryable"], True)
+        self.assertEqual(failure["message"], "Z.AI rate limit reached. Wait a few minutes, then retry one small photo (code 1305).")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(2.0)
+
+    def test_zai_429_without_retry_after_uses_bounded_backoff(self):
+        payload = {"error": {"code": "1305", "message": "rate limited"}}
+        with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", DEMO_MODE="false"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=429, payload=payload)) as post:
+                with mock.patch.object(providers.time, "sleep") as sleep:
+                    with self.assertRaises(providers.ProviderError) as ctx:
+                        providers.analyze_images([self.image])
+        self.assertEqual(ctx.exception.failures[0]["category"], "rate_limited")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(0.25)
 
     def test_zai_500_failure_does_not_retry(self):
         self._assert_zai_failure(500, "server_error", False)
@@ -339,6 +403,23 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(ctx.exception.failures[0]["category"], "timeout")
         self.assertEqual(ctx.exception.failures[0]["retryable"], True)
         self.assertEqual(post.call_count, 2)
+
+    def test_zai_concurrency_lock_blocks_overlapping_request(self):
+        acquired = providers.ZAI_REQUEST_LOCK.acquire(timeout=0.1)
+        self.assertTrue(acquired)
+        try:
+            with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
+                context = {"deadline": providers.time.monotonic() + 6}
+                with mock.patch.object(providers.requests, "post") as post:
+                    with self.assertRaises(providers.ProviderError) as ctx:
+                        providers.analyze_images([self.image], context)
+        finally:
+            providers.ZAI_REQUEST_LOCK.release()
+        failure = ctx.exception.failures[0]
+        self.assertEqual(failure["category"], "rate_limited")
+        self.assertEqual(failure["retryable"], True)
+        self.assertIn("already analyzing", failure["message"])
+        post.assert_not_called()
 
     def test_zai_non_vision_model_response_is_sanitized(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", ZAI_MODEL="glm-4.6"):
@@ -484,6 +565,201 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(second, "token-1")
         self.assertEqual(post.call_count, 1)
         self.assertTrue(post.call_args.kwargs["headers"]["Authorization"].startswith("Basic "))
+
+    def test_ebay_seller_oauth_start_url_uses_user_scopes(self):
+        with env(
+            EBAY_CLIENT_ID="client",
+            EBAY_CLIENT_SECRET="secret",
+            EBAY_REDIRECT_URI="https://hht.example/api/ebay/oauth/callback",
+            EBAY_RUNAME="Korin_KraftedHaven-KraftedHHT-PRD-abc",
+            EBAY_AUTH_STATE="setup-state",
+            EBAY_ENVIRONMENT="sandbox",
+        ):
+            response = self.client.get("/api/ebay/oauth/start")
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("https://auth.sandbox.ebay.com/oauth2/authorize?", body["authorizationUrl"])
+        self.assertIn("client_id=client", body["authorizationUrl"])
+        self.assertIn("redirect_uri=Korin_KraftedHaven-KraftedHHT-PRD-abc", body["authorizationUrl"])
+        self.assertNotIn("hht.example", body["authorizationUrl"])
+        self.assertIn("sell.inventory", body["authorizationUrl"])
+        self.assertIn("state=setup-state", body["authorizationUrl"])
+        self.assertNotIn("secret", body["authorizationUrl"])
+
+    def test_ebay_seller_exchange_code_returns_refresh_token_once(self):
+        token_payload = {
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+            "expires_in": 7200,
+            "token_type": "User Access Token",
+        }
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret", EBAY_REDIRECT_URI="https://hht.example/callback", EBAY_RUNAME="Korin_KraftedHaven-KraftedHHT-PRD-abc"):
+            with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(payload=token_payload)) as post:
+                result = ebay_auth.exchange_authorization_code("code-1")
+        self.assertEqual(result["refresh_token"], "refresh-1")
+        self.assertEqual(post.call_args.args[0], "https://api.ebay.com/identity/v1/oauth2/token")
+        self.assertTrue(post.call_args.kwargs["headers"]["Authorization"].startswith("Basic "))
+        self.assertEqual(post.call_args.kwargs["data"]["grant_type"], "authorization_code")
+        self.assertEqual(post.call_args.kwargs["data"]["code"], "code-1")
+        self.assertEqual(post.call_args.kwargs["data"]["redirect_uri"], "Korin_KraftedHaven-KraftedHHT-PRD-abc")
+        self.assertNotIn("secret", json.dumps(post.call_args.kwargs["data"]))
+
+    def test_ebay_seller_oauth_falls_back_to_redirect_uri_for_existing_setup(self):
+        with env(
+            EBAY_CLIENT_ID="client",
+            EBAY_CLIENT_SECRET="secret",
+            EBAY_REDIRECT_URI="https://hht.example/api/ebay/oauth/callback",
+            EBAY_ENVIRONMENT="sandbox",
+        ):
+            response = self.client.get("/api/ebay/oauth/start")
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("redirect_uri=https%3A%2F%2Fhht.example%2Fapi%2Febay%2Foauth%2Fcallback", body["authorizationUrl"])
+
+    def test_ebay_seller_refresh_token_is_cached(self):
+        token_payload = {"access_token": "seller-access", "expires_in": 7200}
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret", EBAY_REDIRECT_URI="https://hht.example/callback", EBAY_REFRESH_TOKEN="refresh-1"):
+            with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(payload=token_payload)) as post:
+                first = ebay_auth.seller_access_token()
+                second = ebay_auth.seller_access_token()
+        self.assertEqual(first, "seller-access")
+        self.assertEqual(second, "seller-access")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["data"]["grant_type"], "refresh_token")
+        self.assertEqual(post.call_args.kwargs["data"]["refresh_token"], "refresh-1")
+
+    def test_ebay_seller_oauth_failure_is_sanitized(self):
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="super-secret", EBAY_REDIRECT_URI="https://hht.example/callback"):
+            with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(status_code=401, payload={"error": "invalid_client", "error_description": "Client authentication failed"})):
+                with self.assertRaises(ebay_auth.EbayAuthError) as ctx:
+                    ebay_auth.exchange_authorization_code("bad-code")
+        public = ctx.exception.to_public()
+        self.assertEqual(public["provider"], "ebay_oauth")
+        self.assertEqual(public["category"], "authentication")
+        self.assertEqual(public["message"], "eBay OAuth authentication failed (invalid_client).")
+        self.assertNotIn("super-secret", json.dumps(public))
+        self.assertNotIn("Client authentication failed", json.dumps(public))
+
+    def test_ebay_oauth_callback_validates_state_and_returns_refresh_token(self):
+        token_payload = {
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+            "expires_in": 7200,
+            "token_type": "User Access Token",
+        }
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret", EBAY_REDIRECT_URI="https://hht.example/callback", EBAY_AUTH_STATE="state-1"):
+            bad = self.client.post("/api/ebay/oauth/callback", json={"code": "code-1", "state": "wrong"})
+            with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(payload=token_payload)):
+                good = self.client.post("/api/ebay/oauth/callback", json={"code": "code-1", "state": "state-1"})
+        self.assertEqual(bad.status_code, 400)
+        self.assertEqual(good.status_code, 200)
+        body = good.get_json()
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["refreshToken"], "refresh-1")
+        self.assertNotIn("access-1", good.get_data(as_text=True))
+
+    def test_ebay_draft_creation_creates_unpublished_inventory_offer(self):
+        item = {
+            "sku": "LEVIS-123",
+            "title": "Levi's Denim Jacket",
+            "price": 24.99,
+            "cid": "3000",
+            "cnote": "Pre-owned with light wear.",
+            "cat": "57988",
+            "brand": "Levi's",
+            "size": "L",
+            "color": "Blue",
+            "dept": "Men",
+            "type": "Jacket",
+            "style": "Trucker",
+            "mat": "Cotton",
+            "pat": "Solid",
+            "pic": "https://example.com/photo.jpg",
+        }
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if method == "PUT":
+                return FakeResponse(status_code=204)
+            return FakeResponse(status_code=201, payload={"offerId": "offer-123"})
+
+        with env(
+            EBAY_MERCHANT_LOCATION_KEY="warehouse-1",
+            EBAY_PAYMENT_POLICY_ID="pay-1",
+            EBAY_FULFILLMENT_POLICY_ID="ship-1",
+            EBAY_RETURN_POLICY_ID="return-1",
+            EBAY_MARKETPLACE_ID="EBAY_US",
+            EBAY_ENVIRONMENT="sandbox",
+        ):
+            with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-token"):
+                with mock.patch("hht_app.ebay_drafts.requests.request", side_effect=fake_request):
+                    result = ebay_drafts.create_ebay_draft(item)
+
+        self.assertEqual(result["status"], "draft_created")
+        self.assertEqual(result["offerId"], "offer-123")
+        self.assertFalse(result["published"])
+        self.assertEqual(result["sku"], "LEVIS-123")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], "PUT")
+        self.assertEqual(calls[0][1], "https://api.sandbox.ebay.com/sell/inventory/v1/inventory_item/LEVIS-123")
+        self.assertEqual(calls[1][0], "POST")
+        self.assertEqual(calls[1][1], "https://api.sandbox.ebay.com/sell/inventory/v1/offer")
+        self.assertFalse(any("/publish" in call[1] for call in calls))
+        self.assertEqual(calls[0][2]["headers"]["Authorization"], "Bearer seller-token")
+        self.assertEqual(calls[0][2]["json"]["condition"], "USED_EXCELLENT")
+        self.assertEqual(calls[0][2]["json"]["product"]["imageUrls"], ["https://example.com/photo.jpg"])
+        self.assertEqual(calls[1][2]["json"]["listingPolicies"]["paymentPolicyId"], "pay-1")
+        self.assertEqual(calls[1][2]["json"]["merchantLocationKey"], "warehouse-1")
+        self.assertEqual(calls[1][2]["json"]["pricingSummary"]["price"]["value"], "24.99")
+
+    def test_ebay_draft_endpoint_returns_result(self):
+        with mock.patch("app.create_ebay_draft", return_value={"status": "draft_created", "offerId": "offer-1", "published": False}) as create:
+            response = self.client.post("/api/ebay/drafts", json={"item": {"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["result"]["offerId"], "offer-1")
+        self.assertFalse(response.get_json()["result"]["published"])
+        create.assert_called_once()
+
+    def test_ebay_draft_missing_policy_config_fails_before_write(self):
+        item = {"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}
+        with env(EBAY_PAYMENT_POLICY_ID="pay-1", EBAY_FULFILLMENT_POLICY_ID="ship-1", EBAY_RETURN_POLICY_ID="return-1"):
+            with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-token") as token:
+                with mock.patch("hht_app.ebay_drafts.requests.request") as request:
+                    with self.assertRaises(ebay_drafts.EbayDraftError) as ctx:
+                        ebay_drafts.create_ebay_draft(item)
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.category, "configuration")
+        self.assertIn("EBAY_MERCHANT_LOCATION_KEY", ctx.exception.safe_message)
+        token.assert_not_called()
+        request.assert_not_called()
+
+    def test_ebay_draft_upstream_error_is_sanitized(self):
+        item = {
+            "sku": "LEVIS-123",
+            "title": "Levi's Jacket",
+            "price": 24.99,
+            "cat": "57988",
+            "brand": "Levi's",
+            "type": "Jacket",
+        }
+        with env(
+            EBAY_MERCHANT_LOCATION_KEY="warehouse-1",
+            EBAY_PAYMENT_POLICY_ID="pay-1",
+            EBAY_FULFILLMENT_POLICY_ID="ship-1",
+            EBAY_RETURN_POLICY_ID="return-1",
+        ):
+            with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-secret-token"):
+                with mock.patch("hht_app.ebay_drafts.requests.request", return_value=FakeResponse(status_code=403, payload={"errors": [{"errorId": "25002", "message": "Bad auth"}]})):
+                    with self.assertRaises(ebay_drafts.EbayDraftError) as ctx:
+                        ebay_drafts.create_ebay_draft(item)
+        public = ctx.exception.to_public()
+        self.assertEqual(public["provider"], "ebay_inventory")
+        self.assertEqual(public["status"], 403)
+        self.assertEqual(public["category"], "authentication")
+        self.assertEqual(public["code"], "25002")
+        self.assertNotIn("seller-secret-token", json.dumps(public))
+        self.assertNotIn("Bad auth", json.dumps(public))
 
     def test_ebay_token_failure_is_sanitized(self):
         with env(EBAY_CLIENT_ID="real-client-id", EBAY_CLIENT_SECRET="real-secret"):
@@ -680,6 +956,39 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(len(rows[1]), 35)
         self.assertIn('"<p>HTML description</p>"', text)
 
+    def test_draft_csv_helper_is_separate_from_exact_35_column_export(self):
+        item = {
+            "sku": "LEVIS-123",
+            "title": "Levi's Jacket",
+            "price": 24.99,
+            "cid": "3000",
+            "cnote": "Pre-owned",
+            "cat": "57988",
+            "brand": "Levi's",
+            "type": "Jacket",
+            "pic": "https://example.com/photo.jpg",
+        }
+        row = build_ebay_draft_csv_row(item)
+        text = csv_from_draft_row(row)
+        rows = list(csv.DictReader(io.StringIO(text)))
+        self.assertEqual(list(csv.reader(io.StringIO(text)))[0], EBAY_DRAFT_COLUMNS)
+        self.assertEqual(rows[0]["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"], "Draft")
+        self.assertEqual(rows[0]["Custom label (SKU)"], "LEVIS-123")
+        self.assertEqual(rows[0]["Category ID"], "57988")
+        self.assertEqual(rows[0]["Condition ID"], "3000")
+        self.assertEqual(rows[0]["Format"], "FixedPrice")
+        self.assertEqual(len(HEADERS), 35)
+
+    def test_export_draft_csv_endpoint_returns_11_column_template(self):
+        response = self.client.post(
+            "/export/draft-csv",
+            json={"items": [{"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}]},
+        )
+        self.assertEqual(response.status_code, 200)
+        rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
+        self.assertEqual(rows[0], EBAY_DRAFT_COLUMNS)
+        self.assertEqual(len(rows[1]), 11)
+
     def test_multiple_rows_export(self):
         text = export_ebay_csv([
             {"title": "A", "brand": "No Brand", "type": "Shirt", "price": 1, "cat": "15724"},
@@ -697,7 +1006,7 @@ class MergePipelineTests(unittest.TestCase):
                 content_type="multipart/form-data",
             )
         self.assertEqual(response.status_code, 503)
-        self.assertIn("OPENROUTER_API_KEY", response.get_json()["error"])
+        self.assertIn("PRIMARY_VISION_PROVIDER=groq", response.get_json()["error"])
 
 
 if __name__ == "__main__":

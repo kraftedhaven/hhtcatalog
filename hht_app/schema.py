@@ -16,6 +16,20 @@ HEADERS = [
     "C:Size Type", "C:Vintage",
 ]
 
+EBAY_DRAFT_COLUMNS = [
+    "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)",
+    "Custom label (SKU)",
+    "Category ID",
+    "Title",
+    "UPC",
+    "Price",
+    "Quantity",
+    "Item photo URL",
+    "Condition ID",
+    "Description",
+    "Format",
+]
+
 SCHEMA_KEYS = [
     "title", "price", "cid", "cnote", "cat", "brand", "size", "color",
     "dept", "type", "style", "mat", "pat", "slv", "nk", "sea", "occ",
@@ -184,6 +198,41 @@ def export_ebay_csv(items: list[dict[str, Any]], defaults: dict[str, Any] | None
     for row in rows:
         writer.writerow(row)
     return out.getvalue()
+
+
+def build_ebay_draft_csv_row(item: dict[str, Any], sku: str = "") -> dict[str, Any]:
+    listing = normalize_listing(item)
+    price = _price(listing.get("price"))
+    return {
+        "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)": "Draft",
+        "Custom label (SKU)": _text(sku or item.get("sku") or item.get("customLabel")),
+        "Category ID": _text(listing.get("cat")),
+        "Title": _text(listing.get("title")),
+        "UPC": _text(item.get("upc")) or "Does not apply",
+        "Price": f"{price:.2f}" if price else "0.00",
+        "Quantity": _text(item.get("quantity")) or "1",
+        "Item photo URL": _text(listing.get("pic")) or PIC_PLACEHOLDER,
+        "Condition ID": _text(listing.get("cid")),
+        "Description": _text(listing.get("desc")),
+        "Format": "FixedPrice",
+    }
+
+
+def csv_from_draft_row(csv_row: dict[str, Any]) -> str:
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=EBAY_DRAFT_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerow({column: csv_row.get(column, "") for column in EBAY_DRAFT_COLUMNS})
+    return output.getvalue()
+
+
+def export_ebay_draft_csv(items: list[dict[str, Any]]) -> str:
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=EBAY_DRAFT_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for item in items:
+        writer.writerow(build_ebay_draft_csv_row(item))
+    return output.getvalue()
 
 
 class _HtmlAwareWriter:

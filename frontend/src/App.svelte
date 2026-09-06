@@ -1,6 +1,6 @@
 <script>
     import "./app.css";
-    import { analyzeImages, downloadCSV, downloadJSON } from "$lib/api";
+    import { analyzeImages, createEbayDraft, downloadCSV, downloadJSON } from "$lib/api";
 
     const emptyItem = {
         title: "", price: "", cid: "3000", cnote: "", cat: "", brand: "",
@@ -29,8 +29,7 @@
     let status = "";
     let error = "";
     let loading = false;
-    let canTryAlternate = false;
-    let alternateProvider = "";
+    let draftLoading = -1;
     let restoreInput;
     let localPipeline = null;
 
@@ -128,7 +127,7 @@
 
     async function compactHostedFiles(sourceFiles) {
         const resized = [];
-        for (const file of sourceFiles.slice(0, 5)) {
+        for (const file of sourceFiles.slice(0, 3)) {
             resized.push(await resizeImage(file));
         }
         return resized;
@@ -225,6 +224,7 @@
             not_found: "endpoint or model was not found",
             payload_too_large: "image upload is too large after compression",
             rate_limit: "rate limit or free model unavailable",
+            rate_limited: "Z.AI rate limit reached; wait a few minutes and retry one small photo",
             request_error: "request parameters were rejected",
             server_error: "provider server error",
             malformed_json: "provider returned unreadable JSON",
@@ -245,6 +245,14 @@
             ? " If Gemini is out of credits, remove GEMINI_API_KEY from Heroku Config Vars."
             : "";
         return `${err.message || "Analysis failed."} ${lines.join("; ")}. No demo data was shown.${geminiHint}`;
+    }
+
+    function friendlyEbayError(err) {
+        const failures = err.providerFailures || [];
+        if (!failures.length) return err.message || "eBay draft creation failed.";
+        const failure = failures[0];
+        const statusText = failure.status ? ` (${failure.status})` : "";
+        return `${failure.provider || "eBay"}: ${failure.message || failure.category || "draft creation failed"}${statusText}`;
     }
 
     function parseModelJSON(raw) {
@@ -317,6 +325,22 @@
             await downloadCSV(queue, seller);
         } catch (err) {
             error = err.message || String(err);
+        }
+    }
+
+    async function createDraft(index) {
+        error = "";
+        const queued = queue[index];
+        if (!queued) return;
+        draftLoading = index;
+        try {
+            const result = await createEbayDraft(queued);
+            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferId: result.offerId, ebayDraftStatus: result.status } : entry);
+            status = `eBay draft created for ${queued.title}: offer ${result.offerId}. Review it in eBay before publishing.`;
+        } catch (err) {
+            error = friendlyEbayError(err);
+        } finally {
+            draftLoading = -1;
         }
     }
 
@@ -401,13 +425,13 @@
             <label class="field">
                 <span>Analysis engine</span>
                 <select bind:value={engine}>
-                    <option value="hosted">Hosted secure analysis</option>
+                    <option value="hosted">Fast hosted Groq vision</option>
                     <option value="local">Browser-local SmolVLM experimental</option>
                 </select>
             </label>
             <p class="help">
                 {engine === "hosted"
-                    ? "Photos go to this Heroku app, which calls server-side provider keys only."
+                    ? "Photos go to this Heroku app, which calls Groq with server-side provider keys only."
                     : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
             </p>
             <label class="dropzone">
@@ -484,7 +508,8 @@
             {:else}
                 {#each queue as queued, index}
                     <div class="queue-row">
-                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}</span></div>
+                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayOfferId ? ` / eBay offer ${queued.ebayOfferId}` : ""}</span></div>
+                        <button type="button" disabled={draftLoading === index} on:click={() => createDraft(index)}>{draftLoading === index ? "Creating..." : "Create eBay Draft"}</button>
                         <button type="button" on:click={() => editQueued(index)}>Edit</button>
                         <button type="button" on:click={() => queue = queue.filter((_, i) => i !== index)}>Remove</button>
                     </div>

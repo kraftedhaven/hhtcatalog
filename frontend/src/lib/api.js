@@ -27,7 +27,7 @@ async function parseResponse(res) {
 
 export async function analyzeImages(files, sellerDefaults = {}, options = {}) {
     const form = new FormData();
-    for (const file of files.slice(0, 5)) form.append('file', file);
+    for (const file of files.slice(0, 3)) form.append('file', file);
     form.append('sellerDefaults', JSON.stringify(sellerDefaults));
     if (options.tryAlternate) form.append('tryAlternate', '1');
     const res = await fetch(`${baseUrl()}/analyze`, { method: 'POST', body: form });
@@ -76,6 +76,16 @@ export async function downloadCSV(items, defaults = {}) {
     a.download = `hht_ebay_listings_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+export async function createEbayDraft(item) {
+    const res = await fetch(`${baseUrl()}/api/ebay/drafts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item })
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
 }
 
 export function downloadJSON(data, filename = 'hht-listings-backup.json') {
