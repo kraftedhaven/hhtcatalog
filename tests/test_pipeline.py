@@ -197,7 +197,7 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("api.z.ai", calls[0])
 
-    def test_groq_mock_success_uses_compressed_multimodal_json_mode(self):
+    def test_groq_mock_success_uses_compressed_multimodal_non_thinking_request(self):
         with env(PRIMARY_VISION_PROVIDER="groq", GROQ_API_KEY="groq-key"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 result = providers.analyze_images([self.image] * 5)
@@ -209,8 +209,9 @@ class MergePipelineTests(unittest.TestCase):
         self.assertNotIn("groq-key", json.dumps(payload))
         self.assertEqual(payload["model"], "qwen/qwen3.6-27b")
         self.assertEqual(payload["temperature"], 0.7)
+        self.assertEqual(payload["reasoning_effort"], "none")
         self.assertEqual(payload["reasoning_format"], "hidden")
-        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertNotIn("response_format", payload)
         self.assertEqual(payload["max_completion_tokens"], 900)
         content = payload["messages"][0]["content"]
         self.assertEqual(content[0]["type"], "text")

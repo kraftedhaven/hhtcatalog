@@ -308,9 +308,13 @@ def _groq(images: list[UploadedImage], context: dict[str, Any]) -> str:
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.7 if model.startswith("qwen/") else 0.1,
         "max_completion_tokens": 900,
-        "response_format": {"type": "json_object"},
     }
     if model.startswith("qwen/"):
+        # Groq's JSON-object validator can reject otherwise valid vision calls with
+        # json_validate_failed. The prompt plus parse_model_json below remain the
+        # contract for listing extraction, without turning a model formatting miss
+        # into an upstream 400 before the model can answer.
+        payload["reasoning_effort"] = "none"
         payload["reasoning_format"] = "hidden"
     _reject_oversized_payload("groq", model, content, MAX_GROQ_REQUEST_BYTES)
     return _post_openai_compatible("groq", model, "https://api.groq.com/openai/v1/chat/completions", os.environ["GROQ_API_KEY"], payload, context)
@@ -427,7 +431,7 @@ def _zai_prompt(context: dict[str, Any]) -> str:
 def _groq_prompt(context: dict[str, Any]) -> str:
     defaults = context.get("seller_defaults") or {}
     location = defaults.get("location") or "Kettering, Ohio"
-    return f"{ZAI_PROMPT}\nUse supported eBay category IDs. Seller location: {location}. Keep desc under 700 characters."
+    return f"{ZAI_PROMPT}\nReturn valid JSON only. Use supported eBay category IDs. Seller location: {location}. Keep desc under 700 characters."
 
 
 def _demo_listing() -> dict[str, Any]:
