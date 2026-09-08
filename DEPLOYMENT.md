@@ -68,6 +68,7 @@ git push heroku main
 
 `POST /analyze` accepts `multipart/form-data` with one to five `file` fields.
 Files must be JPEG, PNG, WebP, GIF, or HEIC and fit under `MAX_UPLOAD_MB`.
+Optional form field `tryAlternate=1` attempts one alternate hosted provider once.
 
 `GET /health` returns provider availability booleans and never returns secrets.
 
