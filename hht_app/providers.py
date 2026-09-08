@@ -45,6 +45,14 @@ ZAI_IMAGE_RETRY_MAX_EDGE = 640
 ZAI_IMAGE_QUALITY = 72
 ZAI_IMAGE_RETRY_QUALITY = 64
 ZAI_REQUEST_LOCK = threading.Lock()
+# Hosted providers are attempted only when selected explicitly or through the
+# one-shot alternate action. Z.AI stays opt-in while its account limits settle.
+DEFAULT_HOSTED_PROVIDER_ORDER = ("groq", "openrouter", "gemini")
+PROVIDER_CALLERS = frozenset({"zai", "openrouter", "gemini", "groq"})
+DEFAULT_PROVIDER_COOLDOWN_SECONDS = 90
+PROVIDER_COOLDOWNS: dict[str, float] = {}
+RATE_LIMIT_CODES = frozenset({"1305", "rate_limit", "rate_limited", "rate_limit_exceeded"})
+UNAVAILABLE_HINTS = ("rate limit", "rate_limit", "temporarily unavailable", "capacity", "overloaded", "service unavailable")
 
 PROMPT = """You are an eBay listing assistant. Inspect every supplied clothing, shoe, or bag photo.
 Return one concise JSON object only with these keys:
@@ -699,6 +707,12 @@ def _provider_error_from_response(provider: str | None, model: str | None, respo
         retry_after_seconds=retry_after,
         upstream_error=upstream_error,
     )
+
+
+def _category_for_response(status_code: int, upstream_error: dict[str, str] | None = None) -> str:
+    if _is_rate_limited_or_unavailable(status_code, upstream_error):
+        return "rate_limit"
+    return _category_for_status(status_code)
 
 
 def _header_value(response: requests.Response, name: str) -> str:

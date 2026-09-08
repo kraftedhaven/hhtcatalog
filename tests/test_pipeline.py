@@ -101,6 +101,7 @@ class MergePipelineTests(unittest.TestCase):
         self.image = UploadedImage(b"fake image data", "image/jpeg", "test.jpg")
         clear_token_cache()
         ebay_auth.clear_seller_token_cache()
+        providers.PROVIDER_COOLDOWNS.clear()
 
     def test_health_is_safe(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="secret"):
