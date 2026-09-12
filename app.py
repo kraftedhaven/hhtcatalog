@@ -180,7 +180,12 @@ def too_large(_err):
 
 @app.errorhandler(404)
 def not_found(_err):
-    if request.path in {"/analyze", "/bulk-analyze", "/export/csv", "/export/draft-csv", "/health", "/normalize", "/api/ebay/oauth/start", "/api/ebay/oauth/callback", "/api/ebay/oauth/status", "/api/ebay/drafts"}:
+    path = request.path.rstrip("/") or "/"
+    # Serve the Svelte shell only for extensionless client-side routes. Missing
+    # files and unknown API endpoints must remain 404s instead of looking valid
+    # to scanners probing for credential files.
+    server_prefixes = ("/api/", "/analyze/", "/bulk-analyze/", "/export/", "/health/", "/normalize/")
+    if path.startswith(server_prefixes) or os.path.splitext(path)[1]:
         return jsonify({"error": "Not found"}), 404
     return _serve_frontend()
 

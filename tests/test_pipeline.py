@@ -112,6 +112,18 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(body["providers"]["zai"], True)
         self.assertNotIn("secret", response.get_data(as_text=True))
 
+    def test_unknown_credential_like_file_returns_404(self):
+        response = self.client.get("/application_default_credentials.json")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json(), {"error": "Not found"})
+
+        response = self.client.get("/health/readiness")
+        self.assertEqual(response.status_code, 404)
+
+    def test_client_side_route_still_serves_frontend(self):
+        response = self.client.get("/queue")
+        self.assertEqual(response.status_code, 200)
+
     def test_analyze_rejects_missing_file(self):
         response = self.client.post("/analyze", data={})
         self.assertEqual(response.status_code, 400)
