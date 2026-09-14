@@ -1,6 +1,6 @@
 <script>
     import "./app.css";
-    import { analyzeImages, createEbayDraft, downloadCSV, downloadJSON } from "$lib/api";
+    import { analyzeImages, createEbayDraft, downloadCSV, downloadDraftCSV, downloadJSON } from "$lib/api";
 
     const emptyItem = {
         title: "", price: "", cid: "3000", cnote: "", cat: "", brand: "",
@@ -330,6 +330,18 @@
         }
     }
 
+    async function exportDraftQueue() {
+        if (!queue.length) {
+            error = "Queue is empty.";
+            return;
+        }
+        try {
+            await downloadDraftCSV(queue);
+        } catch (err) {
+            error = err.message || String(err);
+        }
+    }
+
     async function createDraft(index) {
         error = "";
         const queued = queue[index];
@@ -518,6 +530,7 @@
                 {/each}
                 <div class="actions">
                     <button class="primary" on:click={exportQueue}>Download eBay CSV</button>
+                    <button on:click={exportDraftQueue}>Download Draft CSV</button>
                     <button on:click={backupQueue}>Download JSON backup</button>
                     <button on:click={() => queue = []}>Clear queue</button>
                 </div>
