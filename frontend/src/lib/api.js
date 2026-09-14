@@ -106,6 +106,32 @@ export async function createEbayDraft(item) {
     return body.result || body;
 }
 
+export async function getEbayOffer(offerId) {
+    const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`);
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function updateEbayOffer(offerId, item) {
+    const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item })
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function publishEbayOffer(offerId) {
+    const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}/publish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmPublish: true })
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
 export function downloadJSON(data, filename = 'hht-listings-backup.json') {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');

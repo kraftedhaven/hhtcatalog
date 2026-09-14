@@ -6,7 +6,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, seller_access_token
-from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft
+from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft, get_ebay_offer, publish_ebay_offer, update_ebay_offer
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
 from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
 
@@ -168,6 +168,40 @@ def ebay_drafts():
         return jsonify({"error": "Request body must include an item object."}), 400
     try:
         result = create_ebay_draft(item)
+    except EbayDraftError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    return jsonify({"result": result})
+
+
+@app.route("/api/ebay/offers/<offer_id>", methods=["GET"])
+def ebay_offer(offer_id):
+    try:
+        result = get_ebay_offer(offer_id)
+    except EbayDraftError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    return jsonify({"result": result})
+
+
+@app.route("/api/ebay/offers/<offer_id>", methods=["PUT"])
+def ebay_offer_update(offer_id):
+    body = request.get_json(silent=True) or {}
+    item = body.get("item") or body.get("listing") or body
+    if not isinstance(item, dict):
+        return jsonify({"error": "Request body must include an item object."}), 400
+    try:
+        result = update_ebay_offer(offer_id, item)
+    except EbayDraftError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    return jsonify({"result": result})
+
+
+@app.route("/api/ebay/offers/<offer_id>/publish", methods=["POST"])
+def ebay_offer_publish(offer_id):
+    body = request.get_json(silent=True) or {}
+    if body.get("confirmPublish") is not True:
+        return jsonify({"error": "Confirm publish before creating a live eBay listing."}), 400
+    try:
+        result = publish_ebay_offer(offer_id, confirm_publish=True)
     except EbayDraftError as exc:
         return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
     return jsonify({"result": result})

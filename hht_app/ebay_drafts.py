@@ -93,6 +93,88 @@ def create_ebay_draft(item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SEC
     }
 
 
+def get_ebay_offer(offer_id: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+    offer_id = _offer_id(offer_id)
+    token = _seller_token(timeout)
+    offer = _request(
+        "GET",
+        f"{_api_base_url()}/sell/inventory/v1/offer/{quote(offer_id, safe='')}",
+        token,
+        None,
+        timeout,
+        expected_statuses={200},
+        operation="get_offer",
+    )
+    return _offer_summary(offer, offer_id)
+
+
+def update_ebay_offer(offer_id: str, item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+    offer_id = _offer_id(offer_id)
+    listing = normalize_listing(item)
+    _validate_listing(listing)
+    _validate_draft_config()
+    sku = _sku(item, listing)
+    quantity = _quantity(item)
+    price = float(listing.get("price") or 0)
+    token = _seller_token(timeout)
+
+    _request(
+        "PUT",
+        f"{_api_base_url()}/sell/inventory/v1/inventory_item/{quote(sku, safe='')}",
+        token,
+        _inventory_item_payload(listing, quantity),
+        timeout,
+        expected_statuses={200, 201, 204},
+        operation="inventory_item",
+    )
+    updated_offer = _request(
+        "PUT",
+        f"{_api_base_url()}/sell/inventory/v1/offer/{quote(offer_id, safe='')}",
+        token,
+        _offer_payload(sku, listing, quantity, price),
+        timeout,
+        expected_statuses={200, 204},
+        operation="update_offer",
+    )
+    return {
+        "status": "offer_updated",
+        "provider": "ebay_inventory",
+        "offerId": offer_id,
+        "sku": sku,
+        "published": False,
+        "title": listing["title"],
+        "price": round(price, 2),
+        "offer": _offer_summary(updated_offer, offer_id) if updated_offer else {},
+        "warnings": _draft_warnings(listing),
+    }
+
+
+def publish_ebay_offer(offer_id: str, confirm_publish: bool, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+    offer_id = _offer_id(offer_id)
+    if not confirm_publish:
+        raise EbayDraftError(400, "confirmation_required", "Confirm publish before creating a live eBay listing.", operation="publish_offer")
+    token = _seller_token(timeout)
+    response = _request(
+        "POST",
+        f"{_api_base_url()}/sell/inventory/v1/offer/{quote(offer_id, safe='')}/publish",
+        token,
+        None,
+        timeout,
+        expected_statuses={200, 201},
+        operation="publish_offer",
+    )
+    listing_id = str(response.get("listingId") or "")
+    if not listing_id:
+        raise EbayDraftError(502, "malformed_json", "eBay published the offer but did not return a listingId.", operation="publish_offer")
+    return {
+        "status": "published",
+        "provider": "ebay_inventory",
+        "offerId": offer_id,
+        "listingId": listing_id,
+        "published": True,
+    }
+
+
 def _seller_token(timeout: float) -> str:
     try:
         return seller_access_token(timeout=timeout)
@@ -104,25 +186,25 @@ def _request(
     method: str,
     url: str,
     token: str,
-    payload: dict[str, Any],
+    payload: dict[str, Any] | None,
     timeout: float,
     expected_statuses: set[int],
     operation: str,
 ) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "headers": {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Content-Language": "en-US",
+            "X-EBAY-C-MARKETPLACE-ID": _marketplace_id(),
+        },
+        "timeout": timeout,
+    }
+    if payload is not None:
+        kwargs["json"] = payload
     try:
-        response = requests.request(
-            method,
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Content-Language": "en-US",
-                "X-EBAY-C-MARKETPLACE-ID": _marketplace_id(),
-            },
-            json=payload,
-            timeout=timeout,
-        )
+        response = requests.request(method, url, **kwargs)
     except requests.Timeout as exc:
         raise EbayDraftError(504, "timeout", _safe_error_message(504, "", operation), operation=operation) from exc
     except requests.RequestException as exc:
@@ -263,6 +345,26 @@ def _quantity(item: dict[str, Any]) -> int:
     except (TypeError, ValueError):
         quantity = 1
     return max(1, min(quantity, 99))
+
+
+def _offer_id(value: Any) -> str:
+    offer_id = str(value or "").strip()
+    if not offer_id or not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", offer_id):
+        raise EbayDraftError(400, "invalid_request", "Valid eBay offerId is required.")
+    return offer_id
+
+
+def _offer_summary(offer: dict[str, Any], fallback_offer_id: str) -> dict[str, Any]:
+    return {
+        "offerId": str(offer.get("offerId") or fallback_offer_id),
+        "sku": str(offer.get("sku") or ""),
+        "marketplaceId": str(offer.get("marketplaceId") or _marketplace_id()),
+        "format": str(offer.get("format") or ""),
+        "availableQuantity": offer.get("availableQuantity"),
+        "categoryId": str(offer.get("categoryId") or ""),
+        "listingId": str(offer.get("listingId") or ""),
+        "status": str(offer.get("status") or ""),
+    }
 
 
 def _image_urls(value: Any) -> list[str]:

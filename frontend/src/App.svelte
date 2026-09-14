@@ -1,6 +1,6 @@
 <script>
     import "./app.css";
-    import { analyzeImages, createEbayDraft, downloadCSV, downloadDraftCSV, downloadJSON } from "$lib/api";
+    import { analyzeImages, createEbayDraft, downloadCSV, downloadDraftCSV, downloadJSON, getEbayOffer, publishEbayOffer, updateEbayOffer } from "$lib/api";
 
     const emptyItem = {
         title: "", price: "", cid: "3000", cnote: "", cat: "", brand: "",
@@ -32,6 +32,7 @@
     let canTryAlternate = false;
     let alternateProvider = "";
     let draftLoading = -1;
+    let offerAction = "";
     let restoreInput;
     let localPipeline = null;
 
@@ -349,12 +350,62 @@
         draftLoading = index;
         try {
             const result = await createEbayDraft(queued);
-            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferId: result.offerId, ebayDraftStatus: result.status } : entry);
+            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferId: result.offerId, ebaySku: result.sku, ebayDraftStatus: result.status } : entry);
             status = `eBay API offer created for ${queued.title}: offer ${result.offerId}. Use the draft CSV for Seller Hub drafts, or publish this offer later after review.`;
         } catch (err) {
             error = friendlyEbayError(err);
         } finally {
             draftLoading = -1;
+        }
+    }
+
+    async function verifyOffer(index) {
+        error = "";
+        const queued = queue[index];
+        if (!queued?.ebayOfferId) return;
+        offerAction = `verify:${index}`;
+        try {
+            const result = await getEbayOffer(queued.ebayOfferId);
+            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferStatus: result.status || "verified", ebaySku: entry.ebaySku || result.sku } : entry);
+            status = `Verified eBay offer ${result.offerId}. It is still not live until you publish it.`;
+        } catch (err) {
+            error = friendlyEbayError(err);
+        } finally {
+            offerAction = "";
+        }
+    }
+
+    async function updateOffer(index) {
+        error = "";
+        const queued = queue[index];
+        if (!queued?.ebayOfferId) return;
+        offerAction = `update:${index}`;
+        try {
+            const result = await updateEbayOffer(queued.ebayOfferId, { ...queued, sku: queued.ebaySku || queued.sku });
+            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferStatus: result.status, ebaySku: result.sku || entry.ebaySku } : entry);
+            status = `Updated eBay offer ${result.offerId}. Review again before publishing live.`;
+        } catch (err) {
+            error = friendlyEbayError(err);
+        } finally {
+            offerAction = "";
+        }
+    }
+
+    async function publishOffer(index) {
+        error = "";
+        const queued = queue[index];
+        if (!queued?.ebayOfferId) return;
+        const confirmed = window.confirm(`This will publish "${queued.title}" as a LIVE eBay listing. Only continue if the title, price, category, policies, quantity, condition, and photos are ready.`);
+        if (!confirmed) return;
+        offerAction = `publish:${index}`;
+        try {
+            const result = await publishEbayOffer(queued.ebayOfferId);
+            queue = queue.map((entry, i) => i === index ? { ...entry, ebayListingId: result.listingId, ebayOfferStatus: result.status, ebayDraftStatus: result.status } : entry);
+            status = `Published live on eBay: listing ${result.listingId}.`;
+        } catch (err) {
+            error = friendlyEbayError(err);
+        } finally {
+            offerAction = "";
         }
     }
 
@@ -522,8 +573,13 @@
             {:else}
                 {#each queue as queued, index}
                     <div class="queue-row">
-                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayOfferId ? ` / eBay offer ${queued.ebayOfferId}` : ""}</span></div>
+                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayOfferId ? ` / eBay offer ${queued.ebayOfferId}` : ""}{queued.ebayListingId ? ` / live listing ${queued.ebayListingId}` : ""}</span></div>
                         <button type="button" disabled={draftLoading === index} on:click={() => createDraft(index)}>{draftLoading === index ? "Creating..." : "Create API Offer"}</button>
+                        {#if queued.ebayOfferId && !queued.ebayListingId}
+                            <button type="button" disabled={offerAction === `verify:${index}`} on:click={() => verifyOffer(index)}>{offerAction === `verify:${index}` ? "Checking..." : "Verify Offer"}</button>
+                            <button type="button" disabled={offerAction === `update:${index}`} on:click={() => updateOffer(index)}>{offerAction === `update:${index}` ? "Updating..." : "Update Offer"}</button>
+                            <button type="button" disabled={offerAction === `publish:${index}`} on:click={() => publishOffer(index)}>{offerAction === `publish:${index}` ? "Publishing..." : "Publish Live"}</button>
+                        {/if}
                         <button type="button" on:click={() => editQueued(index)}>Edit</button>
                         <button type="button" on:click={() => queue = queue.filter((_, i) => i !== index)}>Remove</button>
                     </div>

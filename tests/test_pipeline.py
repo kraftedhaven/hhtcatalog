@@ -813,6 +813,87 @@ class MergePipelineTests(unittest.TestCase):
         self.assertNotIn("seller-secret-token", json.dumps(public))
         self.assertNotIn("Not found", json.dumps(public))
 
+    def test_ebay_offer_update_replaces_inventory_and_offer(self):
+        item = {
+            "sku": "LEVIS-123",
+            "title": "Levi's Jacket",
+            "price": 29.99,
+            "cat": "57988",
+            "brand": "Levi's",
+            "type": "Jacket",
+        }
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if "inventory_item" in url:
+                return FakeResponse(status_code=204)
+            return FakeResponse(status_code=200, payload={"offerId": "offer-123", "sku": "LEVIS-123", "status": "UNPUBLISHED"})
+
+        with env(
+            EBAY_MERCHANT_LOCATION_KEY="warehouse-1",
+            EBAY_PAYMENT_POLICY_ID="pay-1",
+            EBAY_FULFILLMENT_POLICY_ID="ship-1",
+            EBAY_RETURN_POLICY_ID="return-1",
+        ):
+            with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-token"):
+                with mock.patch("hht_app.ebay_drafts.requests.request", side_effect=fake_request):
+                    result = ebay_drafts.update_ebay_offer("offer-123", item)
+
+        self.assertEqual(result["status"], "offer_updated")
+        self.assertEqual(result["offerId"], "offer-123")
+        self.assertEqual(result["sku"], "LEVIS-123")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], "PUT")
+        self.assertIn("/inventory_item/LEVIS-123", calls[0][1])
+        self.assertEqual(calls[1][0], "PUT")
+        self.assertIn("/offer/offer-123", calls[1][1])
+        self.assertEqual(calls[1][2]["json"]["pricingSummary"]["price"]["value"], "29.99")
+
+    def test_ebay_offer_publish_requires_confirmation_before_request(self):
+        with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-token") as token:
+            with mock.patch("hht_app.ebay_drafts.requests.request") as request:
+                with self.assertRaises(ebay_drafts.EbayDraftError) as ctx:
+                    ebay_drafts.publish_ebay_offer("offer-123", confirm_publish=False)
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.category, "confirmation_required")
+        token.assert_not_called()
+        request.assert_not_called()
+
+    def test_ebay_offer_publish_returns_live_listing_id(self):
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return FakeResponse(status_code=200, payload={"listingId": "listing-456"})
+
+        with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-token"):
+            with mock.patch("hht_app.ebay_drafts.requests.request", side_effect=fake_request):
+                result = ebay_drafts.publish_ebay_offer("offer-123", confirm_publish=True)
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["offerId"], "offer-123")
+        self.assertEqual(result["listingId"], "listing-456")
+        self.assertTrue(result["published"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "POST")
+        self.assertIn("/sell/inventory/v1/offer/offer-123/publish", calls[0][1])
+        self.assertNotIn("json", calls[0][2])
+
+    def test_ebay_offer_publish_endpoint_requires_confirmation(self):
+        with mock.patch("app.publish_ebay_offer") as publish:
+            response = self.client.post("/api/ebay/offers/offer-123/publish", json={})
+        self.assertEqual(response.status_code, 400)
+        publish.assert_not_called()
+
+    def test_ebay_offer_publish_endpoint_returns_listing(self):
+        with mock.patch("app.publish_ebay_offer", return_value={"status": "published", "offerId": "offer-123", "listingId": "listing-456", "published": True}) as publish:
+            response = self.client.post("/api/ebay/offers/offer-123/publish", json={"confirmPublish": True})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["result"]["listingId"], "listing-456")
+        publish.assert_called_once_with("offer-123", confirm_publish=True)
+
     def test_ebay_token_failure_is_sanitized(self):
         with env(EBAY_CLIENT_ID="real-client-id", EBAY_CLIENT_SECRET="real-secret"):
             with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(status_code=401, payload={"error": "invalid_client"})):
