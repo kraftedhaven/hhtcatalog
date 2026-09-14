@@ -47,6 +47,7 @@ OPENROUTER_MODEL
 GEMINI_API_KEY
 GEMINI_MODEL
 DEMO_MODE=false
+DATABASE_URL
 ```
 
 `PRIMARY_VISION_PROVIDER=groq` calls only Groq and does not fan out to every configured provider. Z.AI can remain configured but unused until you want to test it again. `DEMO_MODE=false` is the production default.
@@ -58,9 +59,9 @@ Direct eBay draft creation uses `POST /api/ebay/drafts` after an item has been r
 
 ## Commerce Agent MVP
 
-The Commerce Agent is available from the **Commerce Agent** tab. It uses official eBay Inventory API calls to import existing inventory items and offers, stores normalized records and recommendation history in SQLite, and keeps the operating mode at `recommend` by default. The UI requires an explicit user approval before an action is sent through the existing eBay offer update flow. Auto-Optimize and Autonomous modes are represented as future modes but are not activated by this MVP.
+The Commerce Agent is available from the **Commerce Agent** tab. It uses official eBay Inventory API calls to import existing inventory items and offers, stores normalized records and recommendation history in PostgreSQL when `DATABASE_URL` is present, and keeps the operating mode at `recommend` by default. The UI requires an explicit user approval before an action is sent through the existing eBay offer update flow. Auto-Optimize and Autonomous modes are represented as future modes but are not activated by this MVP.
 
-Set `COMMERCE_AGENT_DB` to a persistent mounted database path in any deployment where imported listings and change history must survive a restart. Heroku's default filesystem is ephemeral, so a production deployment on Heroku must attach a supported persistent database/storage service or use a persistent mounted path; do not rely on the default slug filesystem for durable Commerce Agent records.
+Set Heroku's `DATABASE_URL` Config Var to the Supabase PostgreSQL connection string. The application creates the Commerce Agent tables automatically on startup. If `DATABASE_URL` is absent, local development falls back to `COMMERCE_AGENT_DB=commerce_agent.sqlite3`; do not use that SQLite fallback for durable Heroku data because the Heroku dyno filesystem is ephemeral. No Heroku filesystem setting needs to be changed.
 
 Commerce Agent routes:
 

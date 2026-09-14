@@ -9,13 +9,19 @@ import json
 import os
 import re
 import sqlite3
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
 import requests
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # Local SQLite fallback remains available without psycopg.
+    psycopg = None
+    dict_row = None
 
 from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_drafts import EbayDraftError, get_ebay_offer, update_ebay_offer
@@ -41,21 +47,90 @@ def _decode(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
-def _db_path() -> str:
-    return os.environ.get("COMMERCE_AGENT_DB", DB_PATH)
+def _database_url() -> str:
+    return os.environ.get("DATABASE_URL", "").strip()
 
 
-def connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(_db_path())
+class _Database:
+    def __init__(self, connection, postgres: bool):
+        self.connection = connection
+        self.postgres = postgres
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        if exc_type:
+            self.connection.rollback()
+        else:
+            self.connection.commit()
+        self.connection.close()
+
+    def execute(self, query: str, params: tuple[Any, ...] = ()):
+        if self.postgres:
+            query = query.replace("?", "%s")
+        return self.connection.execute(query, params)
+
+    def executescript(self, query: str):
+        if self.postgres:
+            for statement in query.split(";"):
+                statement = statement.strip()
+                if statement:
+                    self.connection.execute(statement)
+        else:
+            self.connection.executescript(query)
+
+
+def connect() -> _Database:
+    url = _database_url()
+    if url:
+        if psycopg is None:
+            raise RuntimeError("DATABASE_URL is configured but psycopg is not installed.")
+        return _Database(psycopg.connect(url, row_factory=dict_row), True)
+    connection = sqlite3.connect(os.environ.get("COMMERCE_AGENT_DB", DB_PATH))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    return connection
+    return _Database(connection, False)
 
 
 def init_db() -> None:
     with connect() as db:
-        db.executescript(
-            """
+        if db.postgres:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS listings (
+                    id BIGSERIAL PRIMARY KEY,
+                    listing_id TEXT NOT NULL DEFAULT '', offer_id TEXT NOT NULL DEFAULT '', sku TEXT NOT NULL,
+                    marketplace TEXT NOT NULL DEFAULT 'EBAY_US', data_json TEXT NOT NULL,
+                    source_updated_at TEXT, imported_at TEXT NOT NULL, UNIQUE(sku, marketplace)
+                );
+                CREATE TABLE IF NOT EXISTS recommendations (
+                    id TEXT PRIMARY KEY, listing_row_id BIGINT NOT NULL REFERENCES listings(id),
+                    current_json TEXT NOT NULL, proposed_json TEXT NOT NULL, findings_json TEXT NOT NULL,
+                    score INTEGER NOT NULL, classification TEXT NOT NULL, reason TEXT NOT NULL,
+                    confidence TEXT NOT NULL, risk TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Pending',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS actions (
+                    id TEXT PRIMARY KEY, recommendation_id TEXT NOT NULL REFERENCES recommendations(id),
+                    listing_row_id BIGINT NOT NULL REFERENCES listings(id), approved_json TEXT NOT NULL,
+                    old_json TEXT NOT NULL, new_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'Approved',
+                    ebay_result_json TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, applied_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS settings (
+                    id INTEGER PRIMARY KEY CHECK(id = 1), mode TEXT NOT NULL DEFAULT 'recommend',
+                    max_price_reduction_pct DOUBLE PRECISION NOT NULL DEFAULT 10, minimum_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    minimum_profit DOUBLE PRECISION NOT NULL DEFAULT 0, high_value_threshold DOUBLE PRECISION NOT NULL DEFAULT 250,
+                    require_vintage INTEGER NOT NULL DEFAULT 1, require_designer INTEGER NOT NULL DEFAULT 1,
+                    require_collectible INTEGER NOT NULL DEFAULT 1
+                );
+                INSERT INTO settings(id) VALUES(1) ON CONFLICT (id) DO NOTHING
+                """
+            )
+        else:
+            db.executescript(
+                """
             CREATE TABLE IF NOT EXISTS listings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 listing_id TEXT NOT NULL DEFAULT '', offer_id TEXT NOT NULL DEFAULT '', sku TEXT NOT NULL,
@@ -85,7 +160,7 @@ def init_db() -> None:
             );
             INSERT OR IGNORE INTO settings(id) VALUES (1);
             """
-        )
+            )
 
 
 def settings() -> dict[str, Any]:
