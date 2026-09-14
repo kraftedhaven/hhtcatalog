@@ -132,6 +132,47 @@ export async function publishEbayOffer(offerId) {
     return body.result || body;
 }
 
+async function commerceRequest(path, options = {}) {
+    const res = await fetch(`${baseUrl()}${path}`, options);
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export function commerceDashboard() {
+    return commerceRequest('/api/commerce/dashboard');
+}
+
+export function commerceListings() {
+    return commerceRequest('/api/commerce/listings');
+}
+
+export function commerceImport() {
+    return commerceRequest('/api/commerce/import', { method: 'POST' });
+}
+
+export function commerceAudit() {
+    return commerceRequest('/api/commerce/audit', { method: 'POST' });
+}
+
+export function commerceRecommendations(status = '') {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    return commerceRequest(`/api/commerce/recommendations${query}`);
+}
+
+export function commerceApprove(recommendationId, approved) {
+    return commerceRequest(`/api/commerce/recommendations/${encodeURIComponent(recommendationId)}/approve`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approved })
+    });
+}
+
+export function commerceApply(actionId) {
+    return commerceRequest(`/api/commerce/actions/${encodeURIComponent(actionId)}/apply`, { method: 'POST' });
+}
+
+export function commerceHistory() {
+    return commerceRequest('/api/commerce/history');
+}
+
 export function downloadJSON(data, filename = 'hht-listings-backup.json') {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');

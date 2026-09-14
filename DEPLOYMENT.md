@@ -56,6 +56,26 @@ Seller OAuth for future inventory/offer work uses `EBAY_REDIRECT_URI`, `EBAY_RUN
 Direct eBay draft creation uses `POST /api/ebay/drafts` after an item has been reviewed. It creates or replaces the Inventory item and creates an unpublished Inventory offer using `EBAY_MERCHANT_LOCATION_KEY`, `EBAY_PAYMENT_POLICY_ID`, `EBAY_FULFILLMENT_POLICY_ID`, and `EBAY_RETURN_POLICY_ID`. It intentionally does not call `/publish`, so the app cannot create a live listing from this endpoint.
 `ANALYZE_DEADLINE_SECONDS` and `PROVIDER_REQUEST_TIMEOUT_SECONDS` keep the synchronous `/analyze` call below Heroku's normal 30-second router limit while giving Groq enough time for multi-photo vision requests. Phone images are resized server-side before they are sent to a hosted provider.
 
+## Commerce Agent MVP
+
+The Commerce Agent is available from the **Commerce Agent** tab. It uses official eBay Inventory API calls to import existing inventory items and offers, stores normalized records and recommendation history in SQLite, and keeps the operating mode at `recommend` by default. The UI requires an explicit user approval before an action is sent through the existing eBay offer update flow. Auto-Optimize and Autonomous modes are represented as future modes but are not activated by this MVP.
+
+Set `COMMERCE_AGENT_DB` to a persistent mounted database path in any deployment where imported listings and change history must survive a restart. Heroku's default filesystem is ephemeral, so a production deployment on Heroku must attach a supported persistent database/storage service or use a persistent mounted path; do not rely on the default slug filesystem for durable Commerce Agent records.
+
+Commerce Agent routes:
+
+- `GET /api/commerce/dashboard` — summary counts and current mode.
+- `POST /api/commerce/import` — imports existing eBay inventory items/offers through official APIs.
+- `POST /api/commerce/audit` — audits imported listings and stores structured recommendations.
+- `GET /api/commerce/listings` and `GET /api/commerce/recommendations` — review data.
+- `GET /api/commerce/recommendations/<id>` — detailed recommendation and rationale.
+- `POST /api/commerce/recommendations/<id>/approve` — records explicit field-level approval.
+- `POST /api/commerce/actions/<id>/apply` — applies only the approved fields through the existing update flow.
+- `GET /api/commerce/history` — action/change history.
+- `GET`/`PUT /api/commerce/settings` — safety settings; this MVP still enforces Recommend mode.
+
+The seller OAuth scopes already used by the repository include `sell.inventory`, `sell.account`, and `sell.fulfillment`. Inventory import requires the seller's Inventory API permissions and a valid refresh token. Policy/location variables remain required by the existing update flow. The first audit sequence is: complete eBay OAuth setup, verify `GET /api/ebay/oauth/status`, open Commerce Agent, select **Analyze My Listings**, review each finding and proposed field, then select **Approve & Apply** only for changes you want sent to eBay.
+
 Example commands:
 
 ```sh

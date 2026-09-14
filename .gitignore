@@ -16,3 +16,5 @@ __pycache__/
 *.pyc
 frontend/dist/
 frontend/node_modules/
+commerce_agent.sqlite3
+*.sqlite3

@@ -7,6 +7,7 @@ from flask_cors import CORS
 
 from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, seller_access_token
 from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft, get_ebay_offer, publish_ebay_offer, update_ebay_offer
+from hht_app import commerce_agent
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
 from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
 
@@ -205,6 +206,82 @@ def ebay_offer_publish(offer_id):
     except EbayDraftError as exc:
         return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
     return jsonify({"result": result})
+
+
+@app.route("/api/commerce/dashboard", methods=["GET"])
+def commerce_dashboard():
+    return jsonify({"result": commerce_agent.dashboard()})
+
+
+@app.route("/api/commerce/listings", methods=["GET"])
+def commerce_listings():
+    return jsonify({"result": commerce_agent.list_listings({"status": request.args.get("status", "")})})
+
+
+@app.route("/api/commerce/import", methods=["POST"])
+def commerce_import():
+    try:
+        return jsonify({"result": commerce_agent.import_listings()})
+    except (EbayDraftError, ValueError) as exc:
+        body = {"error": getattr(exc, "safe_message", str(exc))}
+        if hasattr(exc, "to_public"):
+            body["provider_errors"] = [exc.to_public()]
+        return jsonify(body), getattr(exc, "status_code", 400)
+
+
+@app.route("/api/commerce/audit", methods=["POST"])
+def commerce_audit():
+    try:
+        return jsonify({"result": commerce_agent.audit_all()})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/commerce/recommendations", methods=["GET"])
+def commerce_recommendations():
+    return jsonify({"result": commerce_agent.recommendations(request.args.get("status", ""))})
+
+
+@app.route("/api/commerce/recommendations/<recommendation_id>", methods=["GET"])
+def commerce_recommendation(recommendation_id):
+    result = commerce_agent.get_recommendation(recommendation_id)
+    if not result:
+        return jsonify({"error": "Recommendation not found."}), 404
+    return jsonify({"result": result})
+
+
+@app.route("/api/commerce/recommendations/<recommendation_id>/approve", methods=["POST"])
+def commerce_approve(recommendation_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify({"result": commerce_agent.approve_recommendation(recommendation_id, body.get("approved"))})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/commerce/actions/<action_id>/apply", methods=["POST"])
+def commerce_apply(action_id):
+    try:
+        return jsonify({"result": commerce_agent.apply_action(action_id)})
+    except (EbayDraftError, ValueError) as exc:
+        body = {"error": getattr(exc, "safe_message", str(exc))}
+        if hasattr(exc, "to_public"):
+            body["provider_errors"] = [exc.to_public()]
+        return jsonify(body), getattr(exc, "status_code", 400)
+
+
+@app.route("/api/commerce/history", methods=["GET"])
+def commerce_history():
+    return jsonify({"result": commerce_agent.history()})
+
+
+@app.route("/api/commerce/settings", methods=["GET", "PUT"])
+def commerce_settings():
+    try:
+        result = commerce_agent.update_settings(request.get_json(silent=True) or {}) if request.method == "PUT" else commerce_agent.settings()
+        return jsonify({"result": result})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.errorhandler(413)

@@ -1,6 +1,7 @@
 <script>
     import "./app.css";
     import { analyzeImages, createEbayDraft, downloadCSV, downloadDraftCSV, downloadJSON, getEbayOffer, publishEbayOffer, updateEbayOffer } from "$lib/api";
+    import CommerceAgent from "$lib/components/CommerceAgent.svelte";
 
     const emptyItem = {
         title: "", price: "", cid: "3000", cnote: "", cat: "", brand: "",
@@ -467,6 +468,7 @@
     </header>
 
     <nav class="tabs" aria-label="Main navigation">
+        <button class:on={tab === "commerce"} on:click={() => tab = "commerce"}>Commerce Agent</button>
         <button class:on={tab === "analyze"} on:click={() => tab = "analyze"}>Analyze</button>
         <button class:on={tab === "edit"} on:click={() => tab = "edit"}>Edit</button>
         <button class:on={tab === "queue"} on:click={() => tab = "queue"}>Queue</button>
@@ -519,6 +521,10 @@
                 <button type="button" on:click={() => setFiles([])}>Clear photos</button>
             </div>
         </section>
+    {/if}
+
+    {#if tab === "commerce"}
+        <CommerceAgent />
     {/if}
 
     {#if tab === "edit"}
