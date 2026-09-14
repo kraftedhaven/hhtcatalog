@@ -774,6 +774,45 @@ class MergePipelineTests(unittest.TestCase):
         self.assertNotIn("seller-secret-token", json.dumps(public))
         self.assertNotIn("Bad auth", json.dumps(public))
 
+    def test_ebay_draft_404_identifies_offer_step(self):
+        item = {
+            "sku": "LEVIS-123",
+            "title": "Levi's Jacket",
+            "price": 24.99,
+            "cat": "57988",
+            "brand": "Levi's",
+            "type": "Jacket",
+        }
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if method == "PUT":
+                return FakeResponse(status_code=204)
+            return FakeResponse(status_code=404, payload={"errors": [{"errorId": "25017", "message": "Not found"}]})
+
+        with env(
+            EBAY_MERCHANT_LOCATION_KEY="warehouse-1",
+            EBAY_PAYMENT_POLICY_ID="pay-1",
+            EBAY_FULFILLMENT_POLICY_ID="ship-1",
+            EBAY_RETURN_POLICY_ID="return-1",
+        ):
+            with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-secret-token"):
+                with mock.patch("hht_app.ebay_drafts.requests.request", side_effect=fake_request):
+                    with self.assertRaises(ebay_drafts.EbayDraftError) as ctx:
+                        ebay_drafts.create_ebay_draft(item)
+
+        public = ctx.exception.to_public()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(public["provider"], "ebay_inventory")
+        self.assertEqual(public["status"], 404)
+        self.assertEqual(public["category"], "request_error")
+        self.assertEqual(public["operation"], "offer")
+        self.assertEqual(public["code"], "25017")
+        self.assertIn("during offer", public["message"])
+        self.assertNotIn("seller-secret-token", json.dumps(public))
+        self.assertNotIn("Not found", json.dumps(public))
+
     def test_ebay_token_failure_is_sanitized(self):
         with env(EBAY_CLIENT_ID="real-client-id", EBAY_CLIENT_SECRET="real-secret"):
             with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(status_code=401, payload={"error": "invalid_client"})):
