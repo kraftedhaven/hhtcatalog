@@ -29,6 +29,8 @@
     let status = "";
     let error = "";
     let loading = false;
+    let canTryAlternate = false;
+    let alternateProvider = "";
     let draftLoading = -1;
     let restoreInput;
     let localPipeline = null;
