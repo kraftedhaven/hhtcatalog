@@ -84,6 +84,7 @@
             {#each visible as entry}
                 <article class="recommendation-card">
                     <div class="recommendation-title"><div><strong>{entry.listing.title || "Untitled listing"}</strong><span>{entry.classification} · Score {entry.score}/100 · {entry.status}</span></div><span class="risk">{entry.risk} risk</span></div>
+                    <div class="listing-meta"><b>{entry.listing.lifecycle || "Inventory record"}</b><span>SKU: {entry.listing.sku || "not provided"}</span><span>Offer: {entry.listing.offerId || "none"}</span><span>Listing: {entry.listing.listingId || "none"}</span>{#if entry.listing.ebayUrl}<a href={entry.listing.ebayUrl} target="_blank" rel="noreferrer">Open on eBay</a>{/if}</div>
                     <p>{entry.reason}</p>
                     {#if Object.keys(entry.proposed || {}).length}
                         <div class="change-list">

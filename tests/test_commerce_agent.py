@@ -64,6 +64,16 @@ class CommerceAgentTests(unittest.TestCase):
     def test_count_listings_returns_integer(self):
         self.assertEqual(commerce_agent.count_listings(), 1)
 
+    def test_inventory_lifecycle_is_explicit(self):
+        base = {"sku": "SKU-X", "product": {"title": "Brown Signature Handbag"}}
+        active = commerce_agent._inventory_to_listing(base, {"offerId": "O1", "listingId": "L1", "status": "PUBLISHED"})
+        draft = commerce_agent._inventory_to_listing(base, {"offerId": "O2", "status": "UNPUBLISHED"})
+        inventory_only = commerce_agent._inventory_to_listing(base, {})
+        self.assertEqual(active["lifecycle"], "Active listing")
+        self.assertEqual(draft["lifecycle"], "Unpublished offer")
+        self.assertEqual(inventory_only["lifecycle"], "Inventory-only draft")
+        self.assertEqual(active["ebayUrl"], "https://www.ebay.com/itm/L1")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -241,9 +241,16 @@ def _aspects(item: dict[str, Any]) -> dict[str, Any]:
 def _inventory_to_listing(item: dict[str, Any], offer: dict[str, Any] | None = None) -> dict[str, Any]:
     product = item.get("product") if isinstance(item.get("product"), dict) else {}
     aspects = _aspects(item)
+    offer = offer or {}
+    listing_id = str(offer.get("listingId") or "")
+    offer_id = str(offer.get("offerId") or "")
+    offer_status = str(offer.get("status") or "").upper()
+    lifecycle = "Active listing" if listing_id and offer_status == "PUBLISHED" else "Unpublished offer" if offer_id else "Inventory-only draft"
     price = (offer or {}).get("pricingSummary", {}).get("price", {}).get("value") if isinstance((offer or {}).get("pricingSummary"), dict) else None
     source = {
-        "sku": item.get("sku", ""), "offerId": (offer or {}).get("offerId", ""), "listingId": (offer or {}).get("listingId", ""),
+        "sku": item.get("sku", ""), "offerId": offer_id, "listingId": listing_id,
+        "offerStatus": offer_status or "NOT_FOUND", "lifecycle": lifecycle,
+        "ebayUrl": f"https://www.ebay.com/itm/{listing_id}" if listing_id else "",
         "title": product.get("title", ""), "desc": product.get("description", ""), "price": price or 0,
         "quantity": item.get("availability", {}).get("shipToLocationAvailability", {}).get("quantity", 1) if isinstance(item.get("availability"), dict) else 1,
         "pic": " ".join(product.get("imageUrls", []) if isinstance(product.get("imageUrls"), list) else []),
@@ -274,7 +281,8 @@ def import_listings() -> dict[str, Any]:
                 offer = {}
                 try:
                     offers = _ebay_get("/sell/inventory/v1/offer", {"sku": sku, "limit": 20}).get("offers", [])
-                    offer = offers[0] if offers else {}
+                    offers = offers if isinstance(offers, list) else []
+                    offer = next((entry for entry in offers if str(entry.get("status", "")).upper() == "PUBLISHED"), offers[0] if offers else {})
                 except EbayDraftError:
                     offer = {}
                 listing = _inventory_to_listing(raw, offer)
