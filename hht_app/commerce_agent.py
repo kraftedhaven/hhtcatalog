@@ -6,6 +6,7 @@ an explicit approval route, and are delegated to the existing offer update flow.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -27,6 +28,7 @@ from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_drafts import EbayDraftError, get_ebay_offer, update_ebay_offer
 from .schema import normalize_listing
 
+logger = logging.getLogger(__name__)
 DB_PATH = os.environ.get("COMMERCE_AGENT_DB", "commerce_agent.sqlite3")
 MAX_TITLE_LENGTH = 80
 EDITABLE_FIELDS = {"title", "price", "desc", "cat", "cnote", "pic", "brand", "size", "color", "dept", "type", "style", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
@@ -48,9 +50,11 @@ def _decode(value: str | None, fallback: Any) -> Any:
 
 
 def _database_url() -> str:
-    url = os.environ.get("DATABASE_URL", "").strip()
+    url = (os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DATABASE_URL") or os.environ.get("POSTGRES_URL") or "").strip()
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
+    if url and "sslmode=" not in url:
+        url += "&sslmode=require" if "?" in url else "?sslmode=require"
     return url
 
 
@@ -89,7 +93,11 @@ def connect() -> _Database:
     if url:
         if psycopg is None:
             raise RuntimeError("DATABASE_URL is configured but psycopg is not installed.")
-        return _Database(psycopg.connect(url, row_factory=dict_row), True)
+        try:
+            return _Database(psycopg.connect(url, row_factory=dict_row, connect_timeout=8), True)
+        except Exception as exc:
+            logger.error("Commerce Agent PostgreSQL connection failed: %s", type(exc).__name__)
+            raise RuntimeError("Commerce Agent PostgreSQL connection failed.") from exc
     connection = sqlite3.connect(os.environ.get("COMMERCE_AGENT_DB", DB_PATH))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
