@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import time
@@ -9,6 +10,8 @@ import requests
 from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_pricing import DEFAULT_MARKETPLACE_ID
 from .schema import normalize_listing
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_TIMEOUT_SECONDS = 8.0
@@ -45,6 +48,7 @@ def create_ebay_draft(item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SEC
     quantity = _quantity(item)
     price = float(listing.get("price") or 0)
     token = _seller_token(timeout)
+    logger.info(f"[eBay Draft] Creating draft - SKU: {sku}, Title: {listing['title']}, Price: {price}")
 
     inventory_payload = _inventory_item_payload(listing, quantity)
     _request(
@@ -67,7 +71,9 @@ def create_ebay_draft(item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SEC
     )
     offer_id = str(offer_response.get("offerId") or "")
     if not offer_id:
+        logger.error(f"[eBay Draft] Offer created but no offerId in response: {offer_response}")
         raise EbayDraftError(502, "malformed_json", "eBay created an offer response without an offerId.")
+    logger.info(f"[eBay Draft] Draft created successfully - OfferId: {offer_id}, Environment: {_environment()}, Marketplace: {_marketplace_id()}")
 
     return {
         "status": "draft_created",
