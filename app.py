@@ -230,6 +230,9 @@ def commerce_import():
         if hasattr(exc, "to_public"):
             body["provider_errors"] = [exc.to_public()]
         return jsonify(body), getattr(exc, "status_code", 400)
+    except Exception:
+        app.logger.exception("Commerce Agent listing import failed")
+        return jsonify({"error": "Commerce Agent listing import failed. Check the Heroku logs for the diagnostic."}), 502
 
 
 @app.route("/api/commerce/audit", methods=["POST"])
@@ -237,7 +240,8 @@ def commerce_audit():
     try:
         return jsonify({"result": commerce_agent.audit_all()})
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        app.logger.exception("Commerce Agent audit failed")
+        return jsonify({"error": "Commerce Agent audit failed. Check the Heroku logs for the diagnostic."}), 502
 
 
 @app.route("/api/commerce/recommendations", methods=["GET"])
