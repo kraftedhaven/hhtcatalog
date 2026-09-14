@@ -290,7 +290,8 @@ def import_listings() -> dict[str, Any]:
 def count_listings() -> int:
     init_db()
     with connect() as db:
-        return int(db.execute("SELECT COUNT(*) FROM listings").fetchone()[0])
+        row = db.execute("SELECT COUNT(*) AS count FROM listings").fetchone()
+    return int(row["count"] if isinstance(row, dict) else row[0])
 
 
 def _row_listing(row: sqlite3.Row) -> dict[str, Any]:

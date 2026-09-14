@@ -61,6 +61,9 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(dashboard["recommendations"], 1)
         self.assertEqual(dashboard["mode"], "recommend")
 
+    def test_count_listings_returns_integer(self):
+        self.assertEqual(commerce_agent.count_listings(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
