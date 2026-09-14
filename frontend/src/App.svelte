@@ -350,7 +350,7 @@
         try {
             const result = await createEbayDraft(queued);
             queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferId: result.offerId, ebayDraftStatus: result.status } : entry);
-            status = `eBay draft created for ${queued.title}: offer ${result.offerId}. Review it in eBay before publishing.`;
+            status = `eBay API offer created for ${queued.title}: offer ${result.offerId}. Use the draft CSV for Seller Hub drafts, or publish this offer later after review.`;
         } catch (err) {
             error = friendlyEbayError(err);
         } finally {
@@ -410,7 +410,7 @@
     <header class="topbar">
         <div>
             <h1>HHT eBay Listing Builder</h1>
-            <p>Photo analysis, seller review, queue, and fixed-price CSV export</p>
+            <p>Photo analysis, seller review, API offers, and Seller Hub draft CSV export</p>
         </div>
         <strong>{queue.length} item{queue.length === 1 ? "" : "s"}</strong>
     </header>
@@ -523,14 +523,14 @@
                 {#each queue as queued, index}
                     <div class="queue-row">
                         <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayOfferId ? ` / eBay offer ${queued.ebayOfferId}` : ""}</span></div>
-                        <button type="button" disabled={draftLoading === index} on:click={() => createDraft(index)}>{draftLoading === index ? "Creating..." : "Create eBay Draft"}</button>
+                        <button type="button" disabled={draftLoading === index} on:click={() => createDraft(index)}>{draftLoading === index ? "Creating..." : "Create API Offer"}</button>
                         <button type="button" on:click={() => editQueued(index)}>Edit</button>
                         <button type="button" on:click={() => queue = queue.filter((_, i) => i !== index)}>Remove</button>
                     </div>
                 {/each}
                 <div class="actions">
                     <button class="primary" on:click={exportQueue}>Download eBay CSV</button>
-                    <button on:click={exportDraftQueue}>Download Draft CSV</button>
+                    <button on:click={exportDraftQueue}>Download Seller Hub Draft CSV</button>
                     <button on:click={backupQueue}>Download JSON backup</button>
                     <button on:click={() => queue = []}>Clear queue</button>
                 </div>
