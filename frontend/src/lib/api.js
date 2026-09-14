@@ -78,6 +78,24 @@ export async function downloadCSV(items, defaults = {}) {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+export async function downloadDraftCSV(items) {
+    const res = await fetch(`${baseUrl()}/export/draft-csv`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items })
+    });
+    if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Draft CSV export failed: ${res.status}`);
+    }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `hht_ebay_drafts_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 export async function createEbayDraft(item) {
     const res = await fetch(`${baseUrl()}/api/ebay/drafts`, {
         method: 'POST',

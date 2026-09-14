@@ -20,12 +20,13 @@ DEFAULT_LISTING_DURATION = "GTC"
 
 
 class EbayDraftError(RuntimeError):
-    def __init__(self, status_code: int, category: str, message: str, code: str = ""):
+    def __init__(self, status_code: int, category: str, message: str, code: str = "", operation: str = ""):
         super().__init__(message)
         self.status_code = status_code
         self.category = category
         self.safe_message = message
         self.code = code
+        self.operation = operation
 
     def to_public(self) -> dict[str, Any]:
         body = {
@@ -37,6 +38,8 @@ class EbayDraftError(RuntimeError):
         }
         if self.code:
             body["code"] = self.code
+        if self.operation:
+            body["operation"] = self.operation
         return body
 
 
@@ -58,6 +61,7 @@ def create_ebay_draft(item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SEC
         inventory_payload,
         timeout,
         expected_statuses={200, 201, 204},
+        operation="inventory_item",
     )
 
     offer_payload = _offer_payload(sku, listing, quantity, price)
@@ -68,6 +72,7 @@ def create_ebay_draft(item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SEC
         offer_payload,
         timeout,
         expected_statuses={200, 201},
+        operation="offer",
     )
     offer_id = str(offer_response.get("offerId") or "")
     if not offer_id:
@@ -102,6 +107,7 @@ def _request(
     payload: dict[str, Any],
     timeout: float,
     expected_statuses: set[int],
+    operation: str,
 ) -> dict[str, Any]:
     try:
         response = requests.request(
@@ -118,17 +124,18 @@ def _request(
             timeout=timeout,
         )
     except requests.Timeout as exc:
-        raise EbayDraftError(504, "timeout", "eBay draft request timed out.") from exc
+        raise EbayDraftError(504, "timeout", _safe_error_message(504, "", operation), operation=operation) from exc
     except requests.RequestException as exc:
-        raise EbayDraftError(502, "transport", "eBay draft request failed.") from exc
+        raise EbayDraftError(502, "transport", _safe_error_message(502, "", operation), operation=operation) from exc
 
     if response.status_code not in expected_statuses:
         code = _ebay_error_code(response)
         raise EbayDraftError(
             response.status_code,
             _category_for_status(response.status_code),
-            _safe_error_message(response.status_code, code),
+            _safe_error_message(response.status_code, code, operation),
             code,
+            operation,
         )
     if response.status_code == 204:
         return {}
@@ -329,14 +336,15 @@ def _ebay_error_code(response: requests.Response) -> str:
     return str(body.get("error") or body.get("code") or "")[:32]
 
 
-def _safe_error_message(status_code: int, code: str) -> str:
+def _safe_error_message(status_code: int, code: str, operation: str = "") -> str:
     suffix = f" ({code})." if code else "."
+    step = f" during {operation}" if operation else ""
     if status_code in {401, 403}:
-        return f"eBay draft authentication failed{suffix}"
+        return f"eBay draft authentication failed{step}{suffix}"
     if status_code == 409:
-        return f"eBay draft already exists or conflicts with an existing offer{suffix}"
+        return f"eBay draft already exists or conflicts with an existing offer{step}{suffix}"
     if status_code == 429:
-        return f"eBay draft rate limit reached{suffix}"
+        return f"eBay draft rate limit reached{step}{suffix}"
     if status_code >= 500:
-        return f"eBay draft service failed{suffix}"
-    return f"eBay draft request was rejected{suffix}"
+        return f"eBay draft service failed{step}{suffix}"
+    return f"eBay draft request was rejected{step}{suffix}"
