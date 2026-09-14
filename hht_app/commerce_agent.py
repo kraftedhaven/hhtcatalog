@@ -48,7 +48,10 @@ def _decode(value: str | None, fallback: Any) -> Any:
 
 
 def _database_url() -> str:
-    return os.environ.get("DATABASE_URL", "").strip()
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    return url
 
 
 class _Database:
@@ -445,7 +448,5 @@ def dashboard() -> dict[str, Any]:
     recs = recommendations()
     return {"connectedStore": "eBay", "listingsFound": len(items), "recommendations": len(recs), "needOptimization": sum(1 for r in recs if r["classification"] in {"Needs Optimization", "High Priority", "Needs Review"}), "titleImprovements": sum(1 for r in recs if any(f.get("field") == "title" for f in r["findings"])), "missingItemSpecifics": sum(1 for r in recs if any(f.get("field") == "item_specifics" for f in r["findings"])), "needsReview": sum(1 for r in recs if r["classification"] == "Needs Review"), "mode": "recommend"}
 
-
-init_db()
 
 __all__ = ["dashboard", "import_listings", "list_listings", "audit_all", "recommendations", "get_recommendation", "approve_recommendation", "apply_action", "history", "settings", "update_settings"]

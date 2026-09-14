@@ -210,7 +210,10 @@ def ebay_offer_publish(offer_id):
 
 @app.route("/api/commerce/dashboard", methods=["GET"])
 def commerce_dashboard():
-    return jsonify({"result": commerce_agent.dashboard()})
+    try:
+        return jsonify({"result": commerce_agent.dashboard()})
+    except Exception:
+        return jsonify({"error": "Commerce Agent database is unavailable. Verify DATABASE_URL and Supabase connectivity."}), 503
 
 
 @app.route("/api/commerce/listings", methods=["GET"])
@@ -282,6 +285,8 @@ def commerce_settings():
         return jsonify({"result": result})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except Exception:
+        return jsonify({"error": "Commerce Agent database is unavailable. Verify DATABASE_URL and Supabase connectivity."}), 503
 
 
 @app.errorhandler(413)
