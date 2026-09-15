@@ -1,4 +1,4 @@
-import { normalizeClientPayloadItem } from './ebay.js';
+import { normalizeClientItem, normalizeClientPayloadItem } from './ebay.js';
 
 const PUBLIC_API_URL = import.meta.env.DEV
     ? import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || ''
@@ -46,7 +46,7 @@ export async function downloadCSV(items, defaults = {}) {
     const res = await fetch(`${baseUrl()}/export/csv`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: items.map((item) => normalizeClientPayloadItem(item)), sellerDefaults: defaults })
+        body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)), sellerDefaults: defaults })
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -64,7 +64,7 @@ export async function downloadDraftCSV(items) {
     const res = await fetch(`${baseUrl()}/export/draft-csv`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: items.map((item) => normalizeClientPayloadItem(item)) })
+        body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)) })
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
