@@ -9,7 +9,7 @@ import requests
 
 from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_pricing import DEFAULT_MARKETPLACE_ID
-from .schema import normalize_listing
+from .schema import EBAY_ITEM_SPECIFICS, normalize_listing
 
 logger = logging.getLogger(__name__)
 
@@ -272,24 +272,8 @@ def _offer_payload(sku: str, listing: dict[str, Any], quantity: int, price: floa
 
 
 def _product_aspects(listing: dict[str, Any]) -> dict[str, list[str]]:
-    mapping = {
-        "Brand": "brand",
-        "Size": "size",
-        "Color": "color",
-        "Department": "dept",
-        "Type": "type",
-        "Style": "style",
-        "Material": "mat",
-        "Pattern": "pat",
-        "Sleeve Length": "slv",
-        "Neckline": "nk",
-        "Season": "sea",
-        "Occasion": "occ",
-        "Size Type": "st",
-        "Vintage": "vin",
-    }
     aspects: dict[str, list[str]] = {}
-    for label, key in mapping.items():
+    for label, key in EBAY_ITEM_SPECIFICS:
         value = _clean_aspect_value(listing.get(key))
         if value:
             aspects[label] = [value]

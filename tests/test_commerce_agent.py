@@ -54,6 +54,16 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(commerce_agent.recommendations()[0]["status"], "Approved")
         self.assertEqual(commerce_agent.history()[0]["status"], "Approved")
 
+    def test_approval_accepts_condition_and_notes_fields(self):
+        commerce_agent.audit_all()
+        recommendation = commerce_agent.recommendations()[0]
+        approved = commerce_agent.approve_recommendation(
+            recommendation["recommendationId"],
+            {"cid": "4000", "notes": "Seller reviewed category and condition."},
+        )
+        self.assertEqual(approved["approved"]["cid"], "4000")
+        self.assertEqual(approved["approved"]["notes"], "Seller reviewed category and condition.")
+
     def test_dashboard_counts_imported_records_and_recommendations(self):
         commerce_agent.audit_all()
         dashboard = commerce_agent.dashboard()

@@ -20,7 +20,7 @@ from hht_app.ebay_pricing import (
     enrich_with_ebay_active_pricing,
 )
 from hht_app.providers import UploadedImage
-from hht_app.schema import EBAY_DRAFT_COLUMNS, HEADERS, build_ebay_draft_csv_row, csv_from_draft_row, export_ebay_csv, export_ebay_draft_csv, fit_title, normalize_listing
+from hht_app.schema import EBAY_DRAFT_COLUMNS, EBAY_ITEM_SPECIFICS, HEADERS, SCHEMA_KEYS, build_ebay_draft_csv_row, csv_from_draft_row, export_ebay_csv, export_ebay_draft_csv, fit_title, normalize_listing
 
 
 class FakeResponse:
@@ -1052,6 +1052,23 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(result["slv"], "N/A - footwear")
         self.assertEqual(result["nk"], "N/A - footwear")
 
+    def test_normalization_restores_default_keys_and_accepts_category_labels(self):
+        result = normalize_listing({
+            "title": "Workout Top",
+            "cat": "Women's Tops / Blouses",
+            "notes": "Keep seller note.",
+        })
+        self.assertTrue(set(SCHEMA_KEYS).issubset(result.keys()))
+        self.assertEqual(result["cat"], "15724")
+        self.assertEqual(result["cid"], "3000")
+        self.assertEqual(result["cnote"], "Needs seller review. Review all photos for wear, stains, pilling, fading, holes, and other flaws.")
+        self.assertEqual(result["sea"], "All Seasons")
+        self.assertEqual(result["occ"], "Casual")
+        self.assertEqual(result["st"], "Regular")
+        self.assertEqual(result["vin"], "No")
+        self.assertEqual(result["pic"], "")
+        self.assertIn("Keep seller note.", result["notes"])
+
     def test_vintage_title_behavior(self):
         result = normalize_listing({"title": "Levi's Denim Jacket", "brand": "Levi's", "type": "Jacket", "vin": "pre-1999 tag visible"})
         self.assertEqual(result["vin"], "Yes (pre-1999)")
@@ -1088,6 +1105,36 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(len(rows[0]), 35)
         self.assertEqual(len(rows[1]), 35)
         self.assertIn('"<p>HTML description</p>"', text)
+
+    def test_csv_mapping_covers_all_supported_item_specifics(self):
+        item = {
+            "title": "Levi's Jacket",
+            "price": 24.99,
+            "cid": "3000",
+            "cnote": "Pre-owned",
+            "cat": "57988",
+            "brand": "Levi's",
+            "size": "L",
+            "color": "Blue",
+            "dept": "Men",
+            "type": "Jacket",
+            "style": "Trucker",
+            "mat": "Cotton",
+            "pat": "Solid",
+            "slv": "Long Sleeve",
+            "nk": "Collared",
+            "sea": "Fall",
+            "occ": "Casual",
+            "st": "Regular",
+            "vin": "No",
+        }
+        rows = list(csv.reader(io.StringIO(export_ebay_csv([item]))))
+        row = dict(zip(rows[0], rows[1]))
+        self.assertEqual(row["Category"], "57988")
+        self.assertEqual(row["ConditionID"], "3000")
+        self.assertEqual(row["ConditionNote"], "Pre-owned")
+        for label, key in EBAY_ITEM_SPECIFICS:
+            self.assertEqual(row[f"C:{label}"], str(item[key]))
 
     def test_draft_csv_helper_is_separate_from_exact_35_column_export(self):
         item = {

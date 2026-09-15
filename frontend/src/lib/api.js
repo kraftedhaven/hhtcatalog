@@ -1,3 +1,5 @@
+import { normalizeClientItem } from './ebay.js';
+
 const PUBLIC_API_URL = import.meta.env.DEV
     ? import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || ''
     : '';
@@ -40,31 +42,11 @@ export async function health() {
     return parseResponse(res);
 }
 
-export function normalizeClientItem(item) {
-    const out = { ...item };
-    out.price = Number.parseFloat(out.price) || 0;
-    out.title = String(out.title || '').slice(0, 80);
-    if (isBag(out)) {
-        out.slv = 'N/A - bag';
-        out.nk = 'N/A - bag';
-        out.size = 'N/A - bag';
-        out.st = 'N/A - bag';
-    } else if (isShoe(out)) {
-        out.slv = 'N/A - footwear';
-        out.nk = 'N/A - footwear';
-    }
-    if (out.vin !== 'Yes (pre-1999)') out.vin = 'No';
-    if (out.vin === 'Yes (pre-1999)' && !/vintage/i.test(out.title)) {
-        out.title = `Vintage ${out.title}`.slice(0, 80).trim();
-    }
-    return out;
-}
-
 export async function downloadCSV(items, defaults = {}) {
     const res = await fetch(`${baseUrl()}/export/csv`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items, sellerDefaults: defaults })
+        body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)), sellerDefaults: defaults })
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -82,7 +64,7 @@ export async function downloadDraftCSV(items) {
     const res = await fetch(`${baseUrl()}/export/draft-csv`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items })
+        body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)) })
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -100,7 +82,7 @@ export async function createEbayDraft(item) {
     const res = await fetch(`${baseUrl()}/api/ebay/drafts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item })
+        body: JSON.stringify({ item: normalizeClientItem(item) })
     });
     const body = await parseResponse(res);
     return body.result || body;
@@ -116,7 +98,7 @@ export async function updateEbayOffer(offerId, item) {
     const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item })
+        body: JSON.stringify({ item: normalizeClientItem(item) })
     });
     const body = await parseResponse(res);
     return body.result || body;
@@ -180,12 +162,4 @@ export function downloadJSON(data, filename = 'hht-listings-backup.json') {
     a.download = filename;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-
-function isBag(item) {
-    return ['169291', '169284'].includes(String(item.cat || '')) || /handbag|crossbody|clutch|backpack|tote|purse/i.test(item.type || '');
-}
-
-function isShoe(item) {
-    return String(item.cat || '') === '93427' || /shoe|sneaker|boot|loafer|sandal/i.test(item.type || '');
 }
