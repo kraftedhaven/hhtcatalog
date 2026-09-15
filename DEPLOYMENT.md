@@ -75,7 +75,11 @@ Commerce Agent routes:
 - `GET /api/commerce/history` — action/change history.
 - `GET`/`PUT /api/commerce/settings` — safety settings; this MVP still enforces Recommend mode.
 
-The seller OAuth scopes already used by the repository include `sell.inventory`, `sell.account`, and `sell.fulfillment`. Inventory import requires the seller's Inventory API permissions and a valid refresh token. Policy/location variables remain required by the existing update flow. The first audit sequence is: complete eBay OAuth setup, verify `GET /api/ebay/oauth/status`, open Commerce Agent, select **Analyze My Listings**, review each finding and proposed field, then select **Approve & Apply** only for changes you want sent to eBay.
+The seller OAuth scopes already used by the repository include `sell.inventory`, `sell.account`, and `sell.fulfillment`. Inventory import requires the seller's Inventory API permissions and a valid refresh token. Policy/location variables remain required by the existing update flow. The first audit sequence is: complete eBay OAuth setup, verify `GET /api/ebay/oauth/status`, open Commerce Agent, select **Analyze Active Listings**, review each finding and proposed field, then select **Approve & Apply** only for changes you want sent to eBay.
+
+The **Analyze Active Listings** action uses the Trading API `GetMyeBaySelling` with pagination and is separate from **Import API Inventory**, which only covers Inventory API records. Active-listing import may require reauthorizing the seller token with the appropriate Trading API user scope. `POST /api/photo-quality` provides deterministic resolution, brightness, and sharpness checks before export. Active pricing lookups use a bounded in-process TTL cache controlled by `PRICING_CACHE_TTL_SECONDS`; active asking prices are not sold prices.
+
+NVIDIA GPU category classification is optional and reserved for an approved NVIDIA NIM/OpenAI-compatible endpoint configured with `NVIDIA_NIM_BASE_URL`, `NVIDIA_NIM_API_KEY`, and `NVIDIA_CATEGORY_MODEL`. The app remains usable without those variables. Bulk active import is paginated and bounded; future GPU image workers must use bounded concurrency and must not issue unbounded eBay requests.
 
 Example commands:
 

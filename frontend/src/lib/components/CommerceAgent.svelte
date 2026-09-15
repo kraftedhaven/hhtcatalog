@@ -1,5 +1,5 @@
 <script>
-    import { commerceAudit, commerceApprove, commerceApply, commerceDashboard, commerceHistory, commerceImport, commerceRecommendations } from "$lib/api";
+    import { commerceAudit, commerceApprove, commerceApply, commerceDashboard, commerceHistory, commerceImport, commerceImportActive, commerceRecommendations } from "$lib/api";
 
     let dashboard = null;
     let recommendations = [];
@@ -26,6 +26,17 @@
             const imported = await commerceImport();
             const audited = await commerceAudit();
             message = `Imported ${imported.imported} listing${imported.imported === 1 ? "" : "s"} and created ${audited.count} recommendation${audited.count === 1 ? "" : "s"}.`;
+            await refresh();
+        } catch (err) { error = err.message || String(err); }
+        finally { loading = false; }
+    }
+
+    async function importActiveAndAudit() {
+        loading = true; error = ""; message = "Importing all active eBay listings...";
+        try {
+            const imported = await commerceImportActive();
+            const audited = await commerceAudit();
+            message = `Imported ${imported.imported} active listing${imported.imported === 1 ? "" : "s"} and created ${audited.count} recommendation${audited.count === 1 ? "" : "s"}.`;
             await refresh();
         } catch (err) { error = err.message || String(err); }
         finally { loading = false; }
@@ -58,7 +69,8 @@
     {#if error}<div class="notice error">{error}</div>{/if}
     {#if message}<div class="notice info">{message}</div>{/if}
     <div class="actions commerce-actions">
-        <button class="primary" disabled={loading} on:click={importAndAudit}>{loading ? "Working..." : "Analyze My Listings"}</button>
+        <button class="primary" disabled={loading} on:click={importActiveAndAudit}>{loading ? "Working..." : "Analyze Active Listings"}</button>
+        <button disabled={loading} on:click={importAndAudit}>Import API Inventory</button>
         <button disabled={loading} on:click={refresh}>Refresh Queue</button>
         <select bind:value={filter} aria-label="Filter recommendations">
             <option value="">All recommendations</option>

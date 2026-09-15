@@ -6,6 +6,8 @@ from typing import Any
 
 import requests
 
+from .pricing_cache import clear as clear_pricing_cache, get as cache_get, key as cache_key, put as cache_put
+
 
 EBAY_OAUTH_SCOPE = "https://api.ebay.com/oauth/api_scope"
 TOKEN_CACHE_SKEW_SECONDS = 60
@@ -79,6 +81,11 @@ def active_listing_keywords(listing: dict[str, Any]) -> str:
 
 
 def fetch_active_listing_estimate(listing: dict[str, Any], keywords: str, timeout: float = 5.0) -> dict[str, Any]:
+    lookup_key = cache_key({"keywords": keywords, "category": listing.get("cat"), "brand": listing.get("brand"), "size": listing.get("size"), "condition": listing.get("cid")})
+    cached = cache_get(lookup_key)
+    if cached is not None:
+        cached["cached"] = True
+        return cached
     token = ebay_access_token(timeout=timeout)
     response = requests.get(
         f"{_api_base_url()}/buy/browse/v1/item_summary/search",
@@ -106,7 +113,9 @@ def fetch_active_listing_estimate(listing: dict[str, Any], keywords: str, timeou
         price for price in (_active_listing_price(item, category) for item in items)
         if price is not None and price > 0
     )
-    return _active_summary(keywords, prices)
+    result = _active_summary(keywords, prices)
+    cache_put(lookup_key, result)
+    return result
 
 
 def ebay_access_token(timeout: float = 5.0) -> str:
@@ -145,6 +154,7 @@ def ebay_access_token(timeout: float = 5.0) -> str:
 
 def clear_token_cache() -> None:
     _token_cache.update({"token": "", "expires_at": 0.0, "environment": ""})
+    clear_pricing_cache()
 
 
 def _browse_configured() -> bool:

@@ -132,6 +132,10 @@ export function commerceImport() {
     return commerceRequest('/api/commerce/import', { method: 'POST' });
 }
 
+export function commerceImportActive() {
+    return commerceRequest('/api/commerce/import-active', { method: 'POST' });
+}
+
 export function commerceAudit() {
     return commerceRequest('/api/commerce/audit', { method: 'POST' });
 }

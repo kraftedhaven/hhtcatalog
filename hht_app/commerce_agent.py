@@ -25,6 +25,7 @@ except ImportError:  # Local SQLite fallback remains available without psycopg.
     dict_row = None
 
 from .ebay_auth import EbayAuthError, seller_access_token
+from .ebay_active import EbayActiveError, fetch_active_listings
 from .ebay_drafts import EbayDraftError, get_ebay_offer, update_ebay_offer
 from .schema import normalize_listing
 
@@ -293,6 +294,31 @@ def import_listings() -> dict[str, Any]:
             break
         offset += len(items)
     return {"imported": imported, "total": count_listings()}
+
+
+def import_active_listings() -> dict[str, Any]:
+    """Import all active seller listings separately from Inventory API records."""
+    init_db()
+    page = 1
+    imported = 0
+    total_entries = 0
+    while True:
+        result = fetch_active_listings(page=page)
+        total_entries = result["totalEntries"]
+        items = result["items"]
+        with connect() as db:
+            for listing in items:
+                sku = str(listing.get("sku") or listing.get("listingId") or "").strip()
+                if not sku:
+                    continue
+                now = utc_now()
+                normalized = {**listing, "sku": sku, "marketplace": _marketplace(), "source": "trading_active"}
+                db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now))
+                imported += 1
+        if page >= int(result.get("totalPages") or 1) or not items:
+            break
+        page += 1
+    return {"imported": imported, "totalEntries": total_entries, "total": count_listings(), "source": "trading_active"}
 
 
 def count_listings() -> int:

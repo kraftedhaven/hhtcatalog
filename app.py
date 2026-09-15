@@ -10,6 +10,7 @@ from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft, get_ebay_offe
 from hht_app import commerce_agent
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
 from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
+from hht_app.photo_quality import assess_image
 
 
 PORT = int(os.environ.get("PORT", 8080))
@@ -79,6 +80,20 @@ def bulk_analyze():
         except Exception as exc:
             results.append({"filename": file.filename, "status": "error", "error": str(exc)})
     return jsonify({"count": len(results), "results": results})
+
+
+@app.route("/api/photo-quality", methods=["POST"])
+def photo_quality():
+    files = _request_files()
+    if not files:
+        return jsonify({"error": "Upload one or more image files."}), 400
+    results = []
+    for file in files[:5]:
+        try:
+            results.append(assess_image(file.read(), file.filename or "image"))
+        except Exception:
+            results.append({"filename": file.filename or "image", "status": "invalid", "score": 0, "issues": ["Photo quality check failed."]})
+    return jsonify({"count": len(results), "results": results, "ready": all(item["status"] == "pass" for item in results)})
 
 
 @app.route("/export/csv", methods=["POST"])
@@ -233,6 +248,15 @@ def commerce_import():
     except Exception:
         app.logger.exception("Commerce Agent listing import failed")
         return jsonify({"error": "Commerce Agent listing import failed. Check the Heroku logs for the diagnostic."}), 502
+
+
+@app.route("/api/commerce/import-active", methods=["POST"])
+def commerce_import_active():
+    try:
+        return jsonify({"result": commerce_agent.import_active_listings()})
+    except Exception:
+        app.logger.exception("Commerce Agent active listing import failed")
+        return jsonify({"error": "Active listing import failed. Check the Heroku logs for the diagnostic."}), 502
 
 
 @app.route("/api/commerce/audit", methods=["POST"])
