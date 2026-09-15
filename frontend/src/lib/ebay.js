@@ -45,7 +45,8 @@ export function applyClientItemRules(item = {}) {
 
 export function normalizeClientItem(item = {}) {
     const out = applyClientItemRules(item);
-    out.price = Number.parseFloat(out.price) || 0;
+    const parsedPrice = Number.parseFloat(out.price);
+    out.price = Number.isFinite(parsedPrice) && parsedPrice > 0 ? parsedPrice : String(out.price ?? '').trim();
     return out;
 }
 

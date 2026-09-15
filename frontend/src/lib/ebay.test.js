@@ -21,6 +21,11 @@ test('normalizeClientItem restores ebay field defaults for outgoing payloads', (
     assert.equal(result.occ, 'Casual');
 });
 
+test('normalizeClientItem preserves invalid price input for validation', () => {
+    const result = normalizeClientItem({ title: 'Coach Tote', price: 'not-a-price', cat: '169291' });
+    assert.equal(result.price, 'not-a-price');
+});
+
 test('applyClientItemRules keeps explicit ebay specifics while trimming title', () => {
     const result = applyClientItemRules({
         ...EMPTY_ITEM,
