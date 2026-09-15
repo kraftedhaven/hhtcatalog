@@ -31,7 +31,7 @@ from .schema import normalize_listing
 logger = logging.getLogger(__name__)
 DB_PATH = os.environ.get("COMMERCE_AGENT_DB", "commerce_agent.sqlite3")
 MAX_TITLE_LENGTH = 80
-EDITABLE_FIELDS = {"title", "price", "desc", "cat", "cnote", "pic", "brand", "size", "color", "dept", "type", "style", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
+EDITABLE_FIELDS = {"title", "price", "cid", "desc", "cat", "cnote", "notes", "pic", "brand", "size", "color", "dept", "type", "style", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
 
 
 def utc_now() -> str:

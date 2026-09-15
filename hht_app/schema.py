@@ -5,15 +5,29 @@ import re
 from typing import Any
 
 
+EBAY_ITEM_SPECIFICS = [
+    ("Brand", "brand"),
+    ("Size", "size"),
+    ("Color", "color"),
+    ("Department", "dept"),
+    ("Type", "type"),
+    ("Style", "style"),
+    ("Material", "mat"),
+    ("Pattern", "pat"),
+    ("Sleeve Length", "slv"),
+    ("Neckline", "nk"),
+    ("Season", "sea"),
+    ("Occasion", "occ"),
+    ("Size Type", "st"),
+    ("Vintage", "vin"),
+]
+
 HEADERS = [
     "Action", "SiteID", "Currency", "Title", "Subtitle", "Category",
     "ConditionID", "ConditionNote", "Description", "Price", "BuyItNowPrice",
     "Quantity", "BestOfferEnabled", "PicURL", "PaymentProfileName",
     "ShippingProfileName", "ReturnProfileName", "DispatchTimeMax", "Location",
-    "CountryCode", "PostalCode", "C:Brand", "C:Size", "C:Color",
-    "C:Department", "C:Type", "C:Style", "C:Material", "C:Pattern",
-    "C:Sleeve Length", "C:Neckline", "C:Season", "C:Occasion",
-    "C:Size Type", "C:Vintage",
+    "CountryCode", "PostalCode", *[f"C:{label}" for label, _ in EBAY_ITEM_SPECIFICS],
 ]
 
 EBAY_DRAFT_COLUMNS = [
@@ -33,7 +47,7 @@ EBAY_DRAFT_COLUMNS = [
 SCHEMA_KEYS = [
     "title", "price", "cid", "cnote", "cat", "brand", "size", "color",
     "dept", "type", "style", "mat", "pat", "slv", "nk", "sea", "occ",
-    "st", "vin", "desc", "notes", "madeIn", "serialNumber", "measurements",
+    "st", "vin", "desc", "notes", "madeIn", "serialNumber", "measurements", "pic",
 ]
 
 CATEGORY_IDS = {
@@ -55,6 +69,31 @@ CATEGORY_IDS = {
     "handbags/clutches/crossbodies": "169291",
     "backpacks": "169284",
 }
+
+CATEGORY_LABEL_ALIASES = {
+    "Women's Tops / Blouses": "15724",
+    "Women's Sports Bras / Crop Tops": "15724",
+    "Women's Dresses": "63861",
+    "Women's Jeans / Pants": "63867",
+    "Women's Sweaters / Cardigans": "11484",
+    "Men's Sweaters / Hoodies": "11484",
+    "Women's Jackets / Coats": "57988",
+    "Men's Jackets / Coats": "57988",
+    "Women's Skirts": "63866",
+    "Women's Activewear Pants / Leggings": "185100",
+    "Men's T-Shirts": "15687",
+    "Men's Jeans": "11483",
+    "Men's Casual Shirts / Polos": "57990",
+    "Men's Sweatshirts / Hoodies": "155183",
+    "Men's Casual Shoes / Boat Shoes": "93427",
+    "Handbags / Clutches / Crossbodies": "169291",
+    "Backpacks": "169284",
+}
+
+CATEGORY_LOOKUP = {}
+for _category_labels in (CATEGORY_IDS, CATEGORY_LABEL_ALIASES):
+    for _label, _category_id in _category_labels.items():
+        CATEGORY_LOOKUP[re.sub(r"[^a-z0-9]+", "", _label.lower())] = _category_id
 
 ALLOWED_CATEGORY_IDS = set(CATEGORY_IDS.values())
 BAG_CATEGORY_IDS = {"169291", "169284"}
@@ -180,11 +219,7 @@ def listing_to_csv_row(item: dict[str, Any], defaults: dict[str, Any] | None = N
         _text(defaults.get("location")) or "Kettering, Ohio",
         _text(defaults.get("countryCode")) or "US",
         _text(defaults.get("postalCode")) or "45429",
-        _text(item.get("brand")), _text(item.get("size")), _text(item.get("color")),
-        _text(item.get("dept")), _text(item.get("type")), _text(item.get("style")),
-        _text(item.get("mat")), _text(item.get("pat")), _text(item.get("slv")),
-        _text(item.get("nk")), _text(item.get("sea")), _text(item.get("occ")),
-        _text(item.get("st")), _text(item.get("vin")),
+        *[_text(item.get(key)) for _, key in EBAY_ITEM_SPECIFICS],
     ]
 
 
@@ -275,7 +310,7 @@ def _normalize_category(value: Any, item_type: str) -> str:
     text = _text(value)
     if text in ALLOWED_CATEGORY_IDS:
         return text
-    mapped = CATEGORY_IDS.get(text.lower())
+    mapped = CATEGORY_LOOKUP.get(_category_lookup_key(text))
     if mapped:
         return mapped
     lowered = item_type.lower()
@@ -291,6 +326,10 @@ def _normalize_category(value: Any, item_type: str) -> str:
 def _normalize_vintage(value: Any, notes: str) -> str:
     evidence = f"{_text(value)} {notes}"
     return "Yes (pre-1999)" if re.search(r"yes \(pre-1999\)|pre.?1999|19[5-9]\ds|vintage tag|made in usa", evidence, re.I) else "No"
+
+
+def _category_lookup_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
 def _html_description(candidate: str, item: dict[str, Any]) -> str:

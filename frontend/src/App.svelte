@@ -1,15 +1,10 @@
 <script>
     import "./app.css";
     import { analyzeImages, createEbayDraft, downloadCSV, downloadDraftCSV, downloadJSON, getEbayOffer, publishEbayOffer, updateEbayOffer } from "$lib/api";
+    import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
 
-    const emptyItem = {
-        title: "", price: "", cid: "3000", cnote: "", cat: "", brand: "",
-        size: "", color: "", dept: "", type: "", style: "", mat: "", pat: "",
-        slv: "", nk: "", sea: "All Seasons", occ: "Casual", st: "Regular",
-        vin: "No", desc: "", notes: "", madeIn: "", serialNumber: "",
-        measurements: "", pic: ""
-    };
+    const emptyItem = EMPTY_ITEM;
     const defaultSeller = {
         location: "Kettering, Ohio",
         postalCode: "45429",
@@ -272,27 +267,26 @@
     }
 
     function applyClientRules(nextItem = item) {
-        const next = { ...nextItem };
-        if (isBag(next)) {
-            next.slv = "N/A - bag";
-            next.nk = "N/A - bag";
-            next.size = "N/A - bag";
-            next.st = "N/A - bag";
-        } else if (isShoe(next)) {
-            next.slv = "N/A - footwear";
-            next.nk = "N/A - footwear";
+        return applyClientItemRules(nextItem);
+    }
+
+    function reviewedCandidate(source = item) {
+        let reviewed = applyClientRules(source);
+        if (!reviewed.desc) reviewed = { ...reviewed, desc: description(reviewed) };
+        return reviewed;
+    }
+
+    function firstInvalidQueuedItem(source = queue) {
+        for (let index = 0; index < source.length; index += 1) {
+            const reviewed = reviewedCandidate(source[index]);
+            const validation = validateItem(reviewed);
+            if (validation) return { index, reviewed, message: validation };
         }
-        if (next.vin !== "Yes (pre-1999)") next.vin = "No";
-        if (next.vin === "Yes (pre-1999)" && !/vintage/i.test(next.title || "")) {
-            next.title = `Vintage ${next.title || ""}`.trim().slice(0, 80);
-        }
-        next.title = String(next.title || "").slice(0, 80);
-        return next;
+        return null;
     }
 
     function addToQueue() {
-        let reviewed = applyClientRules(item);
-        if (!reviewed.desc) reviewed = { ...reviewed, desc: description(reviewed) };
+        const reviewed = reviewedCandidate(item);
         const validation = validateItem(reviewed);
         if (validation) {
             error = validation;
@@ -325,6 +319,13 @@
             error = "Queue is empty.";
             return;
         }
+        const invalid = firstInvalidQueuedItem();
+        if (invalid) {
+            error = `Queue item ${invalid.index + 1}: ${invalid.message}`;
+            item = { ...invalid.reviewed };
+            tab = "edit";
+            return;
+        }
         try {
             await downloadCSV(queue, seller);
         } catch (err) {
@@ -335,6 +336,13 @@
     async function exportDraftQueue() {
         if (!queue.length) {
             error = "Queue is empty.";
+            return;
+        }
+        const invalid = firstInvalidQueuedItem();
+        if (invalid) {
+            error = `Queue item ${invalid.index + 1}: ${invalid.message}`;
+            item = { ...invalid.reviewed };
+            tab = "edit";
             return;
         }
         try {
@@ -348,9 +356,17 @@
         error = "";
         const queued = queue[index];
         if (!queued) return;
+        const reviewed = reviewedCandidate(queued);
+        const validation = validateItem(reviewed);
+        if (validation) {
+            error = `Queue item ${index + 1}: ${validation}`;
+            item = { ...reviewed };
+            tab = "edit";
+            return;
+        }
         draftLoading = index;
         try {
-            const result = await createEbayDraft(queued);
+            const result = await createEbayDraft(reviewed);
             queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferId: result.offerId, ebaySku: result.sku, ebayDraftStatus: result.status } : entry);
             status = `eBay API offer created for ${queued.title}: offer ${result.offerId}. Use the draft CSV for Seller Hub drafts, or publish this offer later after review.`;
         } catch (err) {
@@ -380,9 +396,17 @@
         error = "";
         const queued = queue[index];
         if (!queued?.ebayOfferId) return;
+        const reviewed = reviewedCandidate(queued);
+        const validation = validateItem(reviewed);
+        if (validation) {
+            error = `Queue item ${index + 1}: ${validation}`;
+            item = { ...reviewed };
+            tab = "edit";
+            return;
+        }
         offerAction = `update:${index}`;
         try {
-            const result = await updateEbayOffer(queued.ebayOfferId, { ...queued, sku: queued.ebaySku || queued.sku });
+            const result = await updateEbayOffer(queued.ebayOfferId, { ...reviewed, sku: queued.ebaySku || queued.sku });
             queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferStatus: result.status, ebaySku: result.sku || entry.ebaySku } : entry);
             status = `Updated eBay offer ${result.offerId}. Review again before publishing live.`;
         } catch (err) {
@@ -449,13 +473,6 @@
         return [...new Set(notes.filter(Boolean))];
     }
 
-    function isBag(source) {
-        return ["169291", "169284"].includes(String(source.cat || "")) || /handbag|crossbody|clutch|backpack|tote|purse/i.test(source.type || "");
-    }
-
-    function isShoe(source) {
-        return String(source.cat || "") === "93427" || /shoe|sneaker|boot|loafer|sandal/i.test(source.type || "");
-    }
 </script>
 
 <div class="shell">
@@ -537,8 +554,8 @@
         <section class="panel form">
             <label class="field wide"><span>Title <em>{titleLength}/80</em></span><input bind:value={item.title} maxlength="80" /></label>
             <label class="field"><span>Price</span><input bind:value={item.price} inputmode="decimal" /></label>
-            <label class="field"><span>Condition</span><select bind:value={item.cid}><option value="1000">1000 New with Tags</option><option value="1500">1500 New without Tags</option><option value="3000">3000 Pre-Owned</option><option value="4000">4000 Very Good</option><option value="5000">5000 Good</option><option value="6000">6000 Acceptable</option></select></label>
-            <label class="field wide"><span>Category</span><select bind:value={item.cat}><option value="">Needs seller review</option><option value="15724">Women's Tops / Blouses</option><option value="63861">Women's Dresses</option><option value="63867">Women's Jeans / Pants</option><option value="11484">Women's Sweaters / Cardigans</option><option value="57988">Jackets / Coats</option><option value="63866">Women's Skirts</option><option value="185100">Women's Activewear Pants / Leggings</option><option value="15687">Men's T-Shirts</option><option value="11483">Men's Jeans</option><option value="57990">Men's Casual Shirts / Polos</option><option value="155183">Men's Sweatshirts / Hoodies</option><option value="93427">Men's Casual Shoes / Boat Shoes</option><option value="169291">Handbags / Clutches / Crossbodies</option><option value="169284">Backpacks</option></select></label>
+            <label class="field"><span>Condition ID (cid)</span><select bind:value={item.cid}><option value="1000">1000 New with Tags</option><option value="1500">1500 New without Tags</option><option value="3000">3000 Pre-Owned</option><option value="4000">4000 Very Good</option><option value="5000">5000 Good</option><option value="6000">6000 Acceptable</option></select></label>
+            <label class="field wide"><span>eBay Category (cat)</span><select bind:value={item.cat} on:change={() => item = applyClientRules(item)}>{#each CATEGORY_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
             <label class="field wide"><span>Condition Note</span><input bind:value={item.cnote} /></label>
             <label class="field"><span>Brand</span><input bind:value={item.brand} /></label>
             <label class="field"><span>Size</span><input bind:value={item.size} /></label>
