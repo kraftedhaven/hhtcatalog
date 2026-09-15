@@ -1,4 +1,4 @@
-import { normalizeClientItem } from './ebay.js';
+import { normalizeClientPayloadItem } from './ebay.js';
 
 const PUBLIC_API_URL = import.meta.env.DEV
     ? import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || ''
@@ -46,7 +46,7 @@ export async function downloadCSV(items, defaults = {}) {
     const res = await fetch(`${baseUrl()}/export/csv`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)), sellerDefaults: defaults })
+        body: JSON.stringify({ items: items.map((item) => normalizeClientPayloadItem(item)), sellerDefaults: defaults })
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -64,7 +64,7 @@ export async function downloadDraftCSV(items) {
     const res = await fetch(`${baseUrl()}/export/draft-csv`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)) })
+        body: JSON.stringify({ items: items.map((item) => normalizeClientPayloadItem(item)) })
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -82,7 +82,7 @@ export async function createEbayDraft(item) {
     const res = await fetch(`${baseUrl()}/api/ebay/drafts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item: normalizeClientItem(item) })
+        body: JSON.stringify({ item: normalizeClientPayloadItem(item) })
     });
     const body = await parseResponse(res);
     return body.result || body;
@@ -98,7 +98,7 @@ export async function updateEbayOffer(offerId, item) {
     const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item: normalizeClientItem(item) })
+        body: JSON.stringify({ item: normalizeClientPayloadItem(item) })
     });
     const body = await parseResponse(res);
     return body.result || body;

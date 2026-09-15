@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM, normalizeClientItem } from './ebay.js';
+import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM, normalizeClientItem, normalizeClientPayloadItem } from './ebay.js';
 
 test('normalizeClientItem restores ebay field defaults for outgoing payloads', () => {
     const result = normalizeClientItem({ title: 'Coach Tote', price: '49.99', cat: '169291' });
@@ -24,6 +24,13 @@ test('normalizeClientItem restores ebay field defaults for outgoing payloads', (
 test('normalizeClientItem preserves invalid price input for validation', () => {
     const result = normalizeClientItem({ title: 'Coach Tote', price: 'not-a-price', cat: '169291' });
     assert.equal(result.price, 'not-a-price');
+});
+
+test('normalizeClientPayloadItem rejects invalid price before request serialization', () => {
+    assert.throws(
+        () => normalizeClientPayloadItem({ title: 'Coach Tote', price: 'not-a-price', cat: '169291' }),
+        /Enter a positive fixed price\./
+    );
 });
 
 test('applyClientItemRules keeps explicit ebay specifics while trimming title', () => {

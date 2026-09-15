@@ -50,6 +50,16 @@ export function normalizeClientItem(item = {}) {
     return out;
 }
 
+export function normalizeClientPayloadItem(item = {}) {
+    const out = applyClientItemRules(item);
+    const parsedPrice = Number.parseFloat(out.price);
+    if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) {
+        throw new Error('Enter a positive fixed price.');
+    }
+    out.price = parsedPrice;
+    return out;
+}
+
 function isBag(item) {
     return ['169291', '169284'].includes(String(item.cat || '')) || /handbag|crossbody|clutch|backpack|tote|purse/i.test(item.type || '');
 }
