@@ -367,7 +367,7 @@
         draftLoading = index;
         try {
             const result = await createEbayDraft(reviewed);
-            queue = queue.map((entry, i) => i === index ? { ...entry, ...reviewed, ebayOfferId: result.offerId, ebaySku: result.sku, ebayDraftStatus: result.status } : entry);
+            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferId: result.offerId, ebaySku: result.sku, ebayDraftStatus: result.status } : entry);
             status = `eBay API offer created for ${queued.title}: offer ${result.offerId}. Use the draft CSV for Seller Hub drafts, or publish this offer later after review.`;
         } catch (err) {
             error = friendlyEbayError(err);
@@ -407,7 +407,7 @@
         offerAction = `update:${index}`;
         try {
             const result = await updateEbayOffer(queued.ebayOfferId, { ...reviewed, sku: queued.ebaySku || queued.sku });
-            queue = queue.map((entry, i) => i === index ? { ...entry, ...reviewed, ebayOfferStatus: result.status, ebaySku: result.sku || entry.ebaySku } : entry);
+            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferStatus: result.status, ebaySku: result.sku || entry.ebaySku } : entry);
             status = `Updated eBay offer ${result.offerId}. Review again before publishing live.`;
         } catch (err) {
             error = friendlyEbayError(err);
