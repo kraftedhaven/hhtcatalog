@@ -90,6 +90,11 @@ CATEGORY_LABEL_ALIASES = {
     "Backpacks": "169284",
 }
 
+CATEGORY_LOOKUP = {}
+for _category_labels in (CATEGORY_IDS, CATEGORY_LABEL_ALIASES):
+    for _label, _category_id in _category_labels.items():
+        CATEGORY_LOOKUP[re.sub(r"[^a-z0-9]+", "", _label.lower())] = _category_id
+
 ALLOWED_CATEGORY_IDS = set(CATEGORY_IDS.values())
 BAG_CATEGORY_IDS = {"169291", "169284"}
 SHOE_CATEGORY_IDS = {"93427"}
@@ -305,7 +310,7 @@ def _normalize_category(value: Any, item_type: str) -> str:
     text = _text(value)
     if text in ALLOWED_CATEGORY_IDS:
         return text
-    mapped = _category_lookup().get(_category_lookup_key(text))
+    mapped = CATEGORY_LOOKUP.get(_category_lookup_key(text))
     if mapped:
         return mapped
     lowered = item_type.lower()
@@ -325,11 +330,6 @@ def _normalize_vintage(value: Any, notes: str) -> str:
 
 def _category_lookup_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
-
-
-def _category_lookup() -> dict[str, str]:
-    aliases = {**CATEGORY_IDS, **CATEGORY_LABEL_ALIASES}
-    return {_category_lookup_key(label): category_id for label, category_id in aliases.items()}
 
 
 def _html_description(candidate: str, item: dict[str, Any]) -> str:
