@@ -31,6 +31,7 @@ HEIC_SUPPORT_ENABLED = _register_heic_support()
 ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
 GROQ_DEFAULT_MODEL = "qwen/qwen3.6-27b"
+GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
 MAX_PROVIDER_IMAGES = 5
 MAX_ZAI_IMAGES = 3
 MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
@@ -359,6 +360,17 @@ def _groq(images: list[UploadedImage], context: dict[str, Any]) -> str:
     model = _groq_model()
     content = [{"type": "text", "text": _groq_prompt(context)}]
     content.extend({"type": "image_url", "image_url": {"url": _compressed_data_url(image)}} for image in images[:MAX_GROQ_IMAGES])
+    try:
+        return _groq_once(model, content, context)
+    except ProviderError as exc:
+        fallback = _groq_fallback_model()
+        if exc.status_code != 404 or fallback == model or _remaining_seconds(context) < 5:
+            raise
+        print(f"[provider] groq model unavailable; retrying supported fallback model={fallback}")
+        return _groq_once(fallback, content, context)
+
+
+def _groq_once(model: str, content: list[dict[str, Any]], context: dict[str, Any]) -> str:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
@@ -599,7 +611,12 @@ def _zai_model() -> str:
 
 
 def _groq_model() -> str:
-    return os.environ.get("GROQ_MODEL") or GROQ_DEFAULT_MODEL
+    return (os.environ.get("GROQ_MODEL") or GROQ_DEFAULT_MODEL).strip() or GROQ_DEFAULT_MODEL
+
+
+def _groq_fallback_model() -> str:
+    configured = (os.environ.get("GROQ_FALLBACK_MODEL") or GROQ_FALLBACK_MODEL).strip()
+    return configured or GROQ_FALLBACK_MODEL
 
 
 def _model_for_provider(provider: str) -> str:

@@ -21,6 +21,7 @@ Set the hosted vision provider explicitly in Heroku Config Vars. Do not commit r
 PRIMARY_VISION_PROVIDER=groq
 GROQ_API_KEY
 GROQ_MODEL=qwen/qwen3.6-27b
+GROQ_FALLBACK_MODEL=qwen/qwen3.8-27b
 ZAI_API_KEY
 ZAI_BASE_URL=https://api.z.ai/api/paas/v4/
 ZAI_MODEL=glm-4.6v-flash
@@ -50,7 +51,7 @@ DEMO_MODE=false
 DATABASE_URL
 ```
 
-`PRIMARY_VISION_PROVIDER=groq` calls only Groq and does not fan out to every configured provider. Z.AI can remain configured but unused until you want to test it again. `DEMO_MODE=false` is the production default.
+`PRIMARY_VISION_PROVIDER=groq` calls only Groq and does not fan out to every configured provider. Groq model values are trimmed, and a 404/model-unavailable response is retried once with `GROQ_FALLBACK_MODEL`; both defaults are current multimodal models documented by Groq. Z.AI can remain configured but unused until you want to test it again. `DEMO_MODE=false` is the production default.
 When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
 Official eBay Browse pricing is optional. When `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` are present, `/analyze` uses generated item keywords to fetch active eBay listings and labels the result `active_listing_estimate`. These are active listings, not sold comps. Without Browse access, the app keeps the vision provider's `ai_estimate`.
 Seller OAuth for future inventory/offer work uses `EBAY_REDIRECT_URI`, `EBAY_RUNAME`, `EBAY_REFRESH_TOKEN`, and optional `EBAY_AUTH_STATE`/`EBAY_USER_SCOPES`. `EBAY_REDIRECT_URI` is the public callback URL that eBay sends the browser back to. `EBAY_RUNAME` is the OAuth-enabled RuName from the eBay Developer portal, and it is the value sent to eBay as the OAuth `redirect_uri` parameter. Use `GET /api/ebay/oauth/start` to generate a consent URL and `GET` or `POST /api/ebay/oauth/callback` to exchange the returned code. The callback returns the refresh token once so it can be copied into `EBAY_REFRESH_TOKEN`; it does not call eBay publish endpoints.

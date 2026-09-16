@@ -231,6 +231,19 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(content[0]["type"], "text")
         self.assertEqual(len([part for part in content if part["type"] == "image_url"]), 3)
 
+    def test_groq_model_not_found_retries_supported_vision_fallback(self):
+        responses = [
+            FakeResponse(status_code=404, payload={"error": {"code": "model_not_found", "message": "model not found"}}),
+            FakeResponse(payload=provider_payload()),
+        ]
+        with env(PRIMARY_VISION_PROVIDER="groq", GROQ_API_KEY="groq-key", GROQ_MODEL=" retired-model "):
+            with mock.patch.object(providers.requests, "post", side_effect=responses) as post:
+                result = providers.analyze_images([self.image])
+        self.assertEqual(result["provider"], "groq")
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_args_list[0].kwargs["json"]["model"], "retired-model")
+        self.assertEqual(post.call_args_list[1].kwargs["json"]["model"], "qwen/qwen3.8-27b")
+
     def test_groq_429_honors_retry_after_once(self):
         payload = {"error": {"code": "rate_limit_exceeded", "message": "too many requests"}}
         with env(PRIMARY_VISION_PROVIDER="groq", GROQ_API_KEY="groq-key", DEMO_MODE="false"):
