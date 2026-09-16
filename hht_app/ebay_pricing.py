@@ -54,7 +54,7 @@ def enrich_with_ebay_active_pricing(listing: dict[str, Any], timeout: float = 5.
     result["activeListingEstimate"] = summary
     result["notes"] = _append_note(
         result.get("notes"),
-        f"Price set from {summary['sampleSize']} active eBay listings for '{keywords}' with range ${summary['lowActivePrice']:.2f}-${summary['highActivePrice']:.2f}; verify against sold comps before listing.",
+        f"Price set from {summary['sampleSize']} active eBay listings for '{keywords}' with range ${summary['lowActivePrice']:.2f}-${summary['highActivePrice']:.2f}; this is an active-listing estimate, not sold-comps data.",
     )
     return result
 

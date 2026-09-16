@@ -28,14 +28,17 @@ The Commerce Agent currently recommends price changes but lacks real market data
 ## Feature 1: eBay Market Data Integration
 
 ### What it does
-- Fetch **sold listings** (actual sell price, time to sell, sell-through %)
-- Find exact product comps (same brand, size, condition, category)
-- Compare current price vs. market data
+- Fetch **active listing estimates** from eBay Browse API using the same brand, size, material, style, condition, and category signals.
+- Optionally use seller-owned order history or approved eBay Marketplace Insights access for sold-history data when available.
+- Compare current price vs. clearly labeled market data.
 
 ### Implementation
-- Use **eBay Browse API** (`GET /browse/v1/item_summary/search`) + sold-listing filter
-- Requires scopes: `sell.inventory`, `sell.account` (already configured)
-- Cache results (sold data is historical, low-frequency updates)
+- Use **eBay Browse API** (`GET /browse/v1/item_summary/search`) for active listings only.
+- Do not label Browse results as sold comps. Store the label as `active_listing_estimate`.
+- If eBay grants Marketplace Insights API access, add a separate `sold_marketplace_insights` source.
+- If seller order/report APIs are available, add a separate `seller_order_history` source for your own sold listings.
+- Requires existing app credentials for Browse; seller-owned data requires seller OAuth scopes.
+- Cache results with a TTL; active listing data changes frequently.
 - Store in existing `recommendations` table with `pricing_data_json` field
 
 ### Expected Output
@@ -43,16 +46,16 @@ The Commerce Agent currently recommends price changes but lacks real market data
 {
   "recommendationId": "rec-123",
   "current_price": 89.99,
-  "market_avg_sold_price": 69.50,
-  "market_min_sold": 55.00,
-  "market_max_sold": 84.99,
-  "sell_through_rate": 72,
-  "avg_days_to_sell": 14,
+  "pricing_source": "active_listing_estimate",
+  "active_median_price": 69.50,
+  "active_low_price": 55.00,
+  "active_high_price": 84.99,
   "active_listings_count": 23,
-  "confidence": "high",
+  "sold_data_available": false,
+  "confidence": "medium",
   "recommendation": {
     "price": 74.99,
-    "reasoning": "72% of similar listings sold at $55-85. Your item 28 days old with no sales. Recommend $74.99 (17% reduction, within safety bounds)."
+    "reasoning": "Similar active listings are priced from $55-85. This is not sold-comps data. Recommend $74.99 within safety bounds and seller review."
   }
 }
 ```
@@ -67,7 +70,7 @@ The Commerce Agent currently recommends price changes but lacks real market data
 ## Feature 2: GPU-Accelerated Price Recommendation Engine
 
 ### What it does
-- **Real-time similarity matching** between your item and thousands of sold comps
+- **Real-time similarity matching** between your item and active listings, seller-owned sold history, or approved Marketplace Insights records
 - Uses vector embeddings (GPU acceleration via NVIDIA TensorRT)
 - Sub-100ms inference per item
 - Runs locally or on NVIDIA Inception endpoints
@@ -86,14 +89,16 @@ The Commerce Agent currently recommends price changes but lacks real market data
   "embedding_inference_ms": 45,
   "top_3_comps": [
     {
-      "sold_listing_id": "ebay-L1",
-      "sold_price": 69.99,
+      "comparison_id": "ebay-L1",
+      "comparison_price": 69.99,
+      "comparison_source": "active_listing_estimate",
       "similarity": 0.92,
-      "days_to_sell": 12
+      "days_to_sell": null
     },
     {
-      "sold_listing_id": "ebay-L2",
-      "sold_price": 72.49,
+      "comparison_id": "ebay-L2",
+      "comparison_price": 72.49,
+      "comparison_source": "seller_order_history",
       "similarity": 0.88,
       "days_to_sell": 8
     }
@@ -159,7 +164,7 @@ The Commerce Agent currently recommends price changes but lacks real market data
 
 ### Implementation
 - `ProcessPoolExecutor` or `asyncio` for parallelism
-- Batch eBay API calls (max 200/hour for Browse API, respect rate limits)
+- Batch eBay API calls and respect the configured rate limits for each API.
 - Monitor NVIDIA GPU utilization
 - Report progress: "Imported 45/287 listings, 12 GPU inferences pending..."
 
@@ -173,8 +178,10 @@ The Commerce Agent currently recommends price changes but lacks real market data
 ## Implementation Phases
 
 ### Phase 1: Market Data (Week 1)
-- [ ] Integrate eBay Browse API sold-listing fetch
-- [ ] Store market comps in DB
+- [ ] Keep eBay Browse API data labeled as active-listing estimates
+- [ ] Add optional seller-owned sold/order-history integration if permitted by seller OAuth scopes
+- [ ] Add Marketplace Insights integration only after eBay grants restricted access
+- [ ] Store market comparison records in DB with explicit source labels
 - [ ] Update recommendation UI with price reasoning
 - [ ] Tests: price safety rules still hold, comps are fetched correctly
 
@@ -205,9 +212,11 @@ The Commerce Agent currently recommends price changes but lacks real market data
 - Minimum price floor respected
 - Vintage/designer/collectible items require approval
 - If market data unavailable → conservative estimate or "Needs Review"
+- Never present active listings as sold comps.
 
 ### Tests to Add
-- `test_fetch_market_comps()` — eBay Browse API integration
+- `test_fetch_active_listing_estimates()` — eBay Browse API integration
+- `test_marketplace_insights_requires_access()` — restricted API remains disabled without approval
 - `test_gpu_pricing_inference()` — embedding + similarity matching
 - `test_photo_quality_scoring()` — photo analysis metrics
 - `test_parallel_import_rate_limiting()` — concurrent import respects eBay limits
@@ -227,7 +236,8 @@ The Commerce Agent currently recommends price changes but lacks real market data
 ## Acceptance Criteria
 
 ✅ **Market pricing works:**
-- Sold comps fetched from eBay Browse API
+- Active listing estimates fetched from eBay Browse API
+- Sold-comps data only appears from approved Marketplace Insights access or seller-owned order history
 - Price recommendations include market reasoning
 - Safety rules prevent unsafe price changes
 
