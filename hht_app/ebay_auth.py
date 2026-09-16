@@ -8,9 +8,8 @@ import requests
 
 
 DEFAULT_EBAY_USER_SCOPES = [
+    "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
-    "https://api.ebay.com/oauth/api_scope/sell.account",
-    "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
 ]
 TOKEN_CACHE_SKEW_SECONDS = 60
 DEFAULT_TIMEOUT_SECONDS = 8.0
@@ -92,14 +91,9 @@ def seller_access_token(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
 
 def refresh_seller_access_token(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
     refresh_token = _refresh_token()
-    response = _post_token(
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "scope": " ".join(_user_scopes()),
-        },
-        timeout,
-    )
+    # Omit scope on refresh so eBay reuses the scopes granted with the
+    # refresh token. Re-requesting an unassigned scope causes invalid_scope.
+    response = _post_token({"grant_type": "refresh_token", "refresh_token": refresh_token}, timeout)
     body = _token_body(response)
     access_token = str(body.get("access_token") or "")
     if not access_token:
