@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -137,6 +138,11 @@ def init_db() -> None:
                     require_vintage INTEGER NOT NULL DEFAULT 1, require_designer INTEGER NOT NULL DEFAULT 1,
                     require_collectible INTEGER NOT NULL DEFAULT 1
                 );
+                CREATE TABLE IF NOT EXISTS commerce_jobs (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+                    progress INTEGER NOT NULL DEFAULT 0, result_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
                 INSERT INTO settings(id) VALUES(1) ON CONFLICT (id) DO NOTHING
                 """
             )
@@ -169,6 +175,11 @@ def init_db() -> None:
                 minimum_profit REAL NOT NULL DEFAULT 0, high_value_threshold REAL NOT NULL DEFAULT 250,
                 require_vintage INTEGER NOT NULL DEFAULT 1, require_designer INTEGER NOT NULL DEFAULT 1,
                 require_collectible INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS commerce_jobs (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+                progress INTEGER NOT NULL DEFAULT 0, result_json TEXT NOT NULL DEFAULT '{}',
+                error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
             INSERT OR IGNORE INTO settings(id) VALUES (1);
             """
@@ -319,6 +330,38 @@ def import_active_listings() -> dict[str, Any]:
             break
         page += 1
     return {"imported": imported, "totalEntries": total_entries, "total": count_listings(), "source": "trading_active"}
+
+
+def start_active_import_job() -> dict[str, Any]:
+    init_db()
+    job_id = str(uuid.uuid4())
+    now = utc_now()
+    with connect() as db:
+        db.execute("INSERT INTO commerce_jobs(id,kind,status,progress,result_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (job_id, "active_import", "running", 0, "{}", "", now, now))
+    thread = threading.Thread(target=_run_active_import_job, args=(job_id,), daemon=True)
+    thread.start()
+    return {"jobId": job_id, "status": "running"}
+
+
+def active_import_job(job_id: str) -> dict[str, Any] | None:
+    init_db()
+    with connect() as db:
+        row = db.execute("SELECT * FROM commerce_jobs WHERE id=?", (job_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def _run_active_import_job(job_id: str) -> None:
+    try:
+        result = import_active_listings()
+        _update_job(job_id, "completed", 100, result, "")
+    except Exception as exc:
+        logger.exception("Commerce Agent active import job failed")
+        _update_job(job_id, "failed", 100, {}, str(exc)[:240])
+
+
+def _update_job(job_id: str, status: str, progress: int, result: dict[str, Any], error: str) -> None:
+    with connect() as db:
+        db.execute("UPDATE commerce_jobs SET status=?, progress=?, result_json=?, error=?, updated_at=? WHERE id=?", (status, progress, _json(result), error, utc_now(), job_id))
 
 
 def count_listings() -> int:

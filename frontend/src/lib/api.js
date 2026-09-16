@@ -136,6 +136,14 @@ export function commerceImportActive() {
     return commerceRequest('/api/commerce/import-active', { method: 'POST' });
 }
 
+export function commerceStartActiveImport() {
+    return commerceRequest('/api/commerce/import-active/start', { method: 'POST' });
+}
+
+export function commerceJob(jobId) {
+    return commerceRequest(`/api/commerce/jobs/${encodeURIComponent(jobId)}`);
+}
+
 export function commerceAudit() {
     return commerceRequest('/api/commerce/audit', { method: 'POST' });
 }

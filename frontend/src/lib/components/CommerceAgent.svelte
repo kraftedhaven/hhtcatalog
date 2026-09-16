@@ -1,5 +1,5 @@
 <script>
-    import { commerceAudit, commerceApprove, commerceApply, commerceDashboard, commerceHistory, commerceImport, commerceImportActive, commerceRecommendations } from "$lib/api";
+    import { commerceAudit, commerceApprove, commerceApply, commerceDashboard, commerceHistory, commerceImport, commerceJob, commerceRecommendations, commerceStartActiveImport } from "$lib/api";
 
     let dashboard = null;
     let recommendations = [];
@@ -34,7 +34,15 @@
     async function importActiveAndAudit() {
         loading = true; error = ""; message = "Importing all active eBay listings...";
         try {
-            const imported = await commerceImportActive();
+            const started = await commerceStartActiveImport();
+            let job = await commerceJob(started.jobId);
+            while (job.status === "running") {
+                message = "Importing all active eBay listings. You can leave this page open and refresh later.";
+                await new Promise((resolve) => setTimeout(resolve, 2500));
+                job = await commerceJob(started.jobId);
+            }
+            if (job.status !== "completed") throw new Error(job.error || "Active listing import failed.");
+            const imported = job.result || {};
             const audited = await commerceAudit();
             message = `Imported ${imported.imported} active listing${imported.imported === 1 ? "" : "s"} and created ${audited.count} recommendation${audited.count === 1 ? "" : "s"}.`;
             await refresh();

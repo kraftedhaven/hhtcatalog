@@ -259,6 +259,32 @@ def commerce_import_active():
         return jsonify({"error": "Active listing import failed. Check the Heroku logs for the diagnostic."}), 502
 
 
+@app.route("/api/commerce/import-active/start", methods=["POST"])
+def commerce_import_active_start():
+    try:
+        return jsonify({"result": commerce_agent.start_active_import_job()})
+    except Exception:
+        app.logger.exception("Commerce Agent active listing job could not start")
+        return jsonify({"error": "Active listing import could not start."}), 503
+
+
+@app.route("/api/commerce/jobs/<job_id>", methods=["GET"])
+def commerce_job(job_id):
+    job = commerce_agent.active_import_job(job_id)
+    if not job:
+        return jsonify({"error": "Commerce job not found."}), 404
+    result = job.get("result_json", "{}")
+    if isinstance(result, str):
+        try:
+            import json
+            result = json.loads(result or "{}")
+        except ValueError:
+            result = {}
+    job["result"] = result
+    job.pop("result_json", None)
+    return jsonify({"result": job})
+
+
 @app.route("/api/commerce/audit", methods=["POST"])
 def commerce_audit():
     try:
