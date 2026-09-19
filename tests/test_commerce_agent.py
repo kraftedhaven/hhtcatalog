@@ -40,6 +40,11 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertIsInstance(recommendation["findings"], list)
         self.assertEqual(recommendation["status"], "Pending")
 
+    def test_short_title_gets_non_noop_candidate(self):
+        audit = commerce_agent.audit_listing({"title": "Brown Signature Handbag", "brand": "Coach", "type": "Handbag"})
+        self.assertIn("Coach", audit["proposed"]["title"])
+        self.assertNotEqual(audit["proposed"]["title"].casefold(), "brown signature handbag")
+
     def test_price_safety_rejects_reduction_over_default_cap(self):
         commerce_agent.audit_all()
         recommendation = commerce_agent.recommendations()[0]

@@ -396,14 +396,40 @@ def _price_float(value: Any) -> float:
         return 0.0
 
 
+def _title_candidate(item: dict[str, Any]) -> str:
+    """Build a conservative, category-aware title from confirmed listing fields."""
+    current = str(item.get("title") or "").strip()
+    parts: list[str] = []
+    for key in ("brand", "model", "type", "style", "mat", "color", "pat", "size"):
+        value = str(item.get(key) or "").strip()
+        if value and value.lower() not in {"not visible", "n/a", "unknown"}:
+            parts.append(value)
+    if current:
+        parts = [current] + [part for part in parts if part.lower() not in current.lower()]
+    if current and len(parts) == 1:
+        lowered = current.lower()
+        if "handbag" in lowered and "purse" not in lowered:
+            parts.append("Purse")
+        elif "wallet" in lowered and "wristlet" not in lowered:
+            parts.append("Wristlet")
+        elif "shirt" in lowered and "top" not in lowered:
+            parts.append("Top")
+    result = " ".join(parts)
+    return re.sub(r"\s+", " ", result).strip()[:MAX_TITLE_LENGTH].rstrip()
+
+
 def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     proposed: dict[str, Any] = {}
     title = str(item.get("title") or "").strip()
     if not title or len(title) < 35:
         findings.append({"field": "title", "severity": "medium", "message": "Title is short and may be missing searchable product attributes."})
-        if title:
-            proposed["title"] = title[:MAX_TITLE_LENGTH]
+        candidate = _title_candidate(item)
+        if candidate and candidate.casefold() != title.casefold():
+            proposed["title"] = candidate
+            findings.append({"field": "title", "severity": "medium", "message": f"Suggested title candidate: {candidate}. Verify every attribute before approval."})
+        elif title:
+            findings.append({"field": "title", "severity": "medium", "message": "No safe title change can be generated from the imported fields; image/model review is required."})
     if len(title) > MAX_TITLE_LENGTH:
         findings.append({"field": "title", "severity": "high", "message": "Title exceeds eBay's 80-character limit."})
         proposed["title"] = title[:MAX_TITLE_LENGTH].rstrip()
@@ -437,6 +463,9 @@ def audit_all() -> dict[str, Any]:
         for row in db.execute("SELECT * FROM listings").fetchall():
             item = _row_listing(row)
             audit = audit_listing(item)
+            # Re-auditing is idempotent for pending work. Preserve approved and
+            # applied history, but never create a second pending card for a row.
+            db.execute("DELETE FROM recommendations WHERE listing_row_id=? AND status='Pending'", (row["id"],))
             recommendation_id = str(uuid.uuid4())
             db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(item), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now))
             results.append({"recommendationId": recommendation_id, "listing": item, **audit, "status": "Pending"})
