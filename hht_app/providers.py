@@ -48,7 +48,7 @@ ZAI_IMAGE_RETRY_QUALITY = 64
 ZAI_REQUEST_LOCK = threading.Lock()
 # Hosted providers are attempted only when selected explicitly or through the
 # one-shot alternate action. Z.AI stays opt-in while its account limits settle.
-DEFAULT_HOSTED_PROVIDER_ORDER = ("groq", "openrouter", "nvidia", "gemini")
+DEFAULT_HOSTED_PROVIDER_ORDER = ("groq", "openrouter", "nvidia")
 PROVIDER_CALLERS = frozenset({"zai", "openrouter", "gemini", "groq", "nvidia"})
 DEFAULT_PROVIDER_COOLDOWN_SECONDS = 90
 PROVIDER_COOLDOWNS: dict[str, float] = {}
