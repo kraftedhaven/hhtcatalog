@@ -15,19 +15,6 @@ services:
       MAX_UPLOAD_MB: "10"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
-      AZURE_OPENAI_ENDPOINT: "${AZURE_OPENAI_ENDPOINT:-}"
-      AZURE_OPENAI_KEY: "${AZURE_OPENAI_KEY:-}"
-      AZURE_OPENAI_DEPLOYMENT: "${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}"
-      AZURE_OPENAI_API_VERSION: "${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}"
-      DO_SPACES_KEY: "${DO_SPACES_KEY:-}"
-      DO_SPACES_SECRET: "${DO_SPACES_SECRET:-}"
-      DO_SPACES_REGION: "${DO_SPACES_REGION:-nyc3}"
-      DO_SPACES_BUCKET: "${DO_SPACES_BUCKET:-}"
-      APPWRITE_ENDPOINT: "${APPWRITE_ENDPOINT:-https://cloud.appwrite.io/v1}"
-      APPWRITE_PROJECT_ID: "${APPWRITE_PROJECT_ID:-}"
-      APPWRITE_API_KEY: "${APPWRITE_API_KEY:-}"
-      APPWRITE_DATABASE_ID: "${APPWRITE_DATABASE_ID:-default}"
-      APPWRITE_COLLECTION_ID: "${APPWRITE_COLLECTION_ID:-inventory}"
     volumes:
       - hht_uploads:/data/uploads
     restart: unless-stopped
@@ -55,6 +42,43 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  hht-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: hht-worker
+    command: python worker.py
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-}"
+      COMMERCE_AGENT_DB: "${COMMERCE_AGENT_DB:-/data/commerce_agent.sqlite3}"
+      WORKER_POLL_SECONDS: "${WORKER_POLL_SECONDS:-10}"
+      EBAY_TAXONOMY_ENABLED: "${EBAY_TAXONOMY_ENABLED:-false}"
+      NVIDIA_NIM_BASE_URL: "${NVIDIA_NIM_BASE_URL:-}"
+      NVIDIA_NIM_API_KEY: "${NVIDIA_NIM_API_KEY:-}"
+      NVIDIA_CATEGORY_MODEL: "${NVIDIA_CATEGORY_MODEL:-}"
+    volumes:
+      - hht_worker_data:/data
+    depends_on:
+      hht-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  hht-nvidia:
+    profiles: ["nvidia"]
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: python -c "print('Optional NVIDIA worker placeholder; configure NIM endpoint before enabling.')"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
 volumes:
   hht_uploads:
   frontend_node_modules:
+  hht_worker_data:

@@ -93,12 +93,22 @@
                 entry.recommendationId,
                 entry.proposed,
             );
-            const applied = await commerceApply(result.actionId);
-            message =
-                applied.status === "Applied"
-                    ? "Approved changes applied through the existing eBay update flow."
-                    : "Approval saved.";
+            message = `Approval saved for ${entry.listing.title || entry.listing.sku}. Nothing has been sent to eBay yet.`;
             selected = null;
+            await refresh();
+        } catch (err) {
+            error = err.message || String(err);
+        } finally {
+            loading = false;
+        }
+    }
+
+    async function apply(entry) {
+        loading = true;
+        error = "";
+        try {
+            await commerceApply(entry.actionId);
+            message = "Approved changes applied through the eBay update flow.";
             await refresh();
         } catch (err) {
             error = err.message || String(err);
@@ -167,6 +177,12 @@
                 >
             </div>
         </div>
+        {#if dashboard.recovery}<div class="help">
+                Recovery tracking: {dashboard.recovery.pendingReviews} pending reviews
+                · {dashboard.recovery.highRiskPending} high-risk · {dashboard
+                    .recovery.appliedChanges} applied · {dashboard.recovery
+                    .coverage}% catalog coverage
+            </div>{/if}
     {/if}
     <div class="commerce-grid">
         <div class="panel nested-panel">
@@ -214,18 +230,46 @@
                                     >
                                 </div>{/each}
                         </div>
+                        {#if entry.evidence?.length}<div class="help">
+                                <b>Evidence:</b>
+                                {entry.evidence
+                                    .map(
+                                        (e) =>
+                                            `${e.field}: ${e.value} (${e.confidence}, ${e.source})`,
+                                    )
+                                    .join(" · ")}
+                            </div>{/if}
+                        {#if entry.taxonomy}<div class="help">
+                                <b>Taxonomy:</b>
+                                {entry.taxonomy.message}
+                            </div>{/if}
+                        {#if entry.soldPricing}<div class="help">
+                                <b>Pricing:</b>
+                                {entry.soldPricing.message}
+                            </div>{/if}
+                        {#if entry.demand}<div class="help">
+                                <b>Demand proxy:</b>
+                                {entry.demand.message}
+                            </div>{/if}
                         <div class="actions">
                             <button on:click={() => (selected = entry)}
                                 >Explain Recommendation</button
                             >
-                            <button
-                                class="primary"
-                                disabled={loading || entry.status === "Applied"}
-                                on:click={() => approve(entry)}
-                                >{entry.status === "Applied"
-                                    ? "Applied"
-                                    : "Approve & Apply"}</button
-                            >
+                            {#if entry.status === "Pending"}<button
+                                    class="primary"
+                                    disabled={loading}
+                                    on:click={() => approve(entry)}
+                                    >Approve only</button
+                                >{/if}
+                            {#if entry.status === "Approved"}<button
+                                    class="primary"
+                                    disabled={loading}
+                                    on:click={() => apply(entry)}
+                                    >Apply approved change</button
+                                >{/if}
+                            {#if entry.status === "Applied"}<span class="help"
+                                    >Applied</span
+                                >{/if}
                         </div>
                     {:else}<p class="help">
                             No field changes recommended from the available

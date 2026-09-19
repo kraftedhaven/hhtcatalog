@@ -50,18 +50,6 @@ if [ ! -f "$ENV_FILE" ]; then
   cat > "$ENV_FILE" <<'ENV'
 # --- real per-image recognition: set AT LEAST ONE (Gemini is cheapest) ---
 GEMINI_API_KEY=
-AZURE_OPENAI_ENDPOINT=
-AZURE_OPENAI_KEY=
-AZURE_OPENAI_DEPLOYMENT=gpt-4o
-# --- file storage (optional, for image hosting) ---
-DO_SPACES_KEY=
-DO_SPACES_SECRET=
-DO_SPACES_REGION=nyc3
-DO_SPACES_BUCKET=
-# --- catalog database (optional) ---
-APPWRITE_ENDPOINT=
-APPWRITE_PROJECT=
-APPWRITE_DATABASE_ID=
 ENV
   chmod 600 "$ENV_FILE"
   echo "    Created $ENV_FILE  ->  add your GEMINI_API_KEY there, then re-run this script."

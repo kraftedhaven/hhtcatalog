@@ -29,11 +29,15 @@ from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_active import EbayActiveError, fetch_active_listings
 from .ebay_drafts import EbayDraftError, get_ebay_offer, update_ebay_offer
 from .schema import normalize_listing
+from .evidence import evidence_for_listing, evidence_summary
+from .ebay_taxonomy import validate_listing
+from .title_optimizer import optimize_title
+from .market_metrics import demand_score, seller_recovery_metrics, sold_price_summary
 
 logger = logging.getLogger(__name__)
 DB_PATH = os.environ.get("COMMERCE_AGENT_DB", "commerce_agent.sqlite3")
 MAX_TITLE_LENGTH = 80
-EDITABLE_FIELDS = {"title", "price", "cid", "desc", "cat", "cnote", "notes", "pic", "brand", "size", "color", "dept", "type", "style", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
+EDITABLE_FIELDS = {"title", "price", "cid", "desc", "cat", "cnote", "notes", "pic", "brand", "size", "color", "dept", "type", "model", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
 
 
 def utc_now() -> str:
@@ -267,8 +271,8 @@ def _inventory_to_listing(item: dict[str, Any], offer: dict[str, Any] | None = N
         "quantity": item.get("availability", {}).get("shipToLocationAvailability", {}).get("quantity", 1) if isinstance(item.get("availability"), dict) else 1,
         "pic": " ".join(product.get("imageUrls", []) if isinstance(product.get("imageUrls"), list) else []),
         "cat": (offer or {}).get("categoryId", ""), "cid": item.get("condition", "3000"), "cnote": item.get("conditionDescription", ""),
-        "brand": aspects.get("Brand", ""), "size": aspects.get("Size", ""), "color": aspects.get("Color", ""), "dept": aspects.get("Department", ""),
-        "type": aspects.get("Type", ""), "style": aspects.get("Style", ""), "mat": aspects.get("Material", ""), "pat": aspects.get("Pattern", ""),
+        "brand": aspects.get("Brand", ""), "model": aspects.get("Model", ""), "size": aspects.get("Size", ""), "color": aspects.get("Color", ""), "dept": aspects.get("Department", ""),
+        "type": aspects.get("Type", ""), "style": aspects.get("Style", ""), "theme": aspects.get("Theme", ""), "mat": aspects.get("Material", ""), "pat": aspects.get("Pattern", ""),
         "slv": aspects.get("Sleeve Length", ""), "nk": aspects.get("Neckline", ""), "sea": aspects.get("Season", ""), "occ": aspects.get("Occasion", ""),
         "st": aspects.get("Size Type", ""), "vin": aspects.get("Vintage", "No"), "sourceUpdatedAt": item.get("product", {}).get("upc", ""),
     }
@@ -422,9 +426,10 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     proposed: dict[str, Any] = {}
     title = str(item.get("title") or "").strip()
+    title_plan = optimize_title(item)
     if not title or len(title) < 35:
         findings.append({"field": "title", "severity": "medium", "message": "Title is short and may be missing searchable product attributes."})
-        candidate = _title_candidate(item)
+        candidate = title_plan.get("title") or _title_candidate(item)
         if candidate and candidate.casefold() != title.casefold():
             proposed["title"] = candidate
             findings.append({"field": "title", "severity": "medium", "message": f"Suggested title candidate: {candidate}. Verify every attribute before approval."})
@@ -446,13 +451,19 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     price = _price_float(item.get("price"))
     if price <= 0:
         findings.append({"field": "price", "severity": "high", "message": "Price is missing or invalid."})
+    taxonomy = validate_listing(item)
+    if taxonomy.get("status") not in {"valid", "not_configured"}:
+        findings.append({"field": "taxonomy", "severity": "high", "message": taxonomy.get("message", "Seller category review required.")})
+    sold = sold_price_summary(item)
+    demand = demand_score(item)
+    evidence = evidence_for_listing(item)
     score = max(0, min(100, 100 - sum(18 if f["severity"] == "high" else 10 for f in findings)))
     classification = "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs Optimization" if score >= 50 else "High Priority"
     if any(f["severity"] == "high" for f in findings):
         classification = "Needs Review"
     confidence = "high" if findings and all(f["field"] not in {"cat", "price"} for f in findings) else "medium"
     reason = "; ".join(f["message"] for f in findings) or "No material listing quality issue was identified from the imported data."
-    return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) else "low"}
+    return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) else "low", "evidence": evidence_summary(item), "taxonomy": taxonomy, "soldPricing": sold, "demand": demand}
 
 
 def audit_all() -> dict[str, Any]:
@@ -467,18 +478,20 @@ def audit_all() -> dict[str, Any]:
             # applied history, but never create a second pending card for a row.
             db.execute("DELETE FROM recommendations WHERE listing_row_id=? AND status='Pending'", (row["id"],))
             recommendation_id = str(uuid.uuid4())
-            db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(item), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now))
-            results.append({"recommendationId": recommendation_id, "listing": item, **audit, "status": "Pending"})
+            stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "demandMetrics": audit["demand"]}
+            db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now))
+            results.append({"recommendationId": recommendation_id, "listing": stored_current, **audit, "status": "Pending"})
     return {"count": len(results), "results": results}
 
 
 def _recommendation(row: sqlite3.Row) -> dict[str, Any]:
-    return {"recommendationId": row["id"], "listing": _decode(row["current_json"], {}), "proposed": _decode(row["proposed_json"], {}), "findings": _decode(row["findings_json"], []), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+    listing = _decode(row["current_json"], {})
+    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": _decode(row["proposed_json"], {}), "findings": _decode(row["findings_json"], []), "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
 
 
 def recommendations(status: str = "") -> list[dict[str, Any]]:
     init_db()
-    query = "SELECT * FROM recommendations"
+    query = "SELECT r.*, (SELECT a.id FROM actions a WHERE a.recommendation_id=r.id ORDER BY a.created_at DESC LIMIT 1) AS action_id FROM recommendations r"
     params: tuple[Any, ...] = ()
     if status:
         query += " WHERE status=?"
@@ -561,7 +574,7 @@ def history() -> list[dict[str, Any]]:
 def dashboard() -> dict[str, Any]:
     items = list_listings()
     recs = recommendations()
-    return {"connectedStore": "eBay", "listingsFound": len(items), "recommendations": len(recs), "needOptimization": sum(1 for r in recs if r["classification"] in {"Needs Optimization", "High Priority", "Needs Review"}), "titleImprovements": sum(1 for r in recs if any(f.get("field") == "title" for f in r["findings"])), "missingItemSpecifics": sum(1 for r in recs if any(f.get("field") == "item_specifics" for f in r["findings"])), "needsReview": sum(1 for r in recs if r["classification"] == "Needs Review"), "mode": "recommend"}
+    return {"connectedStore": "eBay", "listingsFound": len(items), "recommendations": len(recs), "needOptimization": sum(1 for r in recs if r["classification"] in {"Needs Optimization", "High Priority", "Needs Review"}), "titleImprovements": sum(1 for r in recs if any(f.get("field") == "title" for f in r["findings"])), "missingItemSpecifics": sum(1 for r in recs if any(f.get("field") == "item_specifics" for f in r["findings"])), "needsReview": sum(1 for r in recs if r["classification"] == "Needs Review"), "recovery": seller_recovery_metrics(recs, items), "mode": "recommend"}
 
 
 __all__ = ["dashboard", "import_listings", "list_listings", "audit_all", "recommendations", "get_recommendation", "approve_recommendation", "apply_action", "history", "settings", "update_settings"]

@@ -48,8 +48,8 @@ ZAI_IMAGE_RETRY_QUALITY = 64
 ZAI_REQUEST_LOCK = threading.Lock()
 # Hosted providers are attempted only when selected explicitly or through the
 # one-shot alternate action. Z.AI stays opt-in while its account limits settle.
-DEFAULT_HOSTED_PROVIDER_ORDER = ("groq", "openrouter", "gemini")
-PROVIDER_CALLERS = frozenset({"zai", "openrouter", "gemini", "groq"})
+DEFAULT_HOSTED_PROVIDER_ORDER = ("groq", "openrouter", "nvidia")
+PROVIDER_CALLERS = frozenset({"zai", "openrouter", "gemini", "groq", "nvidia"})
 DEFAULT_PROVIDER_COOLDOWN_SECONDS = 90
 PROVIDER_COOLDOWNS: dict[str, float] = {}
 RATE_LIMIT_CODES = frozenset({"1305", "rate_limit", "rate_limited", "rate_limit_exceeded"})
@@ -57,7 +57,7 @@ UNAVAILABLE_HINTS = ("rate limit", "rate_limit", "temporarily unavailable", "cap
 
 PROMPT = """You are an eBay listing assistant. Inspect every supplied clothing, shoe, or bag photo.
 Return one concise JSON object only with these keys:
-title, price, cid, cnote, cat, brand, size, color, dept, type, style, mat, pat,
+title, price, cid, cnote, cat, brand, model, size, color, dept, type, style, theme, mat, pat,
 slv, nk, sea, occ, st, vin, desc, notes, madeIn, serialNumber, measurements.
 Use Not visible when evidence is missing. Do not guess brand, size, material,
 country, serial number, measurements, condition, category, authenticity, or vintage.
@@ -70,7 +70,7 @@ sweatshirts/hoodies 155183; men's casual shoes 93427; handbags 169291; backpacks
 need sleeve length and neckline as N/A - footwear. Never claim luxury authentication."""
 
 ZAI_PROMPT = """Inspect the resale item photos and return one JSON object only.
-Keys: title, price, cid, cnote, cat, brand, size, color, dept, type, style, mat,
+Keys: title, price, cid, cnote, cat, brand, model, size, color, dept, type, style, theme, mat,
 pat, slv, nk, sea, occ, st, vin, desc, notes, madeIn, serialNumber,
 measurements. Read visible labels/tags; use Not visible when missing. Price is a
 conservative Buy It Now estimate only, not sold comps. Never claim luxury
@@ -128,6 +128,7 @@ def configured_providers() -> dict[str, bool]:
         "openrouter": bool(os.environ.get("OPENROUTER_API_KEY")),
         "gemini": bool(os.environ.get("GEMINI_API_KEY")),
         "groq": bool(os.environ.get("GROQ_API_KEY")),
+        "nvidia": bool(os.environ.get("NVIDIA_NIM_BASE_URL") and os.environ.get("NVIDIA_NIM_API_KEY") and os.environ.get("NVIDIA_CATEGORY_MODEL")),
     }
 
 
@@ -214,10 +215,11 @@ def _provider_plan(context: dict[str, Any] | None = None):
         "openrouter": ("OPENROUTER_API_KEY", _openrouter),
         "gemini": ("GEMINI_API_KEY", _gemini),
         "groq": ("GROQ_API_KEY", _groq),
+        "nvidia": ("NVIDIA_NIM_API_KEY", _nvidia),
     }
     if selected and selected not in callers:
         raise ProviderError(
-            "Unsupported PRIMARY_VISION_PROVIDER. Use zai, openrouter, groq, or gemini.",
+            "Unsupported PRIMARY_VISION_PROVIDER. Use zai, openrouter, nvidia, groq, or gemini.",
             503,
             category="configuration",
         )
@@ -386,6 +388,23 @@ def _groq_once(model: str, content: list[dict[str, Any]], context: dict[str, Any
         payload["reasoning_format"] = "hidden"
     _reject_oversized_payload("groq", model, content, MAX_GROQ_REQUEST_BYTES)
     return _post_openai_compatible("groq", model, "https://api.groq.com/openai/v1/chat/completions", os.environ["GROQ_API_KEY"], payload, context)
+
+
+def _nvidia(images: list[UploadedImage], context: dict[str, Any]) -> str:
+    model = (os.environ.get("NVIDIA_CATEGORY_MODEL") or "").strip()
+    base_url = (os.environ.get("NVIDIA_NIM_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
+    if not model:
+        raise ProviderError("NVIDIA category model is not configured.", 503, provider="nvidia", category="configuration")
+    content = [{"type": "text", "text": _prompt(context)}]
+    content.extend({"type": "image_url", "image_url": {"url": _compressed_data_url(image, max_edge=896, quality=72)}} for image in images[:3])
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.1,
+        "max_tokens": 1400,
+        "stream": False,
+    }
+    return _post_openai_compatible("nvidia", model, f"{base_url}/chat/completions", os.environ["NVIDIA_NIM_API_KEY"], payload, context)
 
 
 def _post_openai_compatible(
@@ -625,6 +644,7 @@ def _model_for_provider(provider: str) -> str:
         "openrouter": os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
         "gemini": os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
         "groq": _groq_model(),
+        "nvidia": os.environ.get("NVIDIA_CATEGORY_MODEL", ""),
     }.get(provider, "")
 
 
