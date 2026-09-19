@@ -10,6 +10,7 @@ import requests
 from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_pricing import DEFAULT_MARKETPLACE_ID
 from .schema import EBAY_ITEM_SPECIFICS, normalize_listing
+from .ebay_taxonomy import validate_listing as validate_taxonomy
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +290,10 @@ def _validate_listing(listing: dict[str, Any]) -> None:
         raise EbayDraftError(400, "invalid_request", "Category ID is required before creating an eBay draft.")
     if float(listing.get("price") or 0) <= 0:
         raise EbayDraftError(400, "invalid_request", "Positive price is required before creating an eBay draft.")
+    taxonomy = validate_taxonomy(listing)
+    if os.environ.get("EBAY_TAXONOMY_ENFORCE", "false").lower() in {"1", "true", "yes", "on"} and taxonomy.get("status") != "valid":
+        message = taxonomy.get("message", "eBay Taxonomy validation failed.")
+        raise EbayDraftError(400, "invalid_request", str(message)[:240])
 
 
 def _validate_draft_config() -> None:

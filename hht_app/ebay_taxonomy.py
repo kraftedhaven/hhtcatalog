@@ -4,8 +4,28 @@ import os, time
 from typing import Any
 import requests
 from .ebay_pricing import ebay_access_token
+from .schema import EBAY_ITEM_SPECIFICS
+from .evidence import has_confirmed_value
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_tree_cache: dict[str, tuple[float, str]] = {}
+
+
+def _default_tree_id(token: str, marketplace: str, timeout: float) -> str:
+    cached = _tree_cache.get(marketplace)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    response = requests.get(
+        "https://api.ebay.com/commerce/taxonomy/v1/get_default_category_tree_id",
+        headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": marketplace},
+        params={"marketplace_id": marketplace}, timeout=timeout,
+    )
+    body = response.json() if response.status_code < 400 else {}
+    tree_id = str(body.get("categoryTreeId") or "") if isinstance(body, dict) else ""
+    if not tree_id:
+        raise ValueError("default category tree unavailable")
+    _tree_cache[marketplace] = (time.time() + 86400, tree_id)
+    return tree_id
 
 def validate_listing(item: dict[str, Any], timeout: float = 5.0) -> dict[str, Any]:
     category = str(item.get("cat") or "").strip()
@@ -16,13 +36,26 @@ def validate_listing(item: dict[str, Any], timeout: float = 5.0) -> dict[str, An
     try:
         token = ebay_access_token(timeout=timeout)
         marketplace = os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US")
-        url = f"https://api.ebay.com/commerce/taxonomy/v1/category_tree/{marketplace}/get_item_aspects_for_category"
+        tree_id = _default_tree_id(token, marketplace, timeout)
+        url = f"https://api.ebay.com/commerce/taxonomy/v1/category_tree/{tree_id}/get_item_aspects_for_category"
         response = requests.get(url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": marketplace}, params={"category_id": category}, timeout=timeout)
         if response.status_code >= 400:
             return {"status": "unavailable", "categoryId": category, "message": "eBay Taxonomy validation was unavailable; seller review required."}
         body = response.json()
-        aspects = [entry.get("localizedAspectName") for entry in body.get("aspects", []) if isinstance(entry, dict) and entry.get("localizedAspectName")]
-        return {"status": "valid", "categoryId": category, "requiredAspects": aspects[:80], "message": "Category accepted by eBay Taxonomy API."}
+        aspect_entries = body.get("aspects", []) if isinstance(body, dict) else []
+        required = []
+        for entry in aspect_entries:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("localizedAspectName") or "")
+            constraint = entry.get("aspectConstraint") if isinstance(entry.get("aspectConstraint"), dict) else {}
+            if name and constraint.get("aspectRequired") is True:
+                required.append(name)
+        field_for_label = {label.casefold(): key for label, key in EBAY_ITEM_SPECIFICS}
+        missing = [name for name in required if not has_confirmed_value(item.get(field_for_label.get(name.casefold(), "")))]
+        status = "needs_specifics" if missing else "valid"
+        message = "Required item specifics are missing." if missing else "Category and required item specifics accepted by eBay Taxonomy API."
+        return {"status": status, "categoryId": category, "requiredAspects": required[:80], "missingRequiredAspects": missing[:80], "message": message}
     except Exception:
         return {"status": "unavailable", "categoryId": category, "message": "eBay Taxonomy validation was unavailable; seller review required."}
 
@@ -39,7 +72,8 @@ def suggest_category(query: str, timeout: float = 5.0) -> dict[str, Any]:
     try:
         token = ebay_access_token(timeout=timeout)
         marketplace = os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US")
-        response = requests.get("https://api.ebay.com/commerce/taxonomy/v1/category_tree/0/get_category_suggestions", headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": marketplace}, params={"q": query}, timeout=timeout)
+        tree_id = _default_tree_id(token, marketplace, timeout)
+        response = requests.get(f"https://api.ebay.com/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_suggestions", headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": marketplace}, params={"q": query}, timeout=timeout)
         body = response.json() if response.status_code < 400 else {}
         result = {"status": "ok", "suggestions": body.get("categorySuggestions", [])[:10]}
     except Exception:

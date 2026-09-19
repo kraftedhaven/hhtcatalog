@@ -13,6 +13,7 @@ import requests
 from PIL import Image, UnidentifiedImageError
 
 from .ebay_pricing import enrich_with_ebay_active_pricing
+from .evidence import normalize_evidence
 from .schema import normalize_listing, parse_model_json
 
 
@@ -179,6 +180,11 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
                     retryable=False,
                 ) from exc
             result = enrich_with_ebay_active_pricing(normalize_listing(parsed), timeout=min(5.0, _request_timeout(context)))
+            result["attributeEvidence"] = normalize_evidence(
+                parsed,
+                source=f"vision:{selected}",
+                default_evidence="Extracted from submitted listing images; seller confirmation required.",
+            )
             result["provider"] = selected
             result["demo"] = False
             return result

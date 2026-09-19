@@ -4,8 +4,15 @@ from typing import Any
 
 CONFIDENCE_LEVELS = {"low", "medium", "high"}
 ATTRIBUTE_KEYS = ("brand", "model", "material", "madeIn", "style", "theme", "vin", "size", "color", "type")
+UNCONFIRMED_VALUES = {"", "not visible", "unknown", "n/a", "n/a - bag", "n/a - footwear", "none"}
 
-def normalize_evidence(raw: Any, *, source: str = "unknown") -> dict[str, dict[str, Any]]:
+
+def has_confirmed_value(value: Any) -> bool:
+    return str(value or "").strip().casefold() not in UNCONFIRMED_VALUES
+
+def normalize_evidence(
+    raw: Any, *, source: str = "unknown", default_evidence: str = ""
+) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     if not isinstance(raw, dict):
         return result
@@ -13,12 +20,12 @@ def normalize_evidence(raw: Any, *, source: str = "unknown") -> dict[str, dict[s
         value = raw.get(key)
         if isinstance(value, dict):
             value = value.get("value")
-        if value is None or not str(value).strip() or str(value).strip().lower() in {"not visible", "unknown", "n/a"}:
+        if not has_confirmed_value(value):
             continue
         confidence = str((raw.get(key) or {}).get("confidence", "medium")) if isinstance(raw.get(key), dict) else "medium"
         if confidence not in CONFIDENCE_LEVELS:
             confidence = "medium"
-        evidence = (raw.get(key) or {}).get("evidence", "") if isinstance(raw.get(key), dict) else ""
+        evidence = (raw.get(key) or {}).get("evidence", default_evidence) if isinstance(raw.get(key), dict) else default_evidence
         result[key] = {"value": str(value).strip(), "confidence": confidence, "source": source, "evidence": str(evidence)[:300]}
     return result
 
@@ -29,7 +36,7 @@ def evidence_for_listing(item: dict[str, Any]) -> dict[str, dict[str, Any]]:
     result = {}
     for key in ATTRIBUTE_KEYS:
         value = item.get(key) or item.get({"material": "mat", "model": "model"}.get(key, key))
-        if value and str(value).lower() not in {"not visible", "unknown", "n/a"}:
+        if has_confirmed_value(value):
             result[key] = {"value": str(value), "confidence": "medium", "source": item.get("evidenceSource", "import"), "evidence": "Imported listing field; seller confirmation recommended."}
     return result
 

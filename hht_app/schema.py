@@ -4,6 +4,8 @@ import io
 import re
 from typing import Any
 
+from .evidence import normalize_evidence
+
 
 EBAY_ITEM_SPECIFICS = [
     ("Brand", "brand"),
@@ -177,6 +179,14 @@ def normalize_listing(raw: dict[str, Any] | None) -> dict[str, Any]:
         "pic": _text(data.get("pic")),
     }
     result["desc"] = _html_description(_text(data.get("desc")), result)
+    if isinstance(data.get("attributeEvidence"), dict):
+        result["attributeEvidence"] = data["attributeEvidence"]
+    else:
+        result["attributeEvidence"] = normalize_evidence(
+            data,
+            source=str(data.get("evidenceSource") or "normalized_input"),
+            default_evidence="Source field supplied during normalization; seller confirmation required.",
+        )
     return result
 
 
