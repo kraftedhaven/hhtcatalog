@@ -46,7 +46,7 @@ EBAY_DRAFT_COLUMNS = [
 
 SCHEMA_KEYS = [
     "title", "price", "cid", "cnote", "cat", "brand", "size", "color",
-    "dept", "type", "style", "mat", "pat", "slv", "nk", "sea", "occ",
+    "dept", "type", "model", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ",
     "st", "vin", "desc", "notes", "madeIn", "serialNumber", "measurements", "pic",
 ]
 
@@ -158,7 +158,9 @@ def normalize_listing(raw: dict[str, Any] | None) -> dict[str, Any]:
         "color": _text(data.get("color")) or NOT_VISIBLE,
         "dept": _text(data.get("dept")) or NOT_VISIBLE,
         "type": item_type,
+        "model": _text(data.get("model")) or NOT_VISIBLE,
         "style": _text(data.get("style")) or NOT_VISIBLE,
+        "theme": _text(data.get("theme")) or NOT_VISIBLE,
         "mat": _text(data.get("mat")) or NOT_VISIBLE,
         "pat": _text(data.get("pat")) or NOT_VISIBLE,
         "slv": "N/A - bag" if is_bag_item else "N/A - footwear" if is_shoe_item else (_text(data.get("slv")) or NOT_VISIBLE),

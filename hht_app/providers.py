@@ -57,7 +57,7 @@ UNAVAILABLE_HINTS = ("rate limit", "rate_limit", "temporarily unavailable", "cap
 
 PROMPT = """You are an eBay listing assistant. Inspect every supplied clothing, shoe, or bag photo.
 Return one concise JSON object only with these keys:
-title, price, cid, cnote, cat, brand, size, color, dept, type, style, mat, pat,
+title, price, cid, cnote, cat, brand, model, size, color, dept, type, style, theme, mat, pat,
 slv, nk, sea, occ, st, vin, desc, notes, madeIn, serialNumber, measurements.
 Use Not visible when evidence is missing. Do not guess brand, size, material,
 country, serial number, measurements, condition, category, authenticity, or vintage.
@@ -70,7 +70,7 @@ sweatshirts/hoodies 155183; men's casual shoes 93427; handbags 169291; backpacks
 need sleeve length and neckline as N/A - footwear. Never claim luxury authentication."""
 
 ZAI_PROMPT = """Inspect the resale item photos and return one JSON object only.
-Keys: title, price, cid, cnote, cat, brand, size, color, dept, type, style, mat,
+Keys: title, price, cid, cnote, cat, brand, model, size, color, dept, type, style, theme, mat,
 pat, slv, nk, sea, occ, st, vin, desc, notes, madeIn, serialNumber,
 measurements. Read visible labels/tags; use Not visible when missing. Price is a
 conservative Buy It Now estimate only, not sold comps. Never claim luxury
