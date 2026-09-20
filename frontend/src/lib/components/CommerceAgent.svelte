@@ -139,8 +139,11 @@
         }
         error = "";
         const count = Math.min(20, Math.max(10, Number(pilotSize) || 10));
-        selectedIds = visible.slice(0, count).map((entry) => entry.recommendationId);
-        message = `Selected ${selectedIds.length} listing${selectedIds.length === 1 ? "" : "s"} for the pilot review set.`;
+        const pilotIds = visible
+            .slice(0, count)
+            .map((entry) => entry.recommendationId);
+        selectedIds = pilotIds;
+        message = `Selected ${pilotIds.length} listing${pilotIds.length === 1 ? "" : "s"} for the pilot review set.`;
     }
 
     function clearPilotSelection() {
