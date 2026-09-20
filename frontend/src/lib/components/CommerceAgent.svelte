@@ -620,13 +620,14 @@
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="apply-dialog-title"
+                aria-describedby="apply-dialog-description"
             >
                 <h3 id="apply-dialog-title">Confirm eBay update</h3>
                 <p>
                     Apply the approved eBay update for
                     <b>{pendingApply.listing.title || pendingApply.listing.sku}</b>?
                 </p>
-                <p class="help">
+                <p id="apply-dialog-description" class="help">
                     This sends only the already-approved fields to eBay. Reviewing or approving a
                     recommendation does not apply it.
                 </p>
