@@ -53,6 +53,7 @@
     let cancelApplyButton;
     let confirmApplyButton;
     let lastFocusedElement = null;
+    let queueHeading;
 
     $: categoryOptions = Array.from(
         new Set(
@@ -268,9 +269,18 @@
         cancelApplyButton?.focus();
     }
 
-    function cancelApply() {
+    async function restoreFocus() {
+        await tick();
+        if (lastFocusedElement?.isConnected) {
+            lastFocusedElement.focus();
+            return;
+        }
+        queueHeading?.focus();
+    }
+
+    async function cancelApply() {
         pendingApply = null;
-        lastFocusedElement?.focus?.();
+        await restoreFocus();
     }
 
     async function confirmApply() {
@@ -281,8 +291,8 @@
             await commerceApply(pendingApply.actionId);
             message = "Approved changes applied through the eBay update flow.";
             pendingApply = null;
-            lastFocusedElement?.focus?.();
             await refresh();
+            await restoreFocus();
         } catch (err) {
             error = err.message || String(err);
         } finally {
@@ -449,7 +459,7 @@
     <div class="commerce-grid">
         <div class="panel nested-panel">
             <div class="section-head">
-                <h3>Approval queue</h3>
+                <h3 bind:this={queueHeading} tabindex="-1">Approval queue</h3>
                 <span>{visible.length} shown · {selectedIds.length} in pilot set</span>
             </div>
             {#if !visible.length}<p class="empty">
