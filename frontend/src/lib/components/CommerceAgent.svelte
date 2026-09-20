@@ -276,11 +276,6 @@
     }
 
     async function requestApply(entry) {
-        if (!entry?.actionId) {
-            message = "";
-            error = "This approved recommendation is missing its apply action ID. Refresh the queue and try again.";
-            return;
-        }
         error = "";
         lastFocusedElement = document.activeElement;
         pendingApply = entry;
@@ -400,8 +395,8 @@
         </div>
         <span class="mode-badge">Recommend only</span>
     </div>
-    {#if error}<div class="notice error">{error}</div>{/if}
-    {#if message}<div class="notice info">{message}</div>{/if}
+    {#if error}<div class="notice error" role="alert">{error}</div>{/if}
+    {#if message}<div class="notice info" aria-live="polite">{message}</div>{/if}
     <div class="notice warn">
         <strong>Pricing warning</strong>
         <p>
