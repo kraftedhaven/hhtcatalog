@@ -143,6 +143,7 @@
         const id = entry.recommendationId;
         if (selectedIds.includes(id)) {
             selectedIds = selectedIds.filter((value) => value !== id);
+            error = "";
             return;
         }
         if (selectedIds.length >= 20) {
@@ -151,6 +152,7 @@
             return;
         }
         selectedIds = [...selectedIds, id];
+        error = "";
     }
 
     function selectPilotBatch() {
@@ -183,9 +185,10 @@
             return;
         }
         error = "";
+        const exportedAt = new Date().toISOString();
         downloadJSON(
             {
-                exportedAt: new Date().toISOString(),
+                exportedAt,
                 pilotSize: selectedEntries.length,
                 viewFilters: {
                     status: statusFilter,
@@ -196,7 +199,7 @@
                 },
                 recommendations: selectedEntries,
             },
-            `commerce-agent-pilot-${new Date().toISOString().slice(0, 10)}.json`,
+            `commerce-agent-pilot-${exportedAt.slice(0, 10)}.json`,
         );
         message = `Exported ${selectedEntries.length} pilot result${selectedEntries.length === 1 ? "" : "s"}.`;
     }
@@ -402,7 +405,7 @@
     </div>
     {#if error}<div class="notice error" role="alert">{error}</div>{/if}
     {#if message}<div class="notice info" aria-live="polite">{message}</div>{/if}
-    <div class="notice warn">
+    <div class="notice warn" role="note" aria-live="polite">
         <strong>Pricing warning</strong>
         <p>
             Active prices are not sold prices. Review every pricing recommendation
