@@ -47,6 +47,7 @@
     let categoryFilter = "";
     let pilotSize = "10";
     let selectedIds = [];
+    let pendingApply = null;
 
     $: categoryOptions = Array.from(
         new Set(
@@ -125,8 +126,8 @@
             return;
         }
         if (selectedIds.length >= 20) {
-            error = "";
-            message = "Pilot selection is limited to 20 listings at a time.";
+            message = "";
+            error = "Pilot selection is limited to 20 listings at a time.";
             return;
         }
         selectedIds = [...selectedIds, id];
@@ -246,19 +247,22 @@
         }
     }
 
-    async function apply(entry) {
-        if (
-            !window.confirm(
-                `Apply the approved eBay update for ${entry.listing.title || entry.listing.sku}? This sends only the already-approved fields to eBay.`,
-            )
-        ) {
-            return;
-        }
+    function requestApply(entry) {
+        pendingApply = entry;
+    }
+
+    function cancelApply() {
+        pendingApply = null;
+    }
+
+    async function confirmApply() {
+        if (!pendingApply) return;
         loading = true;
         error = "";
         try {
-            await commerceApply(entry.actionId);
+            await commerceApply(pendingApply.actionId);
             message = "Approved changes applied through the eBay update flow.";
+            pendingApply = null;
             await refresh();
         } catch (err) {
             error = err.message || String(err);
@@ -465,37 +469,57 @@
                         </div>
                     </div>
                     {#if proposedEntries(entry).length}
-                        <div class="comparison-table" role="table" aria-label="Current and proposed changes">
-                            <div class="comparison-header">Attribute</div>
-                            <div class="comparison-header">Current listing</div>
-                            <div class="comparison-header">Proposed change</div>
-                            {#each proposedEntries(entry) as change}
-                                <div class="comparison-cell comparison-attribute">
-                                    {fieldLabel(change[0])}
-                                </div>
-                                <div class="comparison-cell">{currentValue(entry, change[0])}</div>
-                                <div class="comparison-cell comparison-proposed">{String(change[1])}</div>
-                            {/each}
+                        <div class="table-scroll">
+                            <table class="comparison-table" aria-label="Current and proposed changes">
+                                <thead>
+                                    <tr>
+                                        <th>Attribute</th>
+                                        <th>Current listing</th>
+                                        <th>Proposed change</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {#each proposedEntries(entry) as change}
+                                        <tr>
+                                            <th scope="row" class="comparison-attribute">
+                                                {fieldLabel(change[0])}
+                                            </th>
+                                            <td>{currentValue(entry, change[0])}</td>
+                                            <td class="comparison-proposed">{String(change[1])}</td>
+                                        </tr>
+                                    {/each}
+                                </tbody>
+                            </table>
                         </div>
                     {:else}<p class="help">
                             No field changes recommended from the available evidence.
                         </p>{/if}
                     {#if entry.evidence?.length}
-                        <div class="evidence-table" role="table" aria-label="Attribute evidence">
-                            <div class="comparison-header">Attribute</div>
-                            <div class="comparison-header">Value</div>
-                            <div class="comparison-header">Confidence / source</div>
-                            <div class="comparison-header">Evidence</div>
-                            {#each entry.evidence as evidence}
-                                <div class="comparison-cell comparison-attribute">
-                                    {fieldLabel(evidence.field)}
-                                </div>
-                                <div class="comparison-cell">{evidence.value}</div>
-                                <div class="comparison-cell">
-                                    {evidence.confidence} · {evidence.source}
-                                </div>
-                                <div class="comparison-cell">{evidence.evidence}</div>
-                            {/each}
+                        <div class="table-scroll">
+                            <table class="evidence-table" aria-label="Attribute evidence">
+                                <thead>
+                                    <tr>
+                                        <th>Attribute</th>
+                                        <th>Value</th>
+                                        <th>Confidence / source</th>
+                                        <th>Evidence</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {#each entry.evidence as evidence}
+                                        <tr>
+                                            <th scope="row" class="comparison-attribute">
+                                                {fieldLabel(evidence.field)}
+                                            </th>
+                                            <td>{evidence.value}</td>
+                                            <td>
+                                                {evidence.confidence} · {evidence.source}
+                                            </td>
+                                            <td>{evidence.evidence}</td>
+                                        </tr>
+                                    {/each}
+                                </tbody>
+                            </table>
                         </div>
                     {/if}
                     {#if entry.taxonomy}<div class="help meta-note">
@@ -518,7 +542,7 @@
                         {#if entry.status === "Approved"}<button
                                 class="primary"
                                 disabled={loading}
-                                on:click={() => apply(entry)}
+                                on:click={() => requestApply(entry)}
                                 >Apply approved change</button
                             >{/if}
                         {#if entry.status === "Applied"}<span class="help status-readonly"
@@ -580,4 +604,30 @@
             </div>
         {/each}
     </div>
+    {#if pendingApply}
+        <div class="modal-backdrop" role="presentation">
+            <div
+                class="modal-card"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="apply-dialog-title"
+            >
+                <h3 id="apply-dialog-title">Confirm eBay update</h3>
+                <p>
+                    Apply the approved eBay update for
+                    <b>{pendingApply.listing.title || pendingApply.listing.sku}</b>?
+                </p>
+                <p class="help">
+                    This sends only the already-approved fields to eBay. Reviewing or approving a
+                    recommendation does not apply it.
+                </p>
+                <div class="actions">
+                    <button disabled={loading} on:click={cancelApply}>Cancel</button>
+                    <button class="primary" disabled={loading} on:click={confirmApply}
+                        >{loading ? "Applying..." : "Confirm apply"}</button
+                    >
+                </div>
+            </div>
+        </div>
+    {/if}
 </section>

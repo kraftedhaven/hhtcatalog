@@ -92,17 +92,20 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
 .advisory-grid strong, .pilot-summary-grid strong { display: block; font-size: 14px; overflow-wrap: anywhere; }
 .pilot-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .pilot-summary-grid span { color: var(--muted); font-size: 12px; }
-.comparison-table, .evidence-table { display: grid; grid-template-columns: minmax(120px, .9fr) minmax(140px, 1fr) minmax(140px, 1fr); margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; overflow: auto; min-width: 100%; }
-.evidence-table { grid-template-columns: minmax(120px, .8fr) minmax(120px, .8fr) minmax(150px, .9fr) minmax(200px, 1.5fr); }
-.comparison-header { background: #eff6ff; color: #1e3a8a; padding: 8px; font-size: 11px; font-weight: 800; text-transform: uppercase; border-bottom: 1px solid var(--line); }
-.comparison-cell { padding: 8px; border-top: 1px solid var(--line); font-size: 13px; color: #334155; overflow-wrap: anywhere; }
-.comparison-attribute { font-weight: 700; }
+.table-scroll { overflow-x: auto; }
+.comparison-table, .evidence-table { width: 100%; min-width: 520px; margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; border-spacing: 0; background: #fff; }
+.comparison-table th, .comparison-table td, .evidence-table th, .evidence-table td { padding: 8px; border-top: 1px solid var(--line); font-size: 13px; color: #334155; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.comparison-table thead th, .evidence-table thead th { background: #eff6ff; color: #1e3a8a; font-size: 11px; font-weight: 800; text-transform: uppercase; border-top: 0; }
+.comparison-table tbody th, .evidence-table tbody th { font-weight: 700; }
 .comparison-proposed { color: #0f766e; font-weight: 700; }
 .meta-note { margin-bottom: 8px; }
 .status-readonly { margin: 0; }
 .explanation { position: sticky; top: 12px; }
 .explanation li { margin-bottom: 8px; color: #475569; font-size: 13px; }
 .detail-block { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.modal-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(15, 23, 42, .45); z-index: 20; }
+.modal-card { width: min(100%, 420px); border: 1px solid var(--line); border-radius: 12px; background: #fff; padding: 16px; box-shadow: 0 16px 40px rgba(15, 23, 42, .2); }
+.modal-card h3 { margin-top: 0; }
 .history-panel { margin-top: 14px; }
 .history-row { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 9px 0; }
 .history-row span { color: var(--muted); font-size: 12px; }
