@@ -144,6 +144,7 @@
         if (selectedIds.includes(id)) {
             selectedIds = selectedIds.filter((value) => value !== id);
             error = "";
+            message = "";
             return;
         }
         if (selectedIds.length >= 20) {
@@ -153,6 +154,7 @@
         }
         selectedIds = [...selectedIds, id];
         error = "";
+        message = "";
     }
 
     function selectPilotBatch() {
@@ -181,6 +183,7 @@
 
     function exportPilotResults() {
         if (selectedEntries.length < 10 || selectedEntries.length > 20) {
+            message = "";
             error = "Select 10–20 listings before exporting pilot results.";
             return;
         }
@@ -310,13 +313,13 @@
 
     async function confirmApply() {
         if (!pendingApply) return;
-        const latestEntry =
-            recommendations.find(
-                (entry) =>
-                    entry.recommendationId === pendingApply.recommendationId,
-            ) || pendingApply;
-        if (!latestEntry?.actionId) {
-            error = "This approved recommendation is missing its apply action ID. Refresh the queue and try again.";
+        const latestEntry = recommendations.find(
+            (entry) =>
+                entry.recommendationId === pendingApply.recommendationId,
+        );
+        if (latestEntry?.status !== "Approved" || !latestEntry?.actionId) {
+            error =
+                "This recommendation is no longer ready to apply. Refresh the queue and reopen the approved change.";
             pendingApply = null;
             cancelApplyButton = null;
             confirmApplyButton = null;
@@ -358,6 +361,12 @@
 
     function handleDialogKeydown(event) {
         if (!pendingApply) return;
+        if (
+            event.target instanceof Node &&
+            !modalCard?.contains(event.target)
+        ) {
+            return;
+        }
         if (event.key === "Escape") {
             event.preventDefault();
             void cancelApply();
