@@ -33,7 +33,7 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
 .notice p { margin: 6px 0 0; }
 .notice.info { border-color: #b7cffb; background: #eff6ff; color: #1e3a8a; }
 .notice.error { border-color: #fecaca; background: #fef2f2; color: var(--red); }
-.notice.warn { border-color: #fde68a; background: #fffbeb; color: var(--amber); }
+.notice.warn { border-color: #f59e0b; border-left: 4px solid #d97706; background: #fffbeb; color: #92400e; }
 .field { display: block; margin-bottom: 12px; }
 .field span { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 5px; color: #475569; font-size: 12px; font-weight: 800; text-transform: uppercase; }
 .field em { color: var(--muted); font-style: normal; text-transform: none; }
@@ -63,13 +63,23 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
 .commerce-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(260px, .8fr); gap: 14px; align-items: start; }
 .nested-panel { margin-bottom: 0; box-shadow: none; }
 .nested-panel h3 { margin: 0 0 12px; font-size: 16px; }
+.filters-panel { margin-bottom: 14px; }
+.filter-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.filter-grid label, .pilot-size { display: block; }
+.filter-grid span, .pilot-size span, .advisory-grid span { display: block; margin-bottom: 4px; color: #475569; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+.filter-grid select, .pilot-size select { width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 8px; }
+.pilot-toolbar, .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.workflow-note { margin-top: 10px; }
 .recommendation-card { border-top: 1px solid var(--line); padding: 14px 0; }
 .recommendation-card:first-of-type { border-top: 0; padding-top: 0; }
 .recommendation-card p { color: #475569; font-size: 14px; }
 .recommendation-title { display: flex; justify-content: space-between; gap: 12px; }
+.recommendation-heading { min-width: 0; flex: 1; }
 .recommendation-title strong, .recommendation-title span { display: block; }
 .recommendation-title span { color: var(--muted); font-size: 12px; }
 .risk { color: var(--amber); font-size: 11px; font-weight: 800; text-transform: uppercase; white-space: nowrap; }
+.pilot-select { display: flex; align-items: center; gap: 8px; color: #475569; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.pilot-select input { width: 16px; height: 16px; margin: 0; }
 .listing-meta { display: flex; flex-wrap: wrap; gap: 5px 10px; margin: 8px 0; color: var(--muted); font-size: 11px; }
 .listing-meta b { color: #1e3a8a; }
 .listing-meta a { color: var(--blue); font-weight: 800; }
@@ -77,8 +87,25 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
 .change-list div { display: grid; grid-template-columns: 110px 1fr; gap: 8px; border-top: 1px solid var(--line); padding: 8px; font-size: 13px; }
 .change-list div:first-child { border-top: 0; }
 .change-list span { color: var(--muted); overflow-wrap: anywhere; }
+.advisory-grid, .pilot-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 10px 0; }
+.advisory-grid div, .pilot-summary-grid div { border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; padding: 10px; }
+.advisory-grid strong, .pilot-summary-grid strong { display: block; font-size: 14px; overflow-wrap: anywhere; }
+.pilot-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pilot-summary-grid span { color: var(--muted); font-size: 12px; }
+.table-scroll { overflow-x: auto; margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.comparison-table, .evidence-table { width: 100%; min-width: 520px; margin: 0; border-spacing: 0; background: #fff; }
+.comparison-table th, .comparison-table td, .evidence-table th, .evidence-table td { padding: 8px; border-top: 1px solid var(--line); font-size: 13px; color: #334155; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.comparison-table thead th, .evidence-table thead th { background: #eff6ff; color: #1e3a8a; font-size: 11px; font-weight: 800; text-transform: uppercase; border-top: 0; }
+.comparison-table tbody th, .evidence-table tbody th { font-weight: 700; }
+.comparison-proposed { color: #0f766e; font-weight: 700; }
+.meta-note { margin-bottom: 8px; }
+.status-readonly { margin: 0; }
 .explanation { position: sticky; top: 12px; }
 .explanation li { margin-bottom: 8px; color: #475569; font-size: 13px; }
+.detail-block { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.modal-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(15, 23, 42, .45); z-index: 20; }
+.modal-card { width: min(100%, 420px); border: 1px solid var(--line); border-radius: 12px; background: #fff; padding: 16px; box-shadow: 0 16px 40px rgba(15, 23, 42, .2); }
+.modal-card h3 { margin-top: 0; }
 .history-panel { margin-top: 14px; }
 .history-row { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 9px 0; }
 .history-row span { color: var(--muted); font-size: 12px; }
@@ -90,6 +117,12 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
     .commerce-stats { grid-template-columns: repeat(2, 1fr); }
     .commerce-grid { grid-template-columns: 1fr; }
     .explanation { position: static; }
+    .filter-grid, .advisory-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .pilot-toolbar, .section-head { display: block; }
+    .recommendation-title { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+    .pilot-select { grid-column: 1 / -1; }
+    .pilot-select { margin-bottom: 8px; }
+    .risk { display: inline-block; margin-top: 0; }
 }
 @media (max-width: 640px) {
     .shell { padding: 10px; }
@@ -101,4 +134,5 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
     .form { grid-template-columns: 1fr; }
     .stats { grid-template-columns: 1fr; }
     .history-row { display: block; }
+    .filter-grid, .advisory-grid, .pilot-summary-grid { grid-template-columns: 1fr; }
 }
