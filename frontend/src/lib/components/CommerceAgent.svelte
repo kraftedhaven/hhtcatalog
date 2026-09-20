@@ -314,8 +314,10 @@
         }
         loading = true;
         error = "";
+        let applied = false;
         try {
             await commerceApply(latestEntry.actionId);
+            applied = true;
             message = "Approved changes applied through the eBay update flow.";
             await refresh({ throwOnError: true });
             pendingApply = null;
@@ -323,7 +325,19 @@
             confirmApplyButton = null;
             await restoreFocus();
         } catch (err) {
-            error = err.message || String(err);
+            if (applied) {
+                pendingApply = null;
+                cancelApplyButton = null;
+                confirmApplyButton = null;
+                message =
+                    "Approved changes were applied through the eBay update flow, but refreshing the queue failed. Refresh the queue to see the latest status.";
+                error = err.message || String(err);
+                await restoreFocus();
+            } else {
+                error = err.message || String(err);
+                await tick();
+                confirmApplyButton?.focus();
+            }
         } finally {
             loading = false;
         }
