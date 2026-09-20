@@ -78,7 +78,9 @@ def sold_price_summary(item: dict[str, Any]) -> dict[str, Any]:
                     prices.append(price)
             if prices:
                 median = round(statistics.median(prices), 2)
-                return _result(median, "similar_used_sold", "medium" if len(prices) >= 5 else "low", len(prices), min(prices), max(prices), current, now, item, "Used-sold comparable median from the configured provider.")
+                result = _result(median, "similar_used_sold", "medium" if len(prices) >= 5 else "low", len(prices), min(prices), max(prices), current, now, item, "Used-sold comparable median from the configured provider.")
+                result.update({"kind": "sold_comps", "query": query, "lowSoldPrice": min(prices), "medianSoldPrice": median, "highSoldPrice": max(prices), "message": "Sold-comparable summary is advisory; no price change is proposed automatically."})
+                return result
         except (requests.RequestException, ValueError, TypeError):
             pass
 
