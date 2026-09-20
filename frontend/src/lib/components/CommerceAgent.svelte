@@ -290,18 +290,31 @@
 
     async function cancelApply() {
         pendingApply = null;
+        cancelApplyButton = null;
+        confirmApplyButton = null;
         await restoreFocus();
     }
 
     async function confirmApply() {
         if (!pendingApply) return;
+        const latestEntry =
+            recommendations.find(
+                (entry) =>
+                    entry.recommendationId === pendingApply.recommendationId,
+            ) || pendingApply;
+        if (!latestEntry?.actionId) {
+            error = "This approved recommendation is missing its apply action ID. Refresh the queue and try again.";
+            return;
+        }
         loading = true;
         error = "";
         try {
-            await commerceApply(pendingApply.actionId);
+            await commerceApply(latestEntry.actionId);
             message = "Approved changes applied through the eBay update flow.";
             await refresh({ throwOnError: true });
             pendingApply = null;
+            cancelApplyButton = null;
+            confirmApplyButton = null;
             await restoreFocus();
         } catch (err) {
             error = err.message || String(err);
