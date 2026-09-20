@@ -44,6 +44,7 @@
     let error = "";
     let selected = null;
     let statusFilter = "";
+    let classificationFilter = "";
     let riskFilter = "";
     let confidenceFilter = "";
     let categoryFilter = "";
@@ -62,21 +63,26 @@
                 .filter(Boolean),
         ),
     ).sort((left, right) => left.localeCompare(right));
+    $: classificationOptions = Array.from(
+        new Set(recommendations.map((entry) => entry.classification).filter(Boolean)),
+    ).sort((left, right) => left.localeCompare(right));
 
     $: visible = recommendations.filter(
         (entry) =>
             (!statusFilter || entry.status === statusFilter) &&
+            (!classificationFilter ||
+                entry.classification === classificationFilter) &&
             (!riskFilter || entry.risk === riskFilter) &&
             (!confidenceFilter || entry.confidence === confidenceFilter) &&
             (!categoryFilter || String(recommendedCategory(entry) || "") === categoryFilter),
     );
 
-    $: visibleIds = new Set(visible.map((entry) => entry.recommendationId));
+    $: selectedIdSet = new Set(selectedIds);
     $: selectedEntries = recommendations.filter((entry) =>
-        selectedIds.includes(entry.recommendationId),
+        selectedIdSet.has(entry.recommendationId),
     );
     $: selectedVisibleEntries = visible.filter((entry) =>
-        selectedIds.includes(entry.recommendationId),
+        selectedIdSet.has(entry.recommendationId),
     );
 
     $: selectedPendingCount = selectedEntries.filter(
@@ -182,18 +188,19 @@
         downloadJSON(
             {
                 exportedAt: new Date().toISOString(),
-                pilotSize: selectedVisibleEntries.length,
-                filters: {
+                pilotSize: selectedEntries.length,
+                viewFilters: {
                     status: statusFilter,
+                    classification: classificationFilter,
                     risk: riskFilter,
                     confidence: confidenceFilter,
                     category: categoryFilter,
                 },
-                recommendations: selectedVisibleEntries,
+                recommendations: selectedEntries,
             },
             `commerce-agent-pilot-${new Date().toISOString().slice(0, 10)}.json`,
         );
-        message = `Exported ${selectedVisibleEntries.length} pilot result${selectedVisibleEntries.length === 1 ? "" : "s"}.`;
+        message = `Exported ${selectedEntries.length} pilot result${selectedEntries.length === 1 ? "" : "s"}.`;
     }
 
     async function refresh(options = {}) {
@@ -272,9 +279,11 @@
 
     async function requestApply(entry) {
         if (!entry?.actionId) {
+            message = "";
             error = "This approved recommendation is missing its apply action ID. Refresh the queue and try again.";
             return;
         }
+        error = "";
         lastFocusedElement = document.activeElement;
         pendingApply = entry;
         await tick();
@@ -294,6 +303,7 @@
         pendingApply = null;
         cancelApplyButton = null;
         confirmApplyButton = null;
+        error = "";
         await restoreFocus();
     }
 
@@ -424,6 +434,15 @@
                 </select>
             </label>
             <label>
+                <span>Type</span>
+                <select bind:value={classificationFilter} aria-label="Filter by recommendation type">
+                    <option value="">All recommendation types</option>
+                    {#each classificationOptions as classification}
+                        <option value={classification}>{classification}</option>
+                    {/each}
+                </select>
+            </label>
+            <label>
                 <span>Risk</span>
                 <select bind:value={riskFilter} aria-label="Filter by risk">
                     <option value="">All risk levels</option>
@@ -474,8 +493,7 @@
                 >
                 <button
                     disabled={
-                        selectedVisibleEntries.length < 10 ||
-                        selectedVisibleEntries.length > 20
+                        selectedEntries.length < 10 || selectedEntries.length > 20
                     }
                     on:click={exportPilotResults}
                     >Export pilot results</button
