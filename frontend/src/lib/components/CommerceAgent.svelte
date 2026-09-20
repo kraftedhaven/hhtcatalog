@@ -1,4 +1,6 @@
 <script>
+    import { tick } from "svelte";
+
     import {
         commerceAudit,
         commerceApprove,
@@ -48,6 +50,9 @@
     let pilotSize = "10";
     let selectedIds = [];
     let pendingApply = null;
+    let cancelApplyButton;
+    let confirmApplyButton;
+    let lastFocusedElement = null;
 
     $: categoryOptions = Array.from(
         new Set(
@@ -256,12 +261,16 @@
         }
     }
 
-    function requestApply(entry) {
+    async function requestApply(entry) {
+        lastFocusedElement = document.activeElement;
         pendingApply = entry;
+        await tick();
+        cancelApplyButton?.focus();
     }
 
     function cancelApply() {
         pendingApply = null;
+        lastFocusedElement?.focus?.();
     }
 
     async function confirmApply() {
@@ -272,6 +281,7 @@
             await commerceApply(pendingApply.actionId);
             message = "Approved changes applied through the eBay update flow.";
             pendingApply = null;
+            lastFocusedElement?.focus?.();
             await refresh();
         } catch (err) {
             error = err.message || String(err);
@@ -280,8 +290,34 @@
         }
     }
 
+    function handleDialogKeydown(event) {
+        if (!pendingApply) return;
+        if (event.key === "Escape") {
+            event.preventDefault();
+            cancelApply();
+            return;
+        }
+        if (event.key !== "Tab") return;
+        const focusable = [cancelApplyButton, confirmApplyButton].filter(Boolean);
+        if (!focusable.length) return;
+        const currentIndex = focusable.indexOf(document.activeElement);
+        if (event.shiftKey) {
+            if (currentIndex <= 0) {
+                event.preventDefault();
+                focusable[focusable.length - 1]?.focus();
+            }
+            return;
+        }
+        if (currentIndex === -1 || currentIndex === focusable.length - 1) {
+            event.preventDefault();
+            focusable[0]?.focus();
+        }
+    }
+
     refresh();
 </script>
+
+<svelte:window on:keydown={handleDialogKeydown} />
 
 <section class="commerce-agent">
     <div class="commerce-head">
@@ -632,8 +668,14 @@
                     recommendation does not apply it.
                 </p>
                 <div class="actions">
-                    <button disabled={loading} on:click={cancelApply}>Cancel</button>
-                    <button class="primary" disabled={loading} on:click={confirmApply}
+                    <button bind:this={cancelApplyButton} disabled={loading} on:click={cancelApply}
+                        >Cancel</button
+                    >
+                    <button
+                        bind:this={confirmApplyButton}
+                        class="primary"
+                        disabled={loading}
+                        on:click={confirmApply}
                         >{loading ? "Applying..." : "Confirm apply"}</button
                     >
                 </div>
