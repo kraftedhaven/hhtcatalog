@@ -72,17 +72,22 @@
     );
 
     $: visibleIds = new Set(visible.map((entry) => entry.recommendationId));
-    $: if (selectedIds.some((id) => !visibleIds.has(id))) {
-        selectedIds = selectedIds.filter((id) => visibleIds.has(id));
-    }
-
     $: selectedEntries = recommendations.filter((entry) =>
+        selectedIds.includes(entry.recommendationId),
+    );
+    $: selectedVisibleEntries = visible.filter((entry) =>
         selectedIds.includes(entry.recommendationId),
     );
 
     $: selectedPendingCount = selectedEntries.filter(
         (entry) => entry.status === "Pending",
     ).length;
+
+    function displayText(value, placeholder = "Not set") {
+        return value === undefined || value === null || value === ""
+            ? placeholder
+            : String(value);
+    }
 
     function fieldLabel(field) {
         return FIELD_LABELS[field] || field;
@@ -93,10 +98,7 @@
     }
 
     function currentValue(entry, field) {
-        const value = entry?.listing?.[listingKey(field)];
-        return value === undefined || value === null || value === ""
-            ? "Not set"
-            : String(value);
+        return displayText(entry?.listing?.[listingKey(field)]);
     }
 
     function proposedEntries(entry) {
@@ -167,7 +169,10 @@
     }
 
     function exportPilotResults() {
-        if (selectedEntries.length < 10 || selectedEntries.length > 20) {
+        if (
+            selectedVisibleEntries.length < 10 ||
+            selectedVisibleEntries.length > 20
+        ) {
             error = "Select 10–20 listings before exporting pilot results.";
             return;
         }
@@ -175,18 +180,18 @@
         downloadJSON(
             {
                 exportedAt: new Date().toISOString(),
-                pilotSize: selectedEntries.length,
+                pilotSize: selectedVisibleEntries.length,
                 filters: {
                     status: statusFilter,
                     risk: riskFilter,
                     confidence: confidenceFilter,
                     category: categoryFilter,
                 },
-                recommendations: selectedEntries,
+                recommendations: selectedVisibleEntries,
             },
             `commerce-agent-pilot-${new Date().toISOString().slice(0, 10)}.json`,
         );
-        message = `Exported ${selectedEntries.length} pilot result${selectedEntries.length === 1 ? "" : "s"}.`;
+        message = `Exported ${selectedVisibleEntries.length} pilot result${selectedVisibleEntries.length === 1 ? "" : "s"}.`;
     }
 
     async function refresh() {
@@ -263,6 +268,10 @@
     }
 
     async function requestApply(entry) {
+        if (!entry?.actionId) {
+            error = "This approved recommendation is missing its apply action ID. Refresh the queue and try again.";
+            return;
+        }
         lastFocusedElement = document.activeElement;
         pendingApply = entry;
         await tick();
@@ -424,7 +433,10 @@
                     >Clear selection</button
                 >
                 <button
-                    disabled={selectedIds.length < 10 || selectedIds.length > 20}
+                    disabled={
+                        selectedVisibleEntries.length < 10 ||
+                        selectedVisibleEntries.length > 20
+                    }
                     on:click={exportPilotResults}
                     >Export pilot results</button
                 >
@@ -566,11 +578,11 @@
                                             <th scope="row" class="comparison-attribute">
                                                 {fieldLabel(evidence.field)}
                                             </th>
-                                            <td>{evidence.value}</td>
+                                            <td>{displayText(evidence.value, "Not provided")}</td>
                                             <td>
-                                                {evidence.confidence} · {evidence.source}
+                                                {displayText(evidence.confidence, "Unknown")} · {displayText(evidence.source, "Unknown")}
                                             </td>
-                                            <td>{evidence.evidence}</td>
+                                            <td>{displayText(evidence.evidence, "No evidence text provided")}</td>
                                         </tr>
                                     {/each}
                                 </tbody>
@@ -616,6 +628,10 @@
                 <div>
                     <strong>{selectedIds.length}</strong>
                     <span>Selected</span>
+                </div>
+                <div>
+                    <strong>{selectedVisibleEntries.length}</strong>
+                    <span>Visible in filters</span>
                 </div>
                 <div>
                     <strong>{selectedPendingCount}</strong>
