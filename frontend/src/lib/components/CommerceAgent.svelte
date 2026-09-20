@@ -55,6 +55,7 @@
     let confirmApplyButton;
     let lastFocusedElement = null;
     let queueHeading;
+    let modalCard;
 
     $: categoryOptions = Array.from(
         new Set(
@@ -177,10 +178,7 @@
     }
 
     function exportPilotResults() {
-        if (
-            selectedVisibleEntries.length < 10 ||
-            selectedVisibleEntries.length > 20
-        ) {
+        if (selectedEntries.length < 10 || selectedEntries.length > 20) {
             error = "Select 10–20 listings before exporting pilot results.";
             return;
         }
@@ -324,6 +322,8 @@
         }
         loading = true;
         error = "";
+        await tick();
+        modalCard?.focus();
         let applied = false;
         try {
             await commerceApply(latestEntry.actionId);
@@ -598,9 +598,9 @@
                             <table class="comparison-table" aria-label="Current and proposed changes">
                                 <thead>
                                     <tr>
-                                        <th>Attribute</th>
-                                        <th>Current listing</th>
-                                        <th>Proposed change</th>
+                                        <th scope="col">Attribute</th>
+                                        <th scope="col">Current listing</th>
+                                        <th scope="col">Proposed change</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -624,10 +624,10 @@
                             <table class="evidence-table" aria-label="Attribute evidence">
                                 <thead>
                                     <tr>
-                                        <th>Attribute</th>
-                                        <th>Value</th>
-                                        <th>Confidence / source</th>
-                                        <th>Evidence</th>
+                                        <th scope="col">Attribute</th>
+                                        <th scope="col">Value</th>
+                                        <th scope="col">Confidence / source</th>
+                                        <th scope="col">Evidence</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -737,10 +737,12 @@
         <div class="modal-backdrop" role="presentation" on:click={handleBackdropClick}>
             <div
                 class="modal-card"
+                bind:this={modalCard}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="apply-dialog-title"
                 aria-describedby="apply-dialog-description"
+                tabindex="-1"
             >
                 <h3 id="apply-dialog-title">Confirm eBay update</h3>
                 <p>
