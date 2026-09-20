@@ -292,6 +292,11 @@
         queueHeading?.focus();
     }
 
+    async function focusQueueHeading() {
+        await tick();
+        queueHeading?.focus();
+    }
+
     async function cancelApply() {
         pendingApply = null;
         cancelApplyButton = null;
@@ -312,7 +317,7 @@
             pendingApply = null;
             cancelApplyButton = null;
             confirmApplyButton = null;
-            await restoreFocus();
+            await focusQueueHeading();
             return;
         }
         loading = true;
@@ -328,7 +333,7 @@
             pendingApply = null;
             cancelApplyButton = null;
             confirmApplyButton = null;
-            await restoreFocus();
+            await focusQueueHeading();
         } catch (err) {
             if (applied) {
                 pendingApply = null;
@@ -337,7 +342,7 @@
                 message =
                     "Approved changes were applied through the eBay update flow, but refreshing the queue failed. Refresh the queue to see the latest status.";
                 error = err.message || String(err);
-                await restoreFocus();
+                await focusQueueHeading();
             } else {
                 error = err.message || String(err);
                 await tick();
@@ -352,7 +357,7 @@
         if (!pendingApply) return;
         if (event.key === "Escape") {
             event.preventDefault();
-            cancelApply();
+            void cancelApply();
             return;
         }
         if (event.key !== "Tab") return;
@@ -374,7 +379,7 @@
 
     function handleBackdropClick(event) {
         if (event.target === event.currentTarget) {
-            cancelApply();
+            void cancelApply();
         }
     }
 
@@ -749,7 +754,10 @@
                     recommendation does not apply it.
                 </p>
                 <div class="actions">
-                    <button bind:this={cancelApplyButton} disabled={loading} on:click={cancelApply}
+                    <button
+                        bind:this={cancelApplyButton}
+                        disabled={loading}
+                        on:click={() => void cancelApply()}
                         >Cancel</button
                     >
                     <button
