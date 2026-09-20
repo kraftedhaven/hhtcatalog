@@ -65,6 +65,11 @@
             (!categoryFilter || String(recommendedCategory(entry) || "") === categoryFilter),
     );
 
+    $: visibleIds = new Set(visible.map((entry) => entry.recommendationId));
+    $: if (selectedIds.some((id) => !visibleIds.has(id))) {
+        selectedIds = selectedIds.filter((id) => visibleIds.has(id));
+    }
+
     $: selectedEntries = recommendations.filter((entry) =>
         selectedIds.includes(entry.recommendationId),
     );
@@ -140,6 +145,10 @@
         }
         error = "";
         const count = Math.min(20, Math.max(10, Number(pilotSize) || 10));
+        if (visible.length < count) {
+            error = `The current filters show ${visible.length} listings. Reduce the pilot size or broaden the filters to select ${count}.`;
+            return;
+        }
         const pilotIds = visible
             .slice(0, count)
             .map((entry) => entry.recommendationId);
