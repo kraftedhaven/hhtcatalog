@@ -89,6 +89,18 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(inventory_only["lifecycle"], "Inventory-only draft")
         self.assertEqual(active["ebayUrl"], "https://www.ebay.com/itm/L1")
 
+    def test_pricing_always_returns_numeric_seller_fallback(self):
+        audit = commerce_agent.audit_listing({"title": "Used Coat", "brand": "Brand", "type": "Coat", "price": 42.0, "cat": "57988"})
+        self.assertEqual(audit["soldPricing"]["pricingSource"], "seller_price_fallback")
+        self.assertEqual(audit["soldPricing"]["recommendedPrice"], 42.0)
+
+    def test_active_price_is_not_labeled_sold(self):
+        from hht_app.market_metrics import sold_price_summary
+        result = sold_price_summary({"title": "Used Coat", "price": 42.0, "activeListingEstimate": {"sampleSize": 6, "medianActivePrice": 55.0, "lowActivePrice": 45.0, "highActivePrice": 70.0}})
+        self.assertEqual(result["pricingSource"], "active_comparable")
+        self.assertNotIn("sold", result["pricingSource"])
+        self.assertEqual(result["recommendedPrice"], 55.0)
+
 
 if __name__ == "__main__":
     unittest.main()
