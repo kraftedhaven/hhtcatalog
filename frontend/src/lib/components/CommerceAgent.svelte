@@ -194,7 +194,7 @@
         message = `Exported ${selectedVisibleEntries.length} pilot result${selectedVisibleEntries.length === 1 ? "" : "s"}.`;
     }
 
-    async function refresh() {
+    async function refresh(options = {}) {
         loading = true;
         error = "";
         try {
@@ -205,6 +205,7 @@
             ]);
         } catch (err) {
             error = err.message || String(err);
+            if (options.throwOnError) throw err;
         } finally {
             loading = false;
         }
@@ -299,8 +300,8 @@
         try {
             await commerceApply(pendingApply.actionId);
             message = "Approved changes applied through the eBay update flow.";
+            await refresh({ throwOnError: true });
             pendingApply = null;
-            await refresh();
             await restoreFocus();
         } catch (err) {
             error = err.message || String(err);
@@ -654,7 +655,7 @@
                         <b>Confidence:</b> {selected.confidence}. <b>Risk:</b> {selected.risk}.
                     </p>
                     <ul>
-                        {#each selected.findings as finding}
+                        {#each selected.findings || [] as finding}
                             <li><b>{fieldLabel(finding.field)}:</b> {finding.message}</li>
                         {/each}
                     </ul>

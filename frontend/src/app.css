@@ -33,7 +33,7 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
 .notice p { margin: 6px 0 0; }
 .notice.info { border-color: #b7cffb; background: #eff6ff; color: #1e3a8a; }
 .notice.error { border-color: #fecaca; background: #fef2f2; color: var(--red); }
-.notice.warn { border-color: #fde68a; background: #fffbeb; color: var(--amber); }
+.notice.warn { border-color: #f59e0b; border-left: 4px solid #d97706; background: #fffbeb; color: #92400e; }
 .field { display: block; margin-bottom: 12px; }
 .field span { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 5px; color: #475569; font-size: 12px; font-weight: 800; text-transform: uppercase; }
 .field em { color: var(--muted); font-style: normal; text-transform: none; }
