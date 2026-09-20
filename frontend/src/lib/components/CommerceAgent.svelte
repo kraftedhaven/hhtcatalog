@@ -166,6 +166,8 @@
 
     function clearPilotSelection() {
         selectedIds = [];
+        error = "";
+        message = "";
     }
 
     function exportPilotResults() {
@@ -304,6 +306,10 @@
             ) || pendingApply;
         if (!latestEntry?.actionId) {
             error = "This approved recommendation is missing its apply action ID. Refresh the queue and try again.";
+            pendingApply = null;
+            cancelApplyButton = null;
+            confirmApplyButton = null;
+            await restoreFocus();
             return;
         }
         loading = true;
@@ -344,6 +350,12 @@
         if (currentIndex === -1 || currentIndex === focusable.length - 1) {
             event.preventDefault();
             focusable[0]?.focus();
+        }
+    }
+
+    function handleBackdropClick(event) {
+        if (event.target === event.currentTarget) {
+            cancelApply();
         }
     }
 
@@ -690,7 +702,7 @@
         {/each}
     </div>
     {#if pendingApply}
-        <div class="modal-backdrop" role="presentation">
+        <div class="modal-backdrop" role="presentation" on:click={handleBackdropClick}>
             <div
                 class="modal-card"
                 role="dialog"
