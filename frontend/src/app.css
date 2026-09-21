@@ -47,6 +47,8 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
 .category-head > span { border: 1px solid #b7cffb; border-radius: 999px; background: #eff6ff; color: #1e3a8a; padding: 4px 8px; font-size: 12px; font-weight: 800; white-space: nowrap; }
 .category-search { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; margin: 10px 0; }
 .category-search input { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 10px; }
+.category-manual { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: end; }
+.category-manual .field { margin-bottom: 0; }
 .category-message { margin: 0 0 8px; }
 .category-suggestions { display: grid; gap: 7px; }
 .category-suggestions button { min-height: 0; border-color: #b7cffb; text-align: left; }
@@ -151,6 +153,7 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
     .category-head { display: block; }
     .category-head > span { display: inline-block; margin-top: 8px; }
     .category-search { grid-template-columns: 1fr; }
+    .category-manual { grid-template-columns: 1fr; }
     .stats { grid-template-columns: 1fr; }
     .history-row { display: block; }
     .filter-grid, .advisory-grid, .pilot-summary-grid { grid-template-columns: 1fr; }

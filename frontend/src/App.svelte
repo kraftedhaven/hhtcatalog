@@ -636,7 +636,10 @@
                     <button type="button" disabled={categoryLoading} on:click={() => findCategories()}>{categoryLoading ? "Searching..." : "Find eBay categories"}</button>
                 </div>
                 <label class="field"><span>Quick category menu</span><select bind:value={item.cat} on:change={() => { item = applyClientRules(item); loadCategoryFields(item.cat); }}>{#each CATEGORY_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-                <label class="field"><span>Manual eBay category ID</span><input bind:value={item.cat} inputmode="numeric" placeholder="Use only a verified eBay leaf category ID" on:change={() => loadCategoryFields(item.cat)} /></label>
+                <div class="category-manual">
+                    <label class="field"><span>Manual eBay category ID</span><input bind:value={item.cat} inputmode="numeric" placeholder="Use only a verified eBay leaf category ID" on:change={() => loadCategoryFields(item.cat)} /></label>
+                    <button type="button" disabled={categoryLoading || !item.cat} on:click={() => loadCategoryFields(item.cat)}>Load fields for selected category</button>
+                </div>
                 {#if categoryNotice}<p class="help category-message">{categoryNotice}</p>{/if}
                 {#if categorySuggestions.length}
                     <div class="category-suggestions" aria-label="eBay category suggestions">
