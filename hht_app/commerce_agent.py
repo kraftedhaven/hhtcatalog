@@ -564,14 +564,17 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
     recommendation = get_recommendation(recommendation_id)
     if not recommendation:
         raise ValueError("Recommendation not found.")
-    if approved is None and recommendation.get("risk") == "high":
-        raise ValueError("High-risk recommendations require seller review and cannot be approved in this step.")
     changes = approved if approved is not None else recommendation["proposed"]
     if not isinstance(changes, dict) or not changes:
         raise ValueError("At least one approved field is required.")
     changes = {key: value for key, value in changes.items() if key in EDITABLE_FIELDS}
     if not changes:
         raise ValueError("No editable fields were approved.")
+    if recommendation.get("risk") == "high":
+        proposed = recommendation.get("proposed", {})
+        baseline = {key: value for key, value in proposed.items() if key in EDITABLE_FIELDS} if isinstance(proposed, dict) else {}
+        if approved is None or changes == baseline:
+            raise ValueError("High-risk recommendations are review-only until a seller-reviewed subset of changes is explicitly approved.")
     current = recommendation["listing"]
     rules = settings()
     if "price" in changes:
