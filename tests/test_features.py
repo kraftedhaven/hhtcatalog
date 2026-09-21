@@ -52,7 +52,7 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(result['items'][0]['cat'], '57884')
         self.assertEqual(result['items'][0]['categoryName'], "Boys' Hats")
         self.assertIn(b'<DetailLevel>ReturnAll</DetailLevel>', post.call_args.kwargs['data'])
-        self.assertIn(b'<OutputSelector>ActiveList.ItemArray.Item.PrimaryCategory</OutputSelector>', post.call_args.kwargs['data'])
+        self.assertNotIn(b'<OutputSelector>', post.call_args.kwargs['data'])
 
 
 if __name__ == "__main__":

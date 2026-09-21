@@ -110,16 +110,6 @@ def fetch_active_listings(page: int = 1, entries_per_page: int = 200, timeout: f
 <GetMyeBaySellingRequest xmlns="{NS}">
   <RequesterCredentials><eBayAuthToken>{_xml(token)}</eBayAuthToken></RequesterCredentials>
   <DetailLevel>ReturnAll</DetailLevel>
-  <OutputSelector>ActiveList.ItemArray.Item.ItemID</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.SKU</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.CustomLabel</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.Title</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.PrimaryCategory</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.ConditionID</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.ConditionDescription</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.Quantity</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.SellingStatus</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.PictureDetails</OutputSelector>
   <ActiveList><Include>true</Include><Pagination><EntriesPerPage>{int(entries_per_page)}</EntriesPerPage><PageNumber>{int(page)}</PageNumber></Pagination></ActiveList>
 </GetMyeBaySellingRequest>'''
     root = _trading_request("GetMyeBaySelling", body, token, timeout)
