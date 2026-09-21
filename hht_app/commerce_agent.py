@@ -32,7 +32,7 @@ from .schema import normalize_listing
 from .evidence import evidence_for_listing, evidence_summary
 from .ebay_taxonomy import validate_listing
 from .title_optimizer import optimize_title
-from .market_metrics import demand_score, seller_recovery_metrics, sold_price_summary
+from .market_metrics import demand_score, pricing_recommendation, seller_recovery_metrics, sold_price_summary
 
 logger = logging.getLogger(__name__)
 DB_PATH = os.environ.get("COMMERCE_AGENT_DB", "commerce_agent.sqlite3")
@@ -262,10 +262,11 @@ def _inventory_to_listing(item: dict[str, Any], offer: dict[str, Any] | None = N
     offer_id = str(offer.get("offerId") or "")
     offer_status = str(offer.get("status") or "").upper()
     lifecycle = "Active listing" if listing_id and offer_status == "PUBLISHED" else "Unpublished offer" if offer_id else "Inventory-only draft"
+    record_status = "active" if lifecycle == "Active listing" else "draft"
     price = (offer or {}).get("pricingSummary", {}).get("price", {}).get("value") if isinstance((offer or {}).get("pricingSummary"), dict) else None
     source = {
         "sku": item.get("sku", ""), "offerId": offer_id, "listingId": listing_id,
-        "offerStatus": offer_status or "NOT_FOUND", "lifecycle": lifecycle,
+        "offerStatus": offer_status or "NOT_FOUND", "lifecycle": lifecycle, "status": record_status,
         "ebayUrl": f"https://www.ebay.com/itm/{listing_id}" if listing_id else "",
         "title": product.get("title", ""), "desc": product.get("description", ""), "price": price or 0,
         "quantity": item.get("availability", {}).get("shipToLocationAvailability", {}).get("quantity", 1) if isinstance(item.get("availability"), dict) else 1,
@@ -282,6 +283,8 @@ def _inventory_to_listing(item: dict[str, Any], offer: dict[str, Any] | None = N
 def import_listings() -> dict[str, Any]:
     init_db()
     imported = 0
+    skipped_inventory_only = 0
+    include_inventory_only = os.environ.get("IMPORT_INVENTORY_ONLY", "false").lower() in {"1", "true", "yes", "on"}
     offset = 0
     limit = 100
     while True:
@@ -302,13 +305,16 @@ def import_listings() -> dict[str, Any]:
                 except EbayDraftError:
                     offer = {}
                 listing = _inventory_to_listing(raw, offer)
+                if listing.get("lifecycle") == "Inventory-only draft" and not include_inventory_only:
+                    skipped_inventory_only += 1
+                    continue
                 now = utc_now()
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, offer_id=excluded.offer_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), str(listing.get("offerId", "")), sku, _marketplace(), _json(listing), str(listing.get("sourceUpdatedAt", "")), now))
                 imported += 1
         if len(items) < limit:
             break
         offset += len(items)
-    return {"imported": imported, "total": count_listings()}
+    return {"imported": imported, "skippedInventoryOnly": skipped_inventory_only, "total": count_listings()}
 
 
 def import_active_listings() -> dict[str, Any]:
@@ -327,7 +333,7 @@ def import_active_listings() -> dict[str, Any]:
                 if not sku:
                     continue
                 now = utc_now()
-                normalized = {**listing, "sku": sku, "marketplace": _marketplace(), "source": "trading_active"}
+                normalized = {**listing, "sku": sku, "marketplace": _marketplace(), "source": "trading_active", "status": "active", "lifecycle": listing.get("lifecycle") or "Active listing"}
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now))
                 imported += 1
         if page >= int(result.get("totalPages") or 1) or not items:
@@ -452,18 +458,28 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     if price <= 0:
         findings.append({"field": "price", "severity": "high", "message": "Price is missing or invalid."})
     taxonomy = validate_listing(item)
-    if taxonomy.get("status") not in {"valid", "not_configured"}:
+    if taxonomy.get("status") == "missing":
         findings.append({"field": "taxonomy", "severity": "high", "message": taxonomy.get("message", "Seller category review required.")})
+    elif taxonomy.get("status") == "unavailable":
+        findings.append({"field": "taxonomy", "severity": "medium", "message": taxonomy.get("message", "Taxonomy unavailable; seller category review remains advisory.")})
     sold = sold_price_summary(item)
+    pricing = pricing_recommendation(item, sold_summary=sold)
+    if pricing.get("status") == "error":
+        findings.append({"field": "price", "severity": "high", "message": pricing.get("message", "Seller must enter a numeric price.")})
+    elif _safe_price_proposal(item, pricing):
+        proposed["price"] = pricing["recommendedPrice"]
+        findings.append({"field": "price", "severity": "medium", "message": f"Suggested price candidate: ${pricing['recommendedPrice']:.2f} from {pricing['pricingSource']}. Approval required before eBay update."})
     demand = demand_score(item)
     evidence = evidence_for_listing(item)
+    if findings and not proposed:
+        proposed["notes"] = _review_note(item, findings, taxonomy, pricing)
     score = max(0, min(100, 100 - sum(18 if f["severity"] == "high" else 10 for f in findings)))
     classification = "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs Optimization" if score >= 50 else "High Priority"
     if any(f["severity"] == "high" for f in findings):
         classification = "Needs Review"
     confidence = "high" if findings and all(f["field"] not in {"cat", "price"} for f in findings) else "medium"
     reason = "; ".join(f["message"] for f in findings) or "No material listing quality issue was identified from the imported data."
-    return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) else "low", "evidence": evidence_summary(item), "taxonomy": taxonomy, "soldPricing": sold, "demand": demand}
+    return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) else "low", "evidence": evidence_summary(item), "taxonomy": taxonomy, "soldPricing": pricing, "soldComparableSummary": sold, "demand": demand}
 
 
 def audit_all() -> dict[str, Any]:
@@ -478,7 +494,7 @@ def audit_all() -> dict[str, Any]:
             # applied history, but never create a second pending card for a row.
             db.execute("DELETE FROM recommendations WHERE listing_row_id=? AND status='Pending'", (row["id"],))
             recommendation_id = str(uuid.uuid4())
-            stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "demandMetrics": audit["demand"]}
+            stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "soldComparableSummary": audit["soldComparableSummary"], "demandMetrics": audit["demand"]}
             db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now))
             results.append({"recommendationId": recommendation_id, "listing": stored_current, **audit, "status": "Pending"})
     return {"count": len(results), "results": results}
@@ -486,7 +502,7 @@ def audit_all() -> dict[str, Any]:
 
 def _recommendation(row: sqlite3.Row) -> dict[str, Any]:
     listing = _decode(row["current_json"], {})
-    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": _decode(row["proposed_json"], {}), "findings": _decode(row["findings_json"], []), "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": _decode(row["proposed_json"], {}), "findings": _decode(row["findings_json"], []), "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
 
 
 def recommendations(status: str = "") -> list[dict[str, Any]]:
@@ -574,7 +590,29 @@ def history() -> list[dict[str, Any]]:
 def dashboard() -> dict[str, Any]:
     items = list_listings()
     recs = recommendations()
-    return {"connectedStore": "eBay", "listingsFound": len(items), "recommendations": len(recs), "needOptimization": sum(1 for r in recs if r["classification"] in {"Needs Optimization", "High Priority", "Needs Review"}), "titleImprovements": sum(1 for r in recs if any(f.get("field") == "title" for f in r["findings"])), "missingItemSpecifics": sum(1 for r in recs if any(f.get("field") == "item_specifics" for f in r["findings"])), "needsReview": sum(1 for r in recs if r["classification"] == "Needs Review"), "recovery": seller_recovery_metrics(recs, items), "mode": "recommend"}
+    active_items = [item for item in items if str(item.get("status") or "active").lower() == "active"]
+    return {"connectedStore": "eBay", "listingsFound": len(active_items), "recordsFound": len(items), "recommendations": len(recs), "needOptimization": sum(1 for r in recs if r["classification"] in {"Needs Optimization", "High Priority", "Needs Review"}), "titleImprovements": sum(1 for r in recs if any(f.get("field") == "title" for f in r["findings"])), "missingItemSpecifics": sum(1 for r in recs if any(f.get("field") == "item_specifics" for f in r["findings"])), "needsReview": sum(1 for r in recs if r["classification"] == "Needs Review"), "recovery": seller_recovery_metrics(recs, active_items), "mode": "recommend"}
+
+
+def _safe_price_proposal(item: dict[str, Any], pricing: dict[str, Any]) -> bool:
+    if pricing.get("pricingSource") == "seller_price_fallback":
+        return False
+    recommended = _price_float(pricing.get("recommendedPrice"))
+    current = _price_float(item.get("price"))
+    return recommended > 0 and (current <= 0 or abs(recommended - current) >= 0.01)
+
+
+def _review_note(item: dict[str, Any], findings: list[dict[str, Any]], taxonomy: dict[str, Any], pricing: dict[str, Any]) -> str:
+    existing = str(item.get("notes") or "").strip()
+    summary = "; ".join(str(f.get("message") or "") for f in findings[:4] if f.get("message"))
+    taxonomy_status = str(taxonomy.get("status") or "")
+    pricing_source = str(pricing.get("pricingSource") or "")
+    addition = f"Seller review required before applying changes. {summary}".strip()
+    if taxonomy_status:
+        addition = f"{addition} Taxonomy status: {taxonomy_status}."
+    if pricing_source:
+        addition = f"{addition} Pricing source: {pricing_source}."
+    return f"{existing} {addition}".strip()[:900]
 
 
 __all__ = ["dashboard", "import_listings", "list_listings", "audit_all", "recommendations", "get_recommendation", "approve_recommendation", "apply_action", "history", "settings", "update_settings"]

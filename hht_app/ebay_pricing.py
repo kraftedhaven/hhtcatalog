@@ -7,6 +7,7 @@ from typing import Any
 import requests
 
 from .pricing_cache import clear as clear_pricing_cache, get as cache_get, key as cache_key, put as cache_put
+from .market_metrics import pricing_recommendation, sold_price_summary
 
 
 EBAY_OAUTH_SCOPE = "https://api.ebay.com/oauth/api_scope"
@@ -21,8 +22,12 @@ def enrich_with_ebay_active_pricing(listing: dict[str, Any], timeout: float = 5.
     result = dict(listing)
     keywords = active_listing_keywords(result)
     result["pricingSearchKeywords"] = keywords
-    result["pricingSource"] = "ai_estimate"
     result["aiEstimatedPrice"] = result.get("price") or 0.0
+    sold_summary = sold_price_summary(result)
+    result["soldPricing"] = sold_summary
+    base_pricing = pricing_recommendation(result, sold_summary=sold_summary)
+    result["pricingRecommendation"] = base_pricing
+    result["pricingSource"] = base_pricing.get("pricingSource", "seller_price_fallback")
 
     if not keywords:
         result["notes"] = _append_note(result.get("notes"), "Pricing is an AI estimate; not enough visible item details to search active eBay listings.")
@@ -40,18 +45,22 @@ def enrich_with_ebay_active_pricing(listing: dict[str, Any], timeout: float = 5.
 
     if summary["sampleSize"] < 3:
         result["activeListingEstimate"] = summary
+        result["pricingRecommendation"] = pricing_recommendation(result, sold_summary=sold_summary, active_summary=summary)
+        result["pricingSource"] = result["pricingRecommendation"].get("pricingSource", result["pricingSource"])
         result["notes"] = _append_note(result.get("notes"), f"Only {summary['sampleSize']} matching active eBay listings found for '{keywords}'. AI price estimate kept.")
         return result
 
     if result.get("sellerEditedPrice") is True:
-        result["pricingSource"] = "seller_price"
         result["activeListingEstimate"] = summary
+        result["pricingRecommendation"] = pricing_recommendation({"price": result.get("price"), "pricingSearchKeywords": keywords}, sold_summary={"status": "not_configured", "query": keywords}, active_summary=None)
+        result["pricingSource"] = "seller_price_fallback"
         result["notes"] = _append_note(result.get("notes"), f"Seller price kept. Active eBay listings for '{keywords}' range ${summary['lowActivePrice']:.2f}-${summary['highActivePrice']:.2f}.")
         return result
 
     result["price"] = summary["medianActivePrice"]
-    result["pricingSource"] = "active_listing_estimate"
     result["activeListingEstimate"] = summary
+    result["pricingRecommendation"] = pricing_recommendation(result, sold_summary=sold_summary, active_summary=summary)
+    result["pricingSource"] = "active_comparable"
     result["notes"] = _append_note(
         result.get("notes"),
         f"Price set from {summary['sampleSize']} active eBay listings for '{keywords}' with range ${summary['lowActivePrice']:.2f}-${summary['highActivePrice']:.2f}; this is an active-listing estimate, not sold-comps data.",
@@ -206,7 +215,7 @@ def _active_summary(keywords: str, prices: list[float]) -> dict[str, Any]:
     if not prices:
         return {
             "provider": "ebay_browse",
-            "kind": "active_listing_estimate",
+            "kind": "active_comparable",
             "keyword": keywords,
             "sampleSize": 0,
             "medianActivePrice": 0.0,
@@ -215,7 +224,7 @@ def _active_summary(keywords: str, prices: list[float]) -> dict[str, Any]:
         }
     return {
         "provider": "ebay_browse",
-        "kind": "active_listing_estimate",
+        "kind": "active_comparable",
         "keyword": keywords,
         "sampleSize": len(prices),
         "medianActivePrice": round(float(statistics.median(prices)), 2),

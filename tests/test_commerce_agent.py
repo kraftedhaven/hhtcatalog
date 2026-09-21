@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from hht_app import commerce_agent
 
@@ -45,6 +46,49 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertIn("Coach", audit["proposed"]["title"])
         self.assertNotEqual(audit["proposed"]["title"].casefold(), "brown signature handbag")
 
+    def test_audit_always_has_actionable_proposed_change_for_findings(self):
+        audit = commerce_agent.audit_listing({
+            "title": "Complete Seller Reviewed Patagonia Fleece Jacket Blue Mens Medium",
+            "price": 42,
+            "desc": "This seller-reviewed description has enough buyer-facing detail and condition context for the listing.",
+            "cat": "57988",
+            "brand": "Patagonia",
+            "size": "M",
+            "color": "Blue",
+            "mat": "Polyester",
+            "cnote": "Pre-owned with light wear.",
+            "pic": "",
+        })
+        self.assertIn("notes", audit["proposed"])
+        self.assertIn("Seller review required", audit["proposed"]["notes"])
+
+    def test_sold_comparable_summary_creates_price_proposal(self):
+        audit = commerce_agent.audit_listing({
+            "title": "Coach Willow Leather Handbag Brown Large",
+            "price": 129.99,
+            "desc": "Seller-reviewed bag with visible exterior, interior, and condition notes for buyer review.",
+            "cat": "169291",
+            "brand": "Coach",
+            "model": "Willow",
+            "size": "Large",
+            "color": "Brown",
+            "mat": "Leather",
+            "type": "Handbag",
+            "cnote": "Pre-owned with light wear.",
+            "pic": "https://example.test/photo.jpg",
+            "soldComparableSummary": {
+                "status": "ok",
+                "pricingSource": "exact_used_sold",
+                "medianSoldPrice": 99.99,
+                "lowSoldPrice": 89.99,
+                "highSoldPrice": 109.99,
+                "sampleSize": 4,
+                "query": "Coach Willow handbag",
+            },
+        })
+        self.assertEqual(audit["soldPricing"]["pricingSource"], "exact_used_sold")
+        self.assertEqual(audit["proposed"]["price"], 99.99)
+
     def test_price_safety_rejects_reduction_over_default_cap(self):
         commerce_agent.audit_all()
         recommendation = commerce_agent.recommendations()[0]
@@ -75,6 +119,8 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(dashboard["listingsFound"], 1)
         self.assertEqual(dashboard["recommendations"], 1)
         self.assertEqual(dashboard["mode"], "recommend")
+        self.assertEqual(dashboard["recovery"]["totalActiveListingsImported"], 1)
+        self.assertEqual(dashboard["recovery"]["label"], "Operational catalog metrics only")
 
     def test_count_listings_returns_integer(self):
         self.assertEqual(commerce_agent.count_listings(), 1)
@@ -87,7 +133,64 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(active["lifecycle"], "Active listing")
         self.assertEqual(draft["lifecycle"], "Unpublished offer")
         self.assertEqual(inventory_only["lifecycle"], "Inventory-only draft")
+        self.assertEqual(active["status"], "active")
+        self.assertEqual(inventory_only["status"], "draft")
         self.assertEqual(active["ebayUrl"], "https://www.ebay.com/itm/L1")
+
+    def test_inventory_import_skips_inventory_only_records_by_default(self):
+        responses = [
+            {"inventoryItems": [{"sku": "INV-ONLY", "product": {"title": "Inventory Draft"}}]},
+            {"offers": []},
+        ]
+
+        with mock.patch.object(commerce_agent, "_ebay_get", side_effect=responses):
+            result = commerce_agent.import_listings()
+
+        self.assertEqual(result["imported"], 0)
+        self.assertEqual(result["skippedInventoryOnly"], 1)
+        self.assertEqual(commerce_agent.count_listings(), 1)
+
+    def test_active_import_paginates_over_500_plus_and_deduplicates(self):
+        pages = {}
+        for page in range(1, 4):
+            start = (page - 1) * 200
+            end = 550 if page == 3 else page * 200
+            pages[page] = {
+                "items": [
+                    {
+                        "listingId": f"L{index}",
+                        "sku": f"SKU{index}",
+                        "title": f"Active Item {index}",
+                        "price": 19.99,
+                        "cat": "57988",
+                        "quantity": 1,
+                    }
+                    for index in range(start, end)
+                ],
+                "totalEntries": 550,
+                "totalPages": 3,
+            }
+        pages[2]["items"].append({**pages[1]["items"][0], "title": "Duplicate Active Item"})
+
+        with mock.patch.object(commerce_agent, "fetch_active_listings", side_effect=lambda page=1: pages[page]) as fetch:
+            result = commerce_agent.import_active_listings()
+
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(result["totalEntries"], 550)
+        self.assertEqual(commerce_agent.count_listings(), 550)
+        stored = [item for item in commerce_agent.list_listings() if item["sku"] == "SKU0"][0]
+        self.assertEqual(stored["title"], "Duplicate Active Item")
+
+    def test_approval_does_not_call_ebay_and_apply_requires_approval(self):
+        commerce_agent.audit_all()
+        recommendation = commerce_agent.recommendations()[0]
+        with mock.patch.object(commerce_agent, "update_ebay_offer") as update:
+            approved = commerce_agent.approve_recommendation(recommendation["recommendationId"], {"title": "Brand Short Coat"})
+        update.assert_not_called()
+        with mock.patch.object(commerce_agent, "update_ebay_offer", return_value={"status": "offer_updated"}) as update:
+            result = commerce_agent.apply_action(approved["actionId"])
+        update.assert_called_once()
+        self.assertEqual(result["status"], "Applied")
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ ZAI_REQUEST_LOCK = threading.Lock()
 # Hosted providers are attempted only when selected explicitly or through the
 # one-shot alternate action. Z.AI stays opt-in while its account limits settle.
 DEFAULT_HOSTED_PROVIDER_ORDER = ("groq", "openrouter", "nvidia")
-PROVIDER_CALLERS = frozenset({"zai", "openrouter", "gemini", "groq", "nvidia"})
+PROVIDER_CALLERS = frozenset({"zai", "openrouter", "groq", "nvidia"})
 DEFAULT_PROVIDER_COOLDOWN_SECONDS = 90
 PROVIDER_COOLDOWNS: dict[str, float] = {}
 RATE_LIMIT_CODES = frozenset({"1305", "rate_limit", "rate_limited", "rate_limit_exceeded"})
@@ -127,7 +127,6 @@ def configured_providers() -> dict[str, bool]:
     return {
         "zai": bool(os.environ.get("ZAI_API_KEY")),
         "openrouter": bool(os.environ.get("OPENROUTER_API_KEY")),
-        "gemini": bool(os.environ.get("GEMINI_API_KEY")),
         "groq": bool(os.environ.get("GROQ_API_KEY")),
         "nvidia": bool(os.environ.get("NVIDIA_NIM_BASE_URL") and os.environ.get("NVIDIA_NIM_API_KEY") and os.environ.get("NVIDIA_CATEGORY_MODEL")),
     }
@@ -219,13 +218,12 @@ def _provider_plan(context: dict[str, Any] | None = None):
     callers = {
         "zai": ("ZAI_API_KEY", _zai),
         "openrouter": ("OPENROUTER_API_KEY", _openrouter),
-        "gemini": ("GEMINI_API_KEY", _gemini),
         "groq": ("GROQ_API_KEY", _groq),
         "nvidia": ("NVIDIA_NIM_API_KEY", _nvidia),
     }
     if selected and selected not in callers:
         raise ProviderError(
-            "Unsupported PRIMARY_VISION_PROVIDER. Use zai, openrouter, nvidia, groq, or gemini.",
+            "Unsupported PRIMARY_VISION_PROVIDER. Use groq, openrouter, or nvidia.",
             503,
             category="configuration",
         )
@@ -333,35 +331,6 @@ def _openrouter(images: list[UploadedImage], context: dict[str, Any]) -> str:
         timeout=_request_timeout(context),
     )
     return _chat_response(response)
-
-
-def _gemini(images: list[UploadedImage], context: dict[str, Any]) -> str:
-    parts: list[dict[str, Any]] = [{"text": _prompt(context)}]
-    for image in images:
-        parts.append({
-            "inline_data": {
-                "mime_type": image.mime_type,
-                "data": base64.b64encode(image.data).decode("ascii"),
-            }
-        })
-    model = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-    response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        headers={"Content-Type": "application/json", "x-goog-api-key": os.environ["GEMINI_API_KEY"]},
-        json={
-            "contents": [{"parts": parts}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 1400,
-                "responseMimeType": "application/json",
-            },
-        },
-        timeout=_request_timeout(context),
-    )
-    if response.status_code >= 400:
-        raise ProviderError(f"Gemini returned HTTP {response.status_code}", response.status_code)
-    body = response.json()
-    return "".join(part.get("text", "") for part in body.get("candidates", [{}])[0].get("content", {}).get("parts", []))
 
 
 def _groq(images: list[UploadedImage], context: dict[str, Any]) -> str:
@@ -648,7 +617,6 @@ def _model_for_provider(provider: str) -> str:
     return {
         "zai": _zai_model(),
         "openrouter": os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
-        "gemini": os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
         "groq": _groq_model(),
         "nvidia": os.environ.get("NVIDIA_CATEGORY_MODEL", ""),
     }.get(provider, "")

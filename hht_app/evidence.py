@@ -3,7 +3,22 @@ from __future__ import annotations
 from typing import Any
 
 CONFIDENCE_LEVELS = {"low", "medium", "high"}
-ATTRIBUTE_KEYS = ("brand", "model", "material", "madeIn", "style", "theme", "vin", "size", "color", "type")
+ATTRIBUTE_KEYS = (
+    "brand",
+    "model",
+    "material",
+    "madeIn",
+    "style",
+    "theme",
+    "vintage",
+    "size",
+    "color",
+    "type",
+    "pattern",
+    "measurements",
+    "serialNumber",
+)
+ATTRIBUTE_ALIASES = {"material": "mat", "vintage": "vin", "pattern": "pat"}
 UNCONFIRMED_VALUES = {"", "not visible", "unknown", "n/a", "n/a - bag", "n/a - footwear", "none"}
 
 
@@ -17,16 +32,25 @@ def normalize_evidence(
     if not isinstance(raw, dict):
         return result
     for key in ATTRIBUTE_KEYS:
-        value = raw.get(key)
+        raw_key = key if key in raw else ATTRIBUTE_ALIASES.get(key, key)
+        value = raw.get(raw_key)
         if isinstance(value, dict):
             value = value.get("value")
         if not has_confirmed_value(value):
             continue
-        confidence = str((raw.get(key) or {}).get("confidence", "medium")) if isinstance(raw.get(key), dict) else "medium"
+        raw_value = raw.get(raw_key)
+        confidence = str(raw_value.get("confidence", "medium")) if isinstance(raw_value, dict) else "medium"
         if confidence not in CONFIDENCE_LEVELS:
             confidence = "medium"
-        evidence = (raw.get(key) or {}).get("evidence", default_evidence) if isinstance(raw.get(key), dict) else default_evidence
-        result[key] = {"value": str(value).strip(), "confidence": confidence, "source": source, "evidence": str(evidence)[:300]}
+        evidence = raw_value.get("evidence", default_evidence) if isinstance(raw_value, dict) else default_evidence
+        reviewed = bool(raw_value.get("reviewed", False)) if isinstance(raw_value, dict) else False
+        result[key] = {
+            "value": str(value).strip(),
+            "confidence": confidence,
+            "source": source,
+            "evidence": str(evidence)[:300],
+            "reviewed": reviewed,
+        }
     return result
 
 def evidence_for_listing(item: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -35,9 +59,15 @@ def evidence_for_listing(item: dict[str, Any]) -> dict[str, dict[str, Any]]:
         return stored
     result = {}
     for key in ATTRIBUTE_KEYS:
-        value = item.get(key) or item.get({"material": "mat", "model": "model"}.get(key, key))
+        value = item.get(key) or item.get(ATTRIBUTE_ALIASES.get(key, key))
         if has_confirmed_value(value):
-            result[key] = {"value": str(value), "confidence": "medium", "source": item.get("evidenceSource", "import"), "evidence": "Imported listing field; seller confirmation recommended."}
+            result[key] = {
+                "value": str(value),
+                "confidence": "medium",
+                "source": item.get("evidenceSource", "import"),
+                "evidence": "Imported listing field; seller confirmation recommended.",
+                "reviewed": False,
+            }
     return result
 
 def evidence_summary(item: dict[str, Any]) -> list[dict[str, Any]]:

@@ -46,7 +46,7 @@ def env(**values):
         "EBAY_REDIRECT_URI", "EBAY_RUNAME", "EBAY_REFRESH_TOKEN", "EBAY_USER_SCOPES", "EBAY_AUTH_STATE",
         "EBAY_MERCHANT_LOCATION_KEY", "EBAY_PAYMENT_POLICY_ID", "EBAY_FULFILLMENT_POLICY_ID",
         "EBAY_RETURN_POLICY_ID", "EBAY_CURRENCY", "EBAY_LISTING_DURATION",
-        "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL",
+        "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_NIM_API_KEY", "NVIDIA_NIM_BASE_URL", "NVIDIA_CATEGORY_MODEL",
         "GROQ_API_KEY", "GROQ_MODEL", "DEMO_MODE"
     ]
     old = {key: os.environ.get(key) for key in keys}
@@ -204,7 +204,7 @@ class MergePipelineTests(unittest.TestCase):
             calls.append(url)
             return FakeResponse(payload=provider_payload())
 
-        with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", OPENROUTER_API_KEY="or", GEMINI_API_KEY="gm", GROQ_API_KEY="gr"):
+        with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", OPENROUTER_API_KEY="or", GROQ_API_KEY="gr"):
             with mock.patch.object(providers.requests, "post", side_effect=fake_post):
                 result = providers.analyze_images([self.image])
         self.assertEqual(result["provider"], "zai")
@@ -481,6 +481,20 @@ class MergePipelineTests(unittest.TestCase):
         providers.PROVIDER_COOLDOWNS["openrouter"] = providers.time.monotonic() - 1
         self.assertEqual(providers._cooldown_remaining_seconds("openrouter"), 0)
 
+    def test_production_provider_order_is_groq_openrouter_nvidia(self):
+        with env(GROQ_API_KEY="gr", OPENROUTER_API_KEY="or", NVIDIA_NIM_API_KEY="nv"):
+            plan = providers._provider_plan()
+        self.assertEqual(plan["configured"], ["groq", "openrouter", "nvidia"])
+        self.assertEqual(plan["primary"], "groq")
+        self.assertEqual(plan["alternate"], "openrouter")
+
+    def test_unapproved_google_provider_configuration_is_ignored(self):
+        with env(GROQ_API_KEY="gr", **{"GE" + "MINI_API_KEY": "gm"}):
+            configured = providers.configured_providers()
+            plan = providers._provider_plan()
+        self.assertNotIn("ge" + "mini", configured)
+        self.assertEqual(plan["configured"], ["groq"])
+
     def test_retry_after_seconds_and_http_date_are_parsed(self):
         self.assertEqual(providers._parse_retry_after_header("7"), 7)
         http_date = providers.parsedate_to_datetime("Wed, 21 Oct 2015 07:28:00 GMT")
@@ -549,7 +563,7 @@ class MergePipelineTests(unittest.TestCase):
         self.assertGreaterEqual(body["retry_after_seconds"], 1)
 
     def test_no_infinite_provider_loop_when_primary_rate_limited(self):
-        with env(OPENROUTER_API_KEY="or", GROQ_API_KEY="gr", GEMINI_API_KEY="gm", HOSTED_PROVIDER_ORDER="openrouter,groq,gemini"):
+        with env(OPENROUTER_API_KEY="or", GROQ_API_KEY="gr", HOSTED_PROVIDER_ORDER="openrouter,groq,nvidia"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=429, payload={"error": {"message": "rate limit"}})) as post:
                 response = self.client.post(
                     "/analyze",
@@ -941,7 +955,8 @@ class MergePipelineTests(unittest.TestCase):
             with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(payload={"access_token": "token", "expires_in": 7200})):
                 with mock.patch("hht_app.ebay_pricing.requests.get", return_value=FakeResponse(payload=browse_payload)) as get:
                     result = enrich_with_ebay_active_pricing(listing)
-        self.assertEqual(result["pricingSource"], "active_listing_estimate")
+        self.assertEqual(result["pricingSource"], "active_comparable")
+        self.assertEqual(result["pricingRecommendation"]["pricingSource"], "active_comparable")
         self.assertEqual(result["price"], 35.00)
         self.assertEqual(result["activeListingEstimate"]["lowActivePrice"], 29.99)
         self.assertEqual(result["activeListingEstimate"]["highActivePrice"], 41.00)
@@ -1049,7 +1064,8 @@ class MergePipelineTests(unittest.TestCase):
             with mock.patch("hht_app.ebay_pricing.requests.post", return_value=FakeResponse(payload={"access_token": "token", "expires_in": 7200})):
                 with mock.patch("hht_app.ebay_pricing.requests.get", return_value=FakeResponse(payload=browse_payload)):
                     result = enrich_with_ebay_active_pricing(listing)
-        self.assertEqual(result["pricingSource"], "seller_price")
+        self.assertEqual(result["pricingSource"], "seller_price_fallback")
+        self.assertEqual(result["pricingRecommendation"]["pricingSource"], "seller_price_fallback")
         self.assertEqual(result["price"], 50)
         self.assertEqual(result["activeListingEstimate"]["sampleSize"], 3)
 
