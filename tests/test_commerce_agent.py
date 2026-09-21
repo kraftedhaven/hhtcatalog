@@ -277,6 +277,68 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["kind"], "enrichment")
 
+    def test_checkpointed_full_enrichment_runs_in_20_item_chunks_and_remains_read_only(self):
+        for index in range(2, 23):
+            with commerce_agent.connect() as db:
+                db.execute(
+                    "INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,imported_at) VALUES(?,?,?,?,?,?)",
+                    (f"L{index}", "", f"SKU{index}", "EBAY_US", commerce_agent._json({
+                        "listingId": f"L{index}", "sku": f"SKU{index}", "title": f"Active item {index}", "status": "active", "source": "trading_active"
+                    }), commerce_agent.utc_now()),
+                )
+        with mock.patch.object(commerce_agent.threading, "Thread") as thread:
+            started = commerce_agent.start_full_catalog_enrichment_job()
+        thread.return_value.start.assert_called_once()
+        with mock.patch.object(commerce_agent, "enrich_listings", return_value={"updated": 1, "records": [{"source": "trading_get_item"}]}) as enrich:
+            first = commerce_agent.run_job(started["jobId"])
+            final = commerce_agent.run_job(started["jobId"])
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(final["status"], "completed")
+        self.assertEqual(enrich.call_count, 22)
+        result = commerce_agent._decode(final["result_json"], {})
+        self.assertEqual(result["checkpoints"]["processed"], 22)
+        self.assertEqual(result["checkpoints"]["failed"], 0)
+        self.assertTrue(result["readOnly"])
+
+    def test_enriched_catalog_page_uses_fixed_25_item_review_pages(self):
+        with commerce_agent.connect() as db:
+            now = commerce_agent.utc_now()
+            for index in range(2, 28):
+                db.execute(
+                    "INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,imported_at) VALUES(?,?,?,?,?,?)",
+                    (f"E{index}", "", f"E-SKU{index}", "EBAY_US", commerce_agent._json({
+                        "listingId": f"E{index}", "sku": f"E-SKU{index}", "title": f"Enriched item {index}", "status": "active", "source": "trading_get_item"
+                    }), now),
+                )
+            rows = db.execute("SELECT id, listing_id FROM listings ORDER BY id").fetchall()
+            for row in rows:
+                db.execute(
+                    "INSERT INTO enrichment_checkpoints(listing_row_id,listing_id,status,enriched_at,details_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                    (row["id"], row["listing_id"], "processed", now, "{}", now, now),
+                )
+        first = commerce_agent.enriched_catalog_page(1, 999)
+        second = commerce_agent.enriched_catalog_page(2, 25)
+        self.assertEqual(first["pageSize"], 25)
+        self.assertEqual(first["total"], 27)
+        self.assertEqual(len(first["items"]), 25)
+        self.assertEqual(second["totalPages"], 2)
+        self.assertEqual(len(second["items"]), 2)
+
+    def test_recommendation_page_is_limited_to_25_records(self):
+        for index in range(2, 28):
+            with commerce_agent.connect() as db:
+                db.execute(
+                    "INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,imported_at) VALUES(?,?,?,?,?,?)",
+                    (f"R{index}", "", f"R-SKU{index}", "EBAY_US", commerce_agent._json({
+                        "listingId": f"R{index}", "sku": f"R-SKU{index}", "title": f"Review item {index}", "status": "active", "cat": "57988", "price": 20
+                    }), commerce_agent.utc_now()),
+                )
+        commerce_agent.audit_all()
+        page = commerce_agent.recommendations_page(page=1, page_size=50)
+        self.assertEqual(page["pageSize"], 25)
+        self.assertEqual(page["total"], 27)
+        self.assertEqual(len(page["items"]), 25)
+
 
 if __name__ == "__main__":
     unittest.main()

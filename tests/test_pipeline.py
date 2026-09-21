@@ -775,6 +775,27 @@ class MergePipelineTests(unittest.TestCase):
         suggest.assert_called_once_with("kids hat")
         fields.assert_called_once_with("52365")
 
+    def test_full_enrichment_and_paginated_catalog_routes_are_read_only(self):
+        job = {"jobId": "job-1", "status": "queued", "kind": "full_enrichment", "readOnly": True}
+        page = {"page": 2, "pageSize": 25, "total": 26, "totalPages": 2, "items": [{"listingId": "123", "enrichment": {"status": "processed"}}]}
+        with mock.patch("app.commerce_agent.start_full_catalog_enrichment_job", return_value=job) as start, mock.patch("app.commerce_agent.enriched_catalog_page", return_value=page) as catalog:
+            started = self.client.post("/api/commerce/enrich/full/start", json={"resumeFailed": True})
+            paged = self.client.get("/api/catalog/enriched?page=2&pageSize=25")
+        self.assertEqual(started.status_code, 200)
+        self.assertTrue(started.get_json()["result"]["readOnly"])
+        self.assertEqual(paged.status_code, 200)
+        self.assertEqual(paged.get_json()["result"]["pageSize"], 25)
+        start.assert_called_once_with(True)
+        catalog.assert_called_once_with("2", "25")
+
+    def test_recommendation_page_route_returns_fixed_page_shape(self):
+        page = {"page": 1, "pageSize": 25, "total": 30, "totalPages": 2, "items": [{"recommendationId": "r1"}]}
+        with mock.patch("app.commerce_agent.recommendations_page", return_value=page) as paged:
+            response = self.client.get("/api/commerce/recommendations/page?status=Pending&page=1&pageSize=25")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["result"]["totalPages"], 2)
+        paged.assert_called_once_with("Pending", "1", "25")
+
     def test_inventory_offer_includes_category_specific_editor_fields(self):
         payload = ebay_drafts._inventory_item_payload(
             normalize_listing({

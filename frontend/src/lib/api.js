@@ -160,6 +160,20 @@ export function commerceStartEnrichment(listingIds) {
     });
 }
 
+export function commerceStartFullEnrichment(resumeFailed = false) {
+    return commerceRequest('/api/commerce/enrich/full/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resumeFailed }),
+    });
+}
+
+export function enrichedCatalogPage(page = 1, pageSize = 25) {
+    const safePage = Math.max(1, Number(page) || 1);
+    const safePageSize = Math.min(25, Math.max(1, Number(pageSize) || 25));
+    return commerceRequest(`/api/catalog/enriched?page=${safePage}&pageSize=${safePageSize}`);
+}
+
 export function commerceAudit() {
     return commerceRequest('/api/commerce/audit', { method: 'POST' });
 }
@@ -171,6 +185,15 @@ export function commerceStartAudit() {
 export function commerceRecommendations(status = '') {
     const query = status ? `?status=${encodeURIComponent(status)}` : '';
     return commerceRequest(`/api/commerce/recommendations${query}`);
+}
+
+export function commerceRecommendationsPage(status = '', page = 1, pageSize = 25) {
+    const query = new URLSearchParams({
+        page: String(Math.max(1, Number(page) || 1)),
+        pageSize: String(Math.min(25, Math.max(1, Number(pageSize) || 25))),
+    });
+    if (status) query.set('status', status);
+    return commerceRequest(`/api/commerce/recommendations/page?${query.toString()}`);
 }
 
 export function commerceApprove(recommendationId, approved) {

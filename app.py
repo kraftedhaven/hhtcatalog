@@ -280,6 +280,27 @@ def commerce_enrich_start():
         return jsonify({"error": "Commerce Agent enrichment could not start."}), 503
 
 
+@app.route("/api/commerce/enrich/full/start", methods=["POST"])
+def commerce_enrich_full_start():
+    """Queue checkpointed GetItem enrichment for the active local catalog only."""
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify({"result": commerce_agent.start_full_catalog_enrichment_job(bool(body.get("resumeFailed")))})
+    except Exception:
+        app.logger.exception("Commerce Agent full enrichment job could not start")
+        return jsonify({"error": "Commerce Agent full enrichment could not start."}), 503
+
+
+@app.route("/api/catalog/enriched", methods=["GET"])
+def enriched_catalog():
+    """Serve successful read-only enrichment records in fixed review pages."""
+    try:
+        return jsonify({"result": commerce_agent.enriched_catalog_page(request.args.get("page", 1), request.args.get("pageSize", 25))})
+    except Exception:
+        app.logger.exception("Enriched catalog page could not be loaded")
+        return jsonify({"error": "Enriched catalog records are unavailable."}), 503
+
+
 @app.route("/api/commerce/import", methods=["POST"])
 def commerce_import():
     try:
@@ -350,6 +371,13 @@ def commerce_audit_start():
 @app.route("/api/commerce/recommendations", methods=["GET"])
 def commerce_recommendations():
     return jsonify({"result": commerce_agent.recommendations(request.args.get("status", ""))})
+
+
+@app.route("/api/commerce/recommendations/page", methods=["GET"])
+def commerce_recommendations_page():
+    return jsonify({"result": commerce_agent.recommendations_page(
+        request.args.get("status", ""), request.args.get("page", 1), request.args.get("pageSize", 25)
+    )})
 
 
 @app.route("/api/commerce/recommendations/<recommendation_id>", methods=["GET"])

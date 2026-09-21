@@ -71,10 +71,13 @@ Commerce Agent routes:
 - `POST /api/commerce/import` — imports existing eBay inventory items/offers through official APIs.
 - `POST /api/commerce/import-active/start` — queues a paginated active-listing import and returns a job ID.
 - `POST /api/commerce/enrich/start` — queues bounded, read-only GetItem enrichment for 1–20 selected active listing IDs.
+- `POST /api/commerce/enrich/full/start` — queues resumable, read-only GetItem enrichment for the active catalog. It creates one durable checkpoint per active listing and processes no more than 20 IDs in a chunk. Send `{ "resumeFailed": true }` to retry only failed checkpoints.
+- `GET /api/catalog/enriched?page=1&pageSize=25` — returns completed enrichment records in fixed 25-item review pages.
 - `POST /api/commerce/audit` — audits imported listings and stores structured recommendations.
 - `POST /api/commerce/audit/start` — queues a read-only audit and returns a job ID.
 - `GET /api/commerce/jobs/<id>` — returns queued, running, completed, or failed job status and result.
 - `GET /api/commerce/listings` and `GET /api/commerce/recommendations` — review data.
+- `GET /api/commerce/recommendations/page?page=1&pageSize=25` — returns a fixed 25-item approval-queue page.
 - `GET /api/commerce/recommendations/<id>` — detailed recommendation and rationale.
 - `POST /api/commerce/recommendations/<id>/approve` — records explicit field-level approval.
 - `POST /api/commerce/actions/<id>/apply` — applies only the approved fields through the existing update flow.
@@ -96,6 +99,14 @@ heroku ps:scale worker=1 -a hht-catalog-b34ed1b32417
 ```
 
 The worker can run **only** active imports, GetItem enrichment, and recommendation audits. It never approves, updates, publishes, or otherwise mutates an eBay listing. The Docker Compose stack uses the same shared catalog storage for the API and worker, with no Azure, Appwrite, DigitalOcean, or Gemini configuration.
+
+### Resumable full-catalog enrichment
+
+Use **Enrich active catalog (read-only)** in Commerce Agent after an active-list refresh. The app creates persistent Supabase checkpoints for each active listing, calls Trading API `GetItem` in chunks of at most 20 IDs, applies a configurable delay between calls, and performs bounded retry with exponential backoff only for transient retrieval errors. Every successful record retains its official category and item-specific evidence locally. The worker regenerates recommendations after the final chunk, but it never calls `ReviseItem`, Inventory API update, offer publication, or any eBay write operation.
+
+Set `ENRICHMENT_CHUNK_SIZE=20`, `ENRICHMENT_RATE_LIMIT_SECONDS=0.35`, `ENRICHMENT_MAX_RETRIES=3`, and `ENRICHMENT_STALE_SECONDS=900` as needed. A checkpoint left in `processing` for longer than the stale threshold is released to `pending` when the pipeline is started again; a failed checkpoint is retried only through **Resume failed enrichment**. Approval-only safeguards remain unchanged.
+
+The Commerce Agent approval queue is now paginated at 25 records per page. The page controls load only the selected page rather than returning the complete recommendation payload to a phone browser.
 
 Example commands:
 
