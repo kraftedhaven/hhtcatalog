@@ -1044,11 +1044,92 @@ def apply_action(action_id: str) -> dict[str, Any]:
     return {"actionId": action_id, "recommendationId": row["recommendation_id"], "status": "Applied", "result": result}
 
 
+def explain_recommendation(recommendation_id: str) -> dict[str, Any]:
+    recommendation = get_recommendation(recommendation_id)
+    if not recommendation:
+        raise ValueError("Recommendation not found.")
+    return {
+        "recommendationId": recommendation_id,
+        "status": recommendation["status"],
+        "classification": recommendation["classification"],
+        "score": recommendation["score"],
+        "reason": recommendation["reason"],
+        "findings": recommendation["findings"],
+        "evidence": recommendation["evidence"],
+        "taxonomy": recommendation["taxonomy"],
+        "soldPricing": recommendation["soldPricing"],
+        "demand": recommendation["demand"],
+        "current": recommendation["listing"],
+        "proposed": recommendation["proposed"],
+        "disclaimer": "This explanation uses stored, validated evidence and does not add facts that were not present in the listing or configured data sources.",
+    }
+
+
+def set_recommendation_status(recommendation_id: str, status: str) -> dict[str, Any]:
+    if status not in {"Rejected", "Skipped"}:
+        raise ValueError("Unsupported recommendation decision.")
+    recommendation = get_recommendation(recommendation_id)
+    if not recommendation:
+        raise ValueError("Recommendation not found.")
+    if recommendation["status"] != "Pending":
+        raise ValueError("Only pending recommendations can be rejected or skipped.")
+    with connect() as db:
+        db.execute("UPDATE recommendations SET status=?, updated_at=? WHERE id=?", (status, utc_now(), recommendation_id))
+    return {"recommendationId": recommendation_id, "status": status}
+
+
+def bulk_approve(recommendation_ids: list[str]) -> dict[str, Any]:
+    requested = list(dict.fromkeys(str(value).strip() for value in recommendation_ids if str(value).strip()))
+    if not requested or len(requested) > 25:
+        raise ValueError("Provide between 1 and 25 recommendation IDs.")
+    approved: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for recommendation_id in requested:
+        try:
+            approved.append(approve_recommendation(recommendation_id))
+        except ValueError as exc:
+            errors.append({"recommendationId": recommendation_id, "error": str(exc)})
+    return {"requested": len(requested), "approved": len(approved), "failed": len(errors), "results": approved, "errors": errors}
+
+
+def rollback_action(action_id: str) -> dict[str, Any]:
+    init_db()
+    with connect() as db:
+        row = db.execute("SELECT a.*, r.current_json FROM actions a JOIN recommendations r ON r.id=a.recommendation_id WHERE a.id=?", (action_id,)).fetchone()
+    if not row:
+        raise ValueError("Action not found.")
+    if row["status"] != "Applied":
+        raise ValueError("Only an applied action can be rolled back.")
+    current = _decode(row["current_json"], {})
+    old_values = _decode(row["old_json"], {})
+    new_values = _decode(row["new_json"], {})
+    listing_id = str(current.get("listingId") or "").strip()
+    offer_id = str(current.get("offerId") or "").strip()
+    if not listing_id or not offer_id or not old_values or not new_values:
+        raise ValueError("This action does not contain enough official identifiers and snapshots for a safe rollback.")
+    try:
+        official = fetch_listing_detail(listing_id)
+    except Exception as exc:
+        raise ValueError("eBay could not verify the current listing state; rollback was not sent.") from exc
+    for field, expected in new_values.items():
+        actual = official.get(field, current.get(field))
+        if str(actual or "") != str(expected or ""):
+            raise ValueError(f"Rollback stopped because eBay field '{field}' no longer matches the applied value.")
+    restored = {**current, **old_values, "sku": current.get("sku")}
+    result = update_ebay_offer(offer_id, restored)
+    now = utc_now()
+    with connect() as db:
+        db.execute("UPDATE actions SET status='RolledBack', ebay_result_json=?, applied_at=? WHERE id=?", (_json(result), now, action_id))
+        db.execute("UPDATE recommendations SET status='RolledBack', updated_at=? WHERE id=?", (now, row["recommendation_id"]))
+        db.execute("UPDATE listings SET data_json=?, imported_at=? WHERE id=(SELECT listing_row_id FROM actions WHERE id=?)", (_json(restored), now, action_id))
+    return {"actionId": action_id, "recommendationId": row["recommendation_id"], "status": "RolledBack", "result": result}
+
+
 def history() -> list[dict[str, Any]]:
     init_db()
     with connect() as db:
         rows = db.execute("SELECT a.*, r.current_json FROM actions a JOIN recommendations r ON r.id=a.recommendation_id ORDER BY a.created_at DESC").fetchall()
-    return [{"actionId": row["id"], "recommendationId": row["recommendation_id"], "listing": _decode(row["current_json"], {}), "approved": _decode(row["approved_json"], {}), "old": _decode(row["old_json"], {}), "new": _decode(row["new_json"], {}), "status": row["status"], "error": row["error"], "ebayResult": _decode(row["ebay_result_json"], {}), "createdAt": row["created_at"], "appliedAt": row["applied_at"]} for row in rows]
+    return [{"actionId": row["id"], "recommendationId": row["recommendation_id"], "listing": _decode(row["current_json"], {}), "approved": _decode(row["approved_json"], {}), "old": _decode(row["old_json"], {}), "new": _decode(row["new_json"], {}), "status": row["status"], "error": row["error"], "ebayResult": _decode(row["ebay_result_json"], {}), "createdAt": row["created_at"], "appliedAt": row["applied_at"], "rollbackEligible": row["status"] == "Applied" and bool(_decode(row["old_json"], {})) and bool(_decode(row["new_json"], {})), "rollbackNote": "Eligible only after eBay confirms the listing still has the applied values." if row["status"] == "Applied" else ""} for row in rows]
 
 
 def dashboard() -> dict[str, Any]:
@@ -1080,4 +1161,4 @@ def _review_note(item: dict[str, Any], findings: list[dict[str, Any]], taxonomy:
     return f"{existing} {addition}".strip()[:900]
 
 
-__all__ = ["dashboard", "import_listings", "list_listings", "audit_all", "recommendations", "get_recommendation", "approve_recommendation", "apply_action", "history", "settings", "update_settings"]
+__all__ = ["dashboard", "import_listings", "list_listings", "audit_all", "recommendations", "recommendations_page", "get_recommendation", "explain_recommendation", "approve_recommendation", "bulk_approve", "set_recommendation_status", "apply_action", "rollback_action", "history", "settings", "update_settings"]

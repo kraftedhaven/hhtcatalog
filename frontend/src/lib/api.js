@@ -200,8 +200,26 @@ export function commerceApprove(recommendationId, approved) {
     });
 }
 
+export function commerceExplain(recommendationId) {
+    return commerceRequest(`/api/commerce/recommendations/${encodeURIComponent(recommendationId)}/explain`);
+}
+
+export function commerceDecision(recommendationId, decision) {
+    return commerceRequest(`/api/commerce/recommendations/${encodeURIComponent(recommendationId)}/${encodeURIComponent(decision)}`, { method: 'POST' });
+}
+
+export function commerceBulkApprove(recommendationIds) {
+    return commerceRequest('/api/commerce/recommendations/bulk-approve', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recommendationIds })
+    });
+}
+
 export function commerceApply(actionId) {
     return commerceRequest(`/api/commerce/actions/${encodeURIComponent(actionId)}/apply`, { method: 'POST' });
+}
+
+export function commerceRollback(actionId) {
+    return commerceRequest(`/api/commerce/actions/${encodeURIComponent(actionId)}/rollback`, { method: 'POST' });
 }
 
 export function commerceHistory() {

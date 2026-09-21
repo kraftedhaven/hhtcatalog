@@ -55,6 +55,8 @@ DATABASE_URL
 `PRIMARY_VISION_PROVIDER=groq` calls only Groq and does not fan out to every configured provider. Groq model values are trimmed, and a 404/model-unavailable response is retried once with `GROQ_FALLBACK_MODEL`. The active hosted fallback order is `groq,openrouter,nvidia`; Gemini is not part of the active provider chain. Z.AI can remain configured but unused until you want to test it again. `DEMO_MODE=false` is the production default.
 When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
 Official eBay Browse pricing is optional. When `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` are present, `/analyze` uses generated item keywords to fetch active eBay listings and labels the result `active_listing_estimate`. These are active listings, not sold comps. Without Browse access, the app keeps the vision provider's `ai_estimate`.
+
+Verified sold pricing requires a configured `SOLD_COMPS_API_URL`/`SOLD_COMPS_API_TOKEN` provider or an explicitly supplied `SOLD_COMPS_CSV`. eBay's public Browse API does not provide historical sold prices, and Marketplace Insights access is restricted. Until one of those sources is configured, the agent retains the seller price or uses an explicitly labeled active-comparable/AI estimate; it never relabels active asking prices as sold prices.
 Seller OAuth for future inventory/offer work uses `EBAY_REDIRECT_URI`, `EBAY_RUNAME`, `EBAY_REFRESH_TOKEN`, and optional `EBAY_AUTH_STATE`/`EBAY_USER_SCOPES`. `EBAY_REDIRECT_URI` is the public callback URL that eBay sends the browser back to. `EBAY_RUNAME` is the OAuth-enabled RuName from the eBay Developer portal, and it is the value sent to eBay as the OAuth `redirect_uri` parameter. Use `GET /api/ebay/oauth/start` to generate a consent URL and `GET` or `POST /api/ebay/oauth/callback` to exchange the returned code. The callback returns the refresh token once so it can be copied into `EBAY_REFRESH_TOKEN`; it does not call eBay publish endpoints.
 `POST /api/ebay/drafts` is named for legacy compatibility, but it creates an **unpublished Inventory API offer**, not a Seller Hub Draft. It creates or replaces the Inventory item and creates an unpublished offer using `EBAY_MERCHANT_LOCATION_KEY`, `EBAY_PAYMENT_POLICY_ID`, `EBAY_FULFILLMENT_POLICY_ID`, and `EBAY_RETURN_POLICY_ID`. It intentionally does not call `/publish`, so the app cannot create a live listing from this endpoint. Unpublished Inventory API offers are verified and published from HHT by offer ID; they do not appear in Seller Hub’s **Drafts** folder.
 `ANALYZE_DEADLINE_SECONDS` and `PROVIDER_REQUEST_TIMEOUT_SECONDS` keep the synchronous `/analyze` call below Heroku's normal 30-second router limit while giving Groq enough time for multi-photo vision requests. Phone images are resized server-side before they are sent to a hosted provider.
@@ -79,8 +81,12 @@ Commerce Agent routes:
 - `GET /api/commerce/listings` and `GET /api/commerce/recommendations` — review data.
 - `GET /api/commerce/recommendations/page?page=1&pageSize=25` — returns a fixed 25-item approval-queue page.
 - `GET /api/commerce/recommendations/<id>` — detailed recommendation and rationale.
+- `GET /api/commerce/recommendations/<id>/explain` — returns the stored rationale, findings, evidence, current values, and proposed values without rerunning a model.
 - `POST /api/commerce/recommendations/<id>/approve` — records explicit field-level approval.
+- `POST /api/commerce/recommendations/<id>/skip` or `/reject` — records an explicit review decision without contacting eBay.
+- `POST /api/commerce/recommendations/bulk-approve` — approves up to 25 selected low-risk recommendations without contacting eBay.
 - `POST /api/commerce/actions/<id>/apply` — applies only the approved fields through the existing update flow.
+- `POST /api/commerce/actions/<id>/rollback` — verifies that eBay still has the applied values, then restores the stored prior values when safe.
 - `GET /api/commerce/history` — action/change history.
 - `GET`/`PUT /api/commerce/settings` — safety settings; this MVP still enforces Recommend mode.
 

@@ -395,6 +395,14 @@ def commerce_recommendation(recommendation_id):
     return jsonify({"result": result})
 
 
+@app.route("/api/commerce/recommendations/<recommendation_id>/explain", methods=["GET"])
+def commerce_recommendation_explain(recommendation_id):
+    try:
+        return jsonify({"result": commerce_agent.explain_recommendation(recommendation_id)})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
 @app.route("/api/commerce/recommendations/<recommendation_id>/approve", methods=["POST"])
 def commerce_approve(recommendation_id):
     body = request.get_json(silent=True) or {}
@@ -404,10 +412,44 @@ def commerce_approve(recommendation_id):
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/api/commerce/recommendations/bulk-approve", methods=["POST"])
+def commerce_bulk_approve():
+    body = request.get_json(silent=True) or {}
+    recommendation_ids = body.get("recommendationIds") or body.get("recommendation_ids") or []
+    if not isinstance(recommendation_ids, list):
+        return jsonify({"error": "recommendationIds must be an array."}), 400
+    try:
+        return jsonify({"result": commerce_agent.bulk_approve(recommendation_ids)})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/commerce/recommendations/<recommendation_id>/<decision>", methods=["POST"])
+def commerce_recommendation_decision(recommendation_id, decision):
+    status = {"reject": "Rejected", "skip": "Skipped"}.get(str(decision).lower())
+    if not status:
+        return jsonify({"error": "Decision must be reject or skip."}), 400
+    try:
+        return jsonify({"result": commerce_agent.set_recommendation_status(recommendation_id, status)})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/commerce/actions/<action_id>/apply", methods=["POST"])
 def commerce_apply(action_id):
     try:
         return jsonify({"result": commerce_agent.apply_action(action_id)})
+    except (EbayDraftError, ValueError) as exc:
+        body = {"error": getattr(exc, "safe_message", str(exc))}
+        if hasattr(exc, "to_public"):
+            body["provider_errors"] = [exc.to_public()]
+        return jsonify(body), getattr(exc, "status_code", 400)
+
+
+@app.route("/api/commerce/actions/<action_id>/rollback", methods=["POST"])
+def commerce_rollback(action_id):
+    try:
+        return jsonify({"result": commerce_agent.rollback_action(action_id)})
     except (EbayDraftError, ValueError) as exc:
         body = {"error": getattr(exc, "safe_message", str(exc))}
         if hasattr(exc, "to_public"):
