@@ -442,6 +442,10 @@ def _price_float(value: Any) -> float:
         return 0.0
 
 
+def _same_price(current: float, proposed: float) -> bool:
+    return abs(current - proposed) < 0.01
+
+
 def _title_candidate(item: dict[str, Any]) -> str:
     """Build a conservative, category-aware title from confirmed listing fields."""
     current = str(item.get("title") or "").strip()
@@ -500,7 +504,7 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     demand = demand_score(item)
     evidence = evidence_for_listing(item)
     recommended_price = _price_float(sold.get("recommendedPrice"))
-    if recommended_price > 0 and price > 0 and sold.get("pricingSource") != "seller_price_fallback" and abs(float(sold.get("recommendedChangePct") or 0)) >= 5:
+    if recommended_price > 0 and price > 0 and sold.get("pricingSource") != "seller_price_fallback" and abs(float(sold.get("recommendedChangePct") or 0)) >= 5 and not _same_price(price, recommended_price):
         proposed["price"] = recommended_price
         findings.append({"field": "price", "severity": "medium", "message": f"Pricing signal ({sold.get('pricingSource')}) suggests ${recommended_price:.2f}; seller approval required."})
     elif recommended_price > 0 and price <= 0:
@@ -560,6 +564,8 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
     recommendation = get_recommendation(recommendation_id)
     if not recommendation:
         raise ValueError("Recommendation not found.")
+    if recommendation.get("risk") == "high":
+        raise ValueError("High-risk recommendations require seller review and cannot be approved in this step.")
     changes = approved if approved is not None else recommendation["proposed"]
     if not isinstance(changes, dict) or not changes:
         raise ValueError("At least one approved field is required.")
