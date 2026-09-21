@@ -88,6 +88,9 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
 .filter-grid select, .pilot-size select { width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 8px; }
 .pilot-toolbar, .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .workflow-note { margin-top: 10px; }
+.queue-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+.queue-pagination button { min-height: 38px; padding: 7px 10px; }
+.queue-pagination-bottom { margin: 14px 0 0; padding-top: 14px; border-top: 1px solid var(--line); }
 .recommendation-card { border-top: 1px solid var(--line); padding: 14px 0; }
 .recommendation-card:first-of-type { border-top: 0; padding-top: 0; }
 .recommendation-card p { color: #475569; font-size: 14px; }
@@ -137,6 +140,7 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
     .explanation { position: static; }
     .filter-grid, .advisory-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .pilot-toolbar, .section-head { display: block; }
+    .queue-pagination { justify-content: flex-start; }
     .recommendation-title { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
     .pilot-select { grid-column: 1 / -1; }
     .pilot-select { margin-bottom: 8px; }

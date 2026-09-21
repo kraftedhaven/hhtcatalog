@@ -11,8 +11,9 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -38,6 +39,8 @@ logger = logging.getLogger(__name__)
 DB_PATH = os.environ.get("COMMERCE_AGENT_DB", "commerce_agent.sqlite3")
 MAX_TITLE_LENGTH = 80
 EDITABLE_FIELDS = {"title", "price", "cid", "desc", "cat", "cnote", "notes", "pic", "brand", "size", "color", "dept", "type", "model", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
+ENRICHMENT_PAGE_SIZE = 25
+ENRICHMENT_CHUNK_SIZE = 20
 
 
 def utc_now() -> str:
@@ -147,6 +150,13 @@ def init_db() -> None:
                     progress INTEGER NOT NULL DEFAULT 0, result_json TEXT NOT NULL DEFAULT '{}',
                     error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS enrichment_checkpoints (
+                    id BIGSERIAL PRIMARY KEY, listing_row_id BIGINT NOT NULL UNIQUE REFERENCES listings(id),
+                    listing_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                    enriched_at TEXT, last_error TEXT NOT NULL DEFAULT '', details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS enrichment_checkpoints_status_idx ON enrichment_checkpoints(status, updated_at);
                 INSERT INTO settings(id) VALUES(1) ON CONFLICT (id) DO NOTHING
                 """
             )
@@ -185,6 +195,13 @@ def init_db() -> None:
                 progress INTEGER NOT NULL DEFAULT 0, result_json TEXT NOT NULL DEFAULT '{}',
                 error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS enrichment_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, listing_row_id INTEGER NOT NULL UNIQUE REFERENCES listings(id),
+                listing_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                enriched_at TEXT, last_error TEXT NOT NULL DEFAULT '', details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS enrichment_checkpoints_status_idx ON enrichment_checkpoints(status, updated_at);
             INSERT OR IGNORE INTO settings(id) VALUES (1);
             """
             )
@@ -410,6 +427,96 @@ def start_enrichment_job(listing_ids: list[str]) -> dict[str, Any]:
     return _start_background_job("enrichment", {"listingIds": requested})
 
 
+def _positive_int(value: Any, default: int, maximum: int) -> int:
+    try:
+        return max(1, min(int(value), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def _enrichment_chunk_size() -> int:
+    return _positive_int(os.environ.get("ENRICHMENT_CHUNK_SIZE"), ENRICHMENT_CHUNK_SIZE, ENRICHMENT_CHUNK_SIZE)
+
+
+def _enrichment_rate_limit_seconds() -> float:
+    try:
+        return max(0.0, min(float(os.environ.get("ENRICHMENT_RATE_LIMIT_SECONDS", "0.35")), 10.0))
+    except (TypeError, ValueError):
+        return 0.35
+
+
+def _checkpoint_counts(db: _Database) -> dict[str, int]:
+    rows = db.execute("SELECT status, COUNT(*) AS count FROM enrichment_checkpoints GROUP BY status").fetchall()
+    counts = {"pending": 0, "processing": 0, "processed": 0, "failed": 0}
+    for row in rows:
+        counts[str(row["status"])] = int(row["count"])
+    counts["total"] = sum(counts.values())
+    return counts
+
+
+def _seed_enrichment_checkpoints() -> dict[str, int]:
+    """Create durable local checkpoints for the current active catalog only."""
+    init_db()
+    now = utc_now()
+    seeded = 0
+    with connect() as db:
+        rows = db.execute("SELECT * FROM listings WHERE marketplace=?", (_marketplace(),)).fetchall()
+        for row in rows:
+            item = _row_listing(row)
+            if str(item.get("status") or "active").lower() != "active":
+                continue
+            listing_id = str(item.get("listingId") or "").strip()
+            if not listing_id:
+                continue
+            already_enriched = str(item.get("source") or "") == "trading_get_item" and bool(item.get("attributeEvidence"))
+            checkpoint_status = "processed" if already_enriched else "pending"
+            enriched_at = str(item.get("enrichedAt") or now) if already_enriched else None
+            inserted = db.execute(
+                "INSERT INTO enrichment_checkpoints(listing_row_id,listing_id,status,attempts,enriched_at,last_error,details_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(listing_row_id) DO NOTHING",
+                (row["id"], listing_id, checkpoint_status, 0, enriched_at, "", "{}", now, now),
+            )
+            if getattr(inserted, "rowcount", 1) == 1:
+                seeded += 1
+        counts = _checkpoint_counts(db)
+    return {"seeded": seeded, **counts}
+
+
+def _requeue_stale_enrichment_work() -> None:
+    """Release only clearly abandoned work; active chunks are left untouched."""
+    stale_seconds = _positive_int(os.environ.get("ENRICHMENT_STALE_SECONDS"), 900, 86_400)
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=stale_seconds)).isoformat()
+    now = utc_now()
+    with connect() as db:
+        db.execute(
+            "UPDATE enrichment_checkpoints SET status='pending', updated_at=? WHERE status='processing' AND updated_at<?",
+            (now, cutoff),
+        )
+        db.execute(
+            "UPDATE commerce_jobs SET status='queued', updated_at=? WHERE kind='full_enrichment' AND status='running' AND updated_at<?",
+            (now, cutoff),
+        )
+
+
+def start_full_catalog_enrichment_job(resume_failed: bool = False) -> dict[str, Any]:
+    """Queue resumable 20-item GetItem enrichment with no eBay mutation path."""
+    seeded = _seed_enrichment_checkpoints()
+    _requeue_stale_enrichment_work()
+    with connect() as db:
+        if resume_failed:
+            now = utc_now()
+            db.execute("UPDATE enrichment_checkpoints SET status='pending', last_error='', updated_at=? WHERE status='failed'", (now,))
+            seeded = _checkpoint_counts(db)
+            seeded["resumedFailed"] = True
+        running = db.execute("SELECT * FROM commerce_jobs WHERE kind='full_enrichment' AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1").fetchone()
+        if running:
+            if running["status"] == "queued":
+                threading.Thread(target=_run_until_terminal, args=(running["id"],), daemon=True).start()
+            return {"jobId": running["id"], "status": running["status"], "kind": "full_enrichment", "readOnly": True, "checkpointSummary": seeded}
+    started = _start_background_job("full_enrichment", {"chunkSize": _enrichment_chunk_size(), "resumeFailed": bool(resume_failed)})
+    started["checkpointSummary"] = seeded
+    return started
+
+
 def start_audit_job() -> dict[str, Any]:
     return _start_background_job("audit", {})
 
@@ -423,9 +530,23 @@ def _start_background_job(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
             "INSERT INTO commerce_jobs(id,kind,status,progress,result_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
             (job_id, kind, "queued", 0, _json(payload), "", now, now),
         )
-    thread = threading.Thread(target=run_job, args=(job_id,), daemon=True)
+    target = _run_until_terminal if kind == "full_enrichment" else run_job
+    thread = threading.Thread(target=target, args=(job_id,), daemon=True)
     thread.start()
     return {"jobId": job_id, "status": "queued", "kind": kind, "readOnly": True}
+
+
+def _run_until_terminal(job_id: str) -> None:
+    """Keep a web-process fallback moving the persisted job between chunks.
+
+    The dedicated worker can claim the same job after a restart; compare-and-set
+    job claiming prevents duplicate eBay reads.
+    """
+    while True:
+        job = run_job(job_id)
+        if not job or job.get("status") in {"completed", "failed"}:
+            return
+        time.sleep(0.1)
 
 
 def active_import_job(job_id: str) -> dict[str, Any] | None:
@@ -461,6 +582,13 @@ def run_job(job_id: str) -> dict[str, Any] | None:
             result = import_active_listings()
         elif kind == "enrichment":
             result = enrich_listings(payload.get("listingIds", []))
+        elif kind == "full_enrichment":
+            result = _run_full_enrichment_chunk(job_id, _positive_int(payload.get("chunkSize"), _enrichment_chunk_size(), ENRICHMENT_CHUNK_SIZE))
+            if not result["terminal"]:
+                _update_job(job_id, "queued", result["progress"], result, "")
+                return active_import_job(job_id)
+            audited = audit_all()
+            result["auditCount"] = audited["count"]
         elif kind == "audit":
             audited = audit_all()
             result = {"count": audited["count"], "readOnly": True}
@@ -487,6 +615,75 @@ def _update_job(job_id: str, status: str, progress: int, result: dict[str, Any],
         db.execute("UPDATE commerce_jobs SET status=?, progress=?, result_json=?, error=?, updated_at=? WHERE id=?", (status, progress, _json(result), error, utc_now(), job_id))
 
 
+def _claim_enrichment_chunk(chunk_size: int) -> list[dict[str, Any]]:
+    """Claim up to 20 local checkpoints. The claim never calls eBay."""
+    now = utc_now()
+    with connect() as db:
+        rows = db.execute(
+            "SELECT c.*, l.data_json FROM enrichment_checkpoints c JOIN listings l ON l.id=c.listing_row_id WHERE c.status='pending' ORDER BY c.created_at ASC LIMIT ?",
+            (chunk_size,),
+        ).fetchall()
+        claimed: list[dict[str, Any]] = []
+        for row in rows:
+            item = _decode(row["data_json"], {})
+            if str(item.get("status") or "active").lower() != "active":
+                db.execute("UPDATE enrichment_checkpoints SET status='failed', last_error=?, updated_at=? WHERE id=?", ("Listing is no longer active in the local catalog.", now, row["id"]))
+                continue
+            updated = db.execute("UPDATE enrichment_checkpoints SET status='processing', attempts=attempts+1, updated_at=? WHERE id=? AND status='pending'", (now, row["id"]))
+            if getattr(updated, "rowcount", 1) == 1:
+                claimed.append({"id": row["id"], "listingId": row["listing_id"], "listingRowId": row["listing_row_id"]})
+    return claimed
+
+
+def _set_enrichment_checkpoint(checkpoint_id: Any, status: str, record: dict[str, Any] | None = None, error: str = "") -> None:
+    now = utc_now()
+    with connect() as db:
+        db.execute(
+            "UPDATE enrichment_checkpoints SET status=?, enriched_at=?, last_error=?, details_json=?, updated_at=? WHERE id=?",
+            (status, now if status == "processed" else None, error[:240], _json(record or {}), now, checkpoint_id),
+        )
+
+
+def _run_full_enrichment_chunk(job_id: str, chunk_size: int) -> dict[str, Any]:
+    """Run one safely bounded read-only enrichment chunk and persist outcomes."""
+    claimed = _claim_enrichment_chunk(chunk_size)
+    rate_limit = _enrichment_rate_limit_seconds()
+    processed = 0
+    failed = 0
+    for checkpoint in claimed:
+        try:
+            result = enrich_listings([checkpoint["listingId"]])
+            if result.get("updated"):
+                record = (result.get("records") or [{}])[0]
+                _set_enrichment_checkpoint(checkpoint["id"], "processed", record)
+                processed += 1
+            else:
+                issue = (result.get("errors") or [{}])[0]
+                _set_enrichment_checkpoint(checkpoint["id"], "failed", error=str(issue.get("error") or "eBay returned no enrichment record."))
+                failed += 1
+        except Exception:
+            logger.exception("Full enrichment failed for listing %s", checkpoint["listingId"])
+            _set_enrichment_checkpoint(checkpoint["id"], "failed", error="Read-only listing enrichment failed.")
+            failed += 1
+        if rate_limit:
+            time.sleep(rate_limit)
+    with connect() as db:
+        counts = _checkpoint_counts(db)
+    terminal = counts["pending"] == 0 and counts["processing"] == 0
+    completed = counts["processed"] + counts["failed"]
+    progress = 100 if terminal else max(1, int((completed / counts["total"]) * 100)) if counts["total"] else 100
+    return {
+        "jobId": job_id,
+        "chunkSize": chunk_size,
+        "chunkProcessed": processed,
+        "chunkFailed": failed,
+        "terminal": terminal,
+        "progress": progress,
+        "checkpoints": counts,
+        "readOnly": True,
+    }
+
+
 def count_listings() -> int:
     init_db()
     with connect() as db:
@@ -510,6 +707,48 @@ def list_listings(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]
     if status:
         items = [item for item in items if str(item.get("status") or "").lower() == status]
     return items
+
+
+def _fetch_listing_detail_with_backoff(listing_id: str, timeout: float) -> dict[str, Any]:
+    """Retry transient read-only GetItem failures with bounded exponential backoff."""
+    retries = _positive_int(os.environ.get("ENRICHMENT_MAX_RETRIES"), 3, 5)
+    base_delay = _enrichment_rate_limit_seconds()
+    for attempt in range(retries):
+        try:
+            return fetch_listing_detail(listing_id, timeout=timeout)
+        except EbayActiveError as exc:
+            retryable = exc.status_code in {429, 500, 502, 503, 504}
+            if not retryable or attempt + 1 >= retries:
+                raise
+            time.sleep(max(0.1, base_delay) * (2 ** attempt))
+    raise EbayActiveError(502, "eBay listing detail retrieval failed.")
+
+
+def enriched_catalog_page(page: int = 1, page_size: int = ENRICHMENT_PAGE_SIZE) -> dict[str, Any]:
+    """Return only successfully enriched records in stable 25-item review pages."""
+    init_db()
+    page = _positive_int(page, 1, 100_000)
+    page_size = _positive_int(page_size, ENRICHMENT_PAGE_SIZE, ENRICHMENT_PAGE_SIZE)
+    offset = (page - 1) * page_size
+    with connect() as db:
+        total_row = db.execute("SELECT COUNT(*) AS count FROM enrichment_checkpoints WHERE status='processed'").fetchone()
+        total = int(total_row["count"])
+        rows = db.execute(
+            "SELECT l.*, c.status AS enrichment_status, c.attempts AS enrichment_attempts, c.enriched_at, c.last_error, c.details_json FROM enrichment_checkpoints c JOIN listings l ON l.id=c.listing_row_id WHERE c.status='processed' ORDER BY c.enriched_at DESC, l.id DESC LIMIT ? OFFSET ?",
+            (page_size, offset),
+        ).fetchall()
+    records = []
+    for row in rows:
+        item = _row_listing(row)
+        item["enrichment"] = {
+            "status": row["enrichment_status"],
+            "attempts": row["enrichment_attempts"],
+            "enrichedAt": row["enriched_at"],
+            "lastError": row["last_error"],
+            "details": _decode(row["details_json"], {}),
+        }
+        records.append(item)
+    return {"page": page, "pageSize": page_size, "total": total, "totalPages": max(1, (total + page_size - 1) // page_size), "items": records}
 
 
 def enrich_listings(listing_ids: list[str], timeout: float = 20.0) -> dict[str, Any]:
@@ -543,7 +782,7 @@ def enrich_listings(listing_ids: list[str], timeout: float = 20.0) -> dict[str, 
     with connect() as db:
         for listing_id in requested:
             try:
-                detail = fetch_listing_detail(listing_id, timeout=timeout)
+                detail = _fetch_listing_detail_with_backoff(listing_id, timeout=timeout)
                 row = db.execute("SELECT * FROM listings WHERE listing_id=? ORDER BY id DESC LIMIT 1", (listing_id,)).fetchone()
                 if not row:
                     errors.append({"listingId": listing_id, "error": "Listing is not present in the local imported catalog."})
@@ -570,6 +809,7 @@ def enrich_listings(listing_ids: list[str], timeout: float = 20.0) -> dict[str, 
                     "title": official_title,
                     "desc": official_description,
                     "itemSpecifics": detail.get("itemSpecifics", {}),
+                    "officialGetItem": detail,
                     "attributeEvidence": normalize_evidence(
                         normalized,
                         source="ebay_get_item",
@@ -577,6 +817,7 @@ def enrich_listings(listing_ids: list[str], timeout: float = 20.0) -> dict[str, 
                     ),
                     "watchCount": detail.get("watchCount", 0),
                     "location": detail.get("location", ""),
+                    "enrichedAt": utc_now(),
                 })
                 db.execute("UPDATE listings SET data_json=?, source_updated_at=?, imported_at=? WHERE id=?", (_json(normalized), str(detail.get("sourceUpdatedAt", "")), utc_now(), row["id"]))
                 updated.append({"listingId": listing_id, "sku": normalized.get("sku", ""), "itemSpecifics": detail.get("itemSpecifics", {}), "category": normalized.get("cat", ""), "source": "trading_get_item"})
@@ -713,6 +954,25 @@ def recommendations(status: str = "") -> list[dict[str, Any]]:
     query += " ORDER BY score ASC, created_at DESC"
     with connect() as db:
         return [_recommendation(row) for row in db.execute(query, params).fetchall()]
+
+
+def recommendations_page(status: str = "", page: int = 1, page_size: int = ENRICHMENT_PAGE_SIZE) -> dict[str, Any]:
+    """Return a stable small review page instead of an unbounded queue payload."""
+    init_db()
+    page = _positive_int(page, 1, 100_000)
+    page_size = _positive_int(page_size, ENRICHMENT_PAGE_SIZE, ENRICHMENT_PAGE_SIZE)
+    where = ""
+    params: tuple[Any, ...] = ()
+    if status:
+        where = " WHERE r.status=?"
+        params = (status,)
+    with connect() as db:
+        total_row = db.execute(f"SELECT COUNT(*) AS count FROM recommendations r{where}", params).fetchone()
+        total = int(total_row["count"])
+        query = "SELECT r.*, (SELECT a.id FROM actions a WHERE a.recommendation_id=r.id ORDER BY a.created_at DESC LIMIT 1) AS action_id FROM recommendations r"
+        query += where + " ORDER BY r.score ASC, r.created_at DESC LIMIT ? OFFSET ?"
+        rows = db.execute(query, params + (page_size, (page - 1) * page_size)).fetchall()
+    return {"page": page, "pageSize": page_size, "total": total, "totalPages": max(1, (total + page_size - 1) // page_size), "items": [_recommendation(row) for row in rows]}
 
 
 def get_recommendation(recommendation_id: str) -> dict[str, Any] | None:

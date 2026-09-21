@@ -8,10 +8,11 @@
         commerceHistory,
         commerceImport,
         commerceJob,
-        commerceRecommendations,
+        commerceRecommendationsPage,
         commerceStartAudit,
         commerceStartActiveImport,
         commerceStartEnrichment,
+        commerceStartFullEnrichment,
         downloadJSON,
     } from "$lib/api";
 
@@ -36,6 +37,7 @@
 
     const LISTING_FIELD_MAP = { material: "mat" };
     const PILOT_SIZES = Array.from({ length: 11 }, (_, index) => String(index + 10));
+    const QUEUE_PAGE_SIZE = 25;
 
     let dashboard = null;
     let recommendations = [];
@@ -44,6 +46,8 @@
     let message = "";
     let error = "";
     let selected = null;
+    let queuePage = 1;
+    let queueMeta = { page: 1, pageSize: QUEUE_PAGE_SIZE, total: 0, totalPages: 1 };
     let statusFilter = "";
     let classificationFilter = "";
     let riskFilter = "";
@@ -217,17 +221,43 @@
         loading = true;
         error = "";
         try {
-            [dashboard, recommendations, history] = await Promise.all([
+            const requestedPage = Math.max(1, Number(options.page ?? queuePage) || 1);
+            const [nextDashboard, nextQueue, nextHistory] = await Promise.all([
                 commerceDashboard(),
-                commerceRecommendations(),
+                commerceRecommendationsPage(statusFilter, requestedPage, QUEUE_PAGE_SIZE),
                 commerceHistory(),
             ]);
+            dashboard = nextDashboard;
+            queueMeta = nextQueue;
+            queuePage = nextQueue.page;
+            recommendations = nextQueue.items || [];
+            history = nextHistory;
+            selectedIds = selectedIds.filter((id) =>
+                recommendations.some((entry) => entry.recommendationId === id),
+            );
         } catch (err) {
             error = err.message || String(err);
             if (options.throwOnError) throw err;
         } finally {
             loading = false;
         }
+    }
+
+    async function setQueuePage(page) {
+        const nextPage = Math.min(
+            Math.max(1, Number(page) || 1),
+            queueMeta.totalPages || 1,
+        );
+        if (nextPage === queuePage && recommendations.length) return;
+        selected = null;
+        selectedIds = [];
+        await refresh({ page: nextPage });
+    }
+
+    async function refreshForStatus() {
+        selected = null;
+        selectedIds = [];
+        await refresh({ page: 1 });
     }
 
     async function waitForJob(jobId, inProgressMessage) {
@@ -307,6 +337,28 @@
             const audited = await auditInBackground();
             message = `Read-only enrichment completed for ${enriched.updated || 0} of ${enriched.requested || listingIds.length} selected listing${listingIds.length === 1 ? "" : "s"}; refreshed ${audited.count || 0} recommendations.`;
             await refresh();
+        } catch (err) {
+            error = err.message || String(err);
+        } finally {
+            loading = false;
+        }
+    }
+
+    async function enrichFullCatalog(resumeFailed = false) {
+        loading = true;
+        error = "";
+        message = resumeFailed
+            ? "Resuming failed read-only eBay detail checks in 20-listing chunks..."
+            : "Starting resumable read-only enrichment for active eBay listings in 20-listing chunks...";
+        try {
+            const started = await commerceStartFullEnrichment(resumeFailed);
+            const result = await waitForJob(
+                started.jobId,
+                "Fetching official eBay details with saved checkpoints. No eBay changes are being made.",
+            );
+            const checkpoints = result.checkpoints || {};
+            message = `Read-only enrichment completed: ${checkpoints.processed || 0} processed, ${checkpoints.failed || 0} failed. The approval queue was refreshed without changing eBay.`;
+            await refresh({ page: 1 });
         } catch (err) {
             error = err.message || String(err);
         } finally {
@@ -479,13 +531,19 @@
         <button disabled={loading} on:click={importAndAudit}
             >Import API Inventory</button
         >
+        <button disabled={loading} on:click={() => enrichFullCatalog(false)}
+            >Enrich active catalog (read-only)</button
+        >
+        <button disabled={loading} on:click={() => enrichFullCatalog(true)}
+            >Resume failed enrichment</button
+        >
         <button disabled={loading} on:click={refresh}>Refresh Queue</button>
     </div>
     <div class="panel nested-panel filters-panel">
         <div class="filter-grid">
             <label>
                 <span>Status</span>
-                <select bind:value={statusFilter} aria-label="Filter by status">
+                <select bind:value={statusFilter} aria-label="Filter by status" on:change={refreshForStatus}>
                     <option value="">All statuses</option>
                     <option value="Pending">Pending</option>
                     <option value="Approved">Approved</option>
@@ -600,10 +658,19 @@
         <div class="panel nested-panel">
             <div class="section-head">
                 <h3 bind:this={queueHeading} tabindex="-1">Approval queue</h3>
-                <span>{visible.length} shown · {selectedIds.length} in pilot set</span>
+                <span>Page {queueMeta.page} of {queueMeta.totalPages} · {queueMeta.total} total · {visible.length} shown</span>
+            </div>
+            <div class="queue-pagination" aria-label="Approval queue pages">
+                <button disabled={loading || queuePage <= 1} on:click={() => setQueuePage(queuePage - 1)}
+                    >Previous</button
+                >
+                <span>Page {queueMeta.page} of {queueMeta.totalPages}</span>
+                <button disabled={loading || queuePage >= queueMeta.totalPages} on:click={() => setQueuePage(queuePage + 1)}
+                    >Next</button
+                >
             </div>
             {#if !visible.length}<p class="empty">
-                    Import your existing eBay listings to create the first audit queue.
+                    No recommendations match this page and filter combination.
                 </p>{/if}
             {#each visible as entry}
                 <article class="recommendation-card">
@@ -630,6 +697,7 @@
                         <span>SKU: {entry.listing.sku || "not provided"}</span>
                         <span>Offer: {entry.listing.offerId || "none"}</span>
                         <span>Listing: {entry.listing.listingId || "none"}</span>
+                        {#if entry.listing.enrichedAt}<span>Official details enriched: {new Date(entry.listing.enrichedAt).toLocaleDateString()}</span>{/if}
                         {#if entry.listing.ebayUrl}<a
                                 href={entry.listing.ebayUrl}
                                 target="_blank"
@@ -752,6 +820,17 @@
                     </div>
                 </article>
             {/each}
+            {#if visible.length}
+                <div class="queue-pagination queue-pagination-bottom" aria-label="Approval queue pages">
+                    <button disabled={loading || queuePage <= 1} on:click={() => setQueuePage(queuePage - 1)}
+                        >Previous</button
+                    >
+                    <span>Page {queueMeta.page} of {queueMeta.totalPages}</span>
+                    <button disabled={loading || queuePage >= queueMeta.totalPages} on:click={() => setQueuePage(queuePage + 1)}
+                        >Next</button
+                    >
+                </div>
+            {/if}
         </div>
         <aside class="panel nested-panel explanation">
             <h3>Pilot review</h3>
