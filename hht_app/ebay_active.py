@@ -122,7 +122,12 @@ def _item(node: ET.Element) -> dict[str, Any]:
         return _text(node, name)
     picture = [value.text or "" for value in node.findall(f".//{{{NS}}}PictureDetails/{{{NS}}}PictureURL")]
     current = node.find(f"{{{NS}}}SellingStatus/{{{NS}}}CurrentPrice")
-    return {"listingId": text("ItemID"), "sku": text("SKU") or text("CustomLabel"), "customLabel": text("CustomLabel"), "title": text("Title"), "desc": text("Description"), "price": float(_text(node.find(f"{{{NS}}}SellingStatus"), "CurrentPrice") or 0), "currency": current.attrib.get("currencyID", "USD") if current is not None else "USD", "quantity": int(text("Quantity") or 1), "quantitySold": int(_text(node.find(f"{{{NS}}}SellingStatus"), "QuantitySold") or 0), "cat": text("PrimaryCategoryID"), "condition": text("ConditionID"), "cnote": text("ConditionDescription"), "pic": " ".join(picture), "lifecycle": "Active listing", "source": "trading_active", "ebayUrl": f"https://www.ebay.com/itm/{text('ItemID')}" if text("ItemID") else ""}
+    primary_category = node.find(f"{{{NS}}}PrimaryCategory")
+    # GetMyeBaySelling returns ItemType.PrimaryCategory as a nested object.
+    # Retain the legacy flat fallback only for older or non-standard fixtures.
+    category_id = _text(primary_category, "CategoryID") or text("PrimaryCategoryID")
+    category_name = _text(primary_category, "CategoryName")
+    return {"listingId": text("ItemID"), "sku": text("SKU") or text("CustomLabel"), "customLabel": text("CustomLabel"), "title": text("Title"), "desc": text("Description"), "price": float(_text(node.find(f"{{{NS}}}SellingStatus"), "CurrentPrice") or 0), "currency": current.attrib.get("currencyID", "USD") if current is not None else "USD", "quantity": int(text("Quantity") or 1), "quantitySold": int(_text(node.find(f"{{{NS}}}SellingStatus"), "QuantitySold") or 0), "cat": category_id, "categoryName": category_name, "condition": text("ConditionID"), "cnote": text("ConditionDescription"), "pic": " ".join(picture), "lifecycle": "Active listing", "source": "trading_active", "ebayUrl": f"https://www.ebay.com/itm/{text('ItemID')}" if text("ItemID") else ""}
 
 
 def _text(node: ET.Element | None, name: str) -> str:

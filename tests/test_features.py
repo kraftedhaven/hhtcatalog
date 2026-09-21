@@ -6,7 +6,7 @@ from io import BytesIO
 
 from hht_app.photo_quality import assess_image
 from hht_app.pricing_cache import clear, get, key, put
-from hht_app.ebay_active import fetch_listing_detail
+from hht_app.ebay_active import fetch_active_listings, fetch_listing_detail
 
 
 class FeatureTests(unittest.TestCase):
@@ -38,6 +38,19 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(result['itemSpecifics']['Brand'], 'Coach')
         self.assertEqual(result['itemSpecifics']['Material'], 'Leather')
         self.assertEqual(result['watchCount'], 4)
+
+    def test_active_list_parses_nested_primary_category(self):
+        xml = b'''<?xml version="1.0"?><GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents"><Ack>Success</Ack><ActiveList><ItemArray><Item><ItemID>456</ItemID><SKU>HAT-456</SKU><Title>Kids Baseball Hat</Title><PrimaryCategory><CategoryID>57884</CategoryID><CategoryName>Boys' Hats</CategoryName></PrimaryCategory><ConditionID>3000</ConditionID><SellingStatus><CurrentPrice currencyID="USD">14.99</CurrentPrice><QuantitySold>2</QuantitySold></SellingStatus><Quantity>1</Quantity></Item></ItemArray><PaginationResult><TotalNumberOfEntries>1</TotalNumberOfEntries><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult></ActiveList></GetMyeBaySellingResponse>'''
+
+        class Response:
+            status_code = 200
+            content = xml
+
+        with patch('hht_app.ebay_active.seller_access_token', return_value='token'), patch('hht_app.ebay_active.requests.post', return_value=Response()):
+            result = fetch_active_listings()
+        self.assertEqual(result['totalEntries'], 1)
+        self.assertEqual(result['items'][0]['cat'], '57884')
+        self.assertEqual(result['items'][0]['categoryName'], "Boys' Hats")
 
 
 if __name__ == "__main__":
