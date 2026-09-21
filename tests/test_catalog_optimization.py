@@ -24,6 +24,7 @@ class CatalogOptimizationTests(unittest.TestCase):
         ebay_taxonomy._cache.clear()
         ebay_taxonomy._tree_cache.clear()
         ebay_taxonomy._aspect_cache.clear()
+        ebay_taxonomy._aspect_metadata_cache.clear()
 
     def tearDown(self):
         os.environ.clear()
@@ -134,6 +135,45 @@ class CatalogOptimizationTests(unittest.TestCase):
         with mock.patch.object(ebay_taxonomy, "ebay_access_token", side_effect=ebay_taxonomy.EbayBrowseError(503, "configuration")):
             result = ebay_taxonomy.validate_listing({"cat": "57988"})
         self.assertEqual(result["status"], "not_configured")
+
+    def test_category_suggestions_are_simplified_for_the_editor(self):
+        os.environ["EBAY_TAXONOMY_ENABLED"] = "true"
+
+        def fake_get(url, **kwargs):
+            if "get_default_category_tree_id" in url:
+                return FakeResponse(payload={"categoryTreeId": "0"})
+            return FakeResponse(payload={"categorySuggestions": [{
+                "category": {"categoryId": "123", "categoryName": "Baseball Caps"},
+                "categoryTreeNodeAncestors": [
+                    {"categoryName": "Hats"}, {"categoryName": "Clothing, Shoes & Accessories"},
+                ],
+            }]})
+
+        with mock.patch.object(ebay_taxonomy, "ebay_access_token", return_value="token"), mock.patch.object(ebay_taxonomy.requests, "get", side_effect=fake_get):
+            result = ebay_taxonomy.suggest_category("kids baseball hat")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["suggestions"][0]["categoryId"], "123")
+        self.assertEqual(result["suggestions"][0]["categoryName"], "Baseball Caps")
+        self.assertIn("Hats", result["suggestions"][0]["path"])
+
+    def test_category_aspects_include_required_values_and_dynamic_specifics(self):
+        os.environ["EBAY_TAXONOMY_ENABLED"] = "true"
+
+        def fake_get(url, **kwargs):
+            if "get_default_category_tree_id" in url:
+                return FakeResponse(payload={"categoryTreeId": "0"})
+            return FakeResponse(payload={"aspects": [{
+                "localizedAspectName": "Hat Size",
+                "aspectConstraint": {"aspectRequired": True, "aspectUsage": "RECOMMENDED", "itemToAspectCardinality": "SINGLE"},
+                "aspectValues": [{"localizedValue": "One Size"}],
+            }]})
+
+        with mock.patch.object(ebay_taxonomy, "ebay_access_token", return_value="token"), mock.patch.object(ebay_taxonomy.requests, "get", side_effect=fake_get):
+            result = ebay_taxonomy.category_aspects("52365")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["requiredAspects"], ["Hat Size"])
+        self.assertTrue(result["fields"][0]["required"])
+        self.assertEqual(result["fields"][0]["values"], ["One Size"])
 
     def test_taxonomy_blocks_mutation_only_when_explicitly_enforced(self):
         os.environ["EBAY_TAXONOMY_ENFORCE"] = "true"

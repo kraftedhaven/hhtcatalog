@@ -53,6 +53,16 @@ test('applyClientItemRules keeps explicit ebay specifics while trimming title', 
     assert.equal(result.vin, 'Yes (pre-1999)');
 });
 
+test('client listing state preserves seller-entered SKU and dynamic category specifics', () => {
+    const result = normalizeClientItem({
+        title: 'Kids Hat', price: '14.00', cat: '52365', sku: 'HAT-001',
+        itemSpecifics: { 'Hat Size': 'One Size', Character: 'Mickey Mouse' },
+    });
+    assert.equal(result.sku, 'HAT-001');
+    assert.equal(result.quantity, '1');
+    assert.deepEqual(result.itemSpecifics, { 'Hat Size': 'One Size', Character: 'Mickey Mouse' });
+});
+
 test('category options expose restored ebay category coverage in the form', () => {
     const labelsById = new Map(CATEGORY_OPTIONS.map((option) => [option.value, option.label]));
     assert.equal(labelsById.get('15724'), "Women's Tops / Blouses / Sports Bras / Crop Tops");

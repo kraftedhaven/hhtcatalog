@@ -736,9 +736,10 @@ class MergePipelineTests(unittest.TestCase):
                 with mock.patch("hht_app.ebay_drafts.requests.request", side_effect=fake_request):
                     result = ebay_drafts.create_ebay_draft(item)
 
-        self.assertEqual(result["status"], "draft_created")
+        self.assertEqual(result["status"], "unpublished_offer_created")
         self.assertEqual(result["offerId"], "offer-123")
         self.assertFalse(result["published"])
+        self.assertFalse(result["sellerHubDraftVisible"])
         self.assertEqual(result["sku"], "LEVIS-123")
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][0], "PUT")
@@ -760,6 +761,30 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(response.get_json()["result"]["offerId"], "offer-1")
         self.assertFalse(response.get_json()["result"]["published"])
         create.assert_called_once()
+
+    def test_ebay_category_routes_return_editor_safe_metadata(self):
+        suggestions = {"status": "ok", "suggestions": [{"categoryId": "52365", "categoryName": "Baseball Caps", "path": "Clothing > Hats > Baseball Caps"}]}
+        aspects = {"status": "ok", "categoryId": "52365", "requiredAspects": ["Hat Size"], "fields": [{"name": "Hat Size", "required": True, "recommended": True, "values": ["One Size"]}]}
+        with mock.patch("app.suggest_category", return_value=suggestions) as suggest, mock.patch("app.category_aspects", return_value=aspects) as fields:
+            suggestion_response = self.client.get("/api/ebay/categories?q=kids%20hat")
+            aspects_response = self.client.get("/api/ebay/categories/52365/aspects")
+        self.assertEqual(suggestion_response.status_code, 200)
+        self.assertEqual(suggestion_response.get_json()["result"]["suggestions"][0]["categoryId"], "52365")
+        self.assertEqual(aspects_response.status_code, 200)
+        self.assertEqual(aspects_response.get_json()["result"]["requiredAspects"], ["Hat Size"])
+        suggest.assert_called_once_with("kids hat")
+        fields.assert_called_once_with("52365")
+
+    def test_inventory_offer_includes_category_specific_editor_fields(self):
+        payload = ebay_drafts._inventory_item_payload(
+            normalize_listing({
+                "title": "Kids Hat", "cat": "52365", "price": 14, "brand": "No Brand", "type": "Hat",
+                "itemSpecifics": {"Hat Size": "One Size", "Character": "Mickey Mouse"},
+            }),
+            1,
+        )
+        self.assertEqual(payload["product"]["aspects"]["Hat Size"], ["One Size"])
+        self.assertEqual(payload["product"]["aspects"]["Character"], ["Mickey Mouse"])
 
     def test_ebay_draft_missing_policy_config_fails_before_write(self):
         item = {"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}
@@ -1184,9 +1209,19 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(rows[0]["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"], "Draft")
         self.assertEqual(rows[0]["Custom label (SKU)"], "LEVIS-123")
         self.assertEqual(rows[0]["Category ID"], "57988")
-        self.assertEqual(rows[0]["Condition ID"], "3000")
+        self.assertEqual(rows[0]["Condition ID"], "USED")
         self.assertEqual(rows[0]["Format"], "FixedPrice")
         self.assertEqual(len(HEADERS), 35)
+
+    def test_draft_csv_uses_only_seller_hub_template_compatible_values(self):
+        text = export_ebay_draft_csv([{
+            "sku": "COACH-1", "title": "Coach Bag", "price": 99.99, "cat": "169291",
+            "cid": "4000", "pic": "[SELLER TO ADD IMAGE URLS]", "brand": "Coach", "type": "Handbag",
+        }])
+        row = next(csv.DictReader(io.StringIO(text)))
+        self.assertEqual(row["Condition ID"], "USED")
+        self.assertEqual(row["Item photo URL"], "")
+        self.assertEqual(row["UPC"], "")
 
     def test_export_draft_csv_endpoint_returns_11_column_template(self):
         response = self.client.post(
@@ -1197,6 +1232,10 @@ class MergePipelineTests(unittest.TestCase):
         rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
         self.assertEqual(rows[0], EBAY_DRAFT_COLUMNS)
         self.assertEqual(len(rows[1]), 11)
+
+    def test_normalize_listing_keeps_live_taxonomy_category_ids(self):
+        normalized = normalize_listing({"title": "Kids Baseball Hat", "cat": "52365", "brand": "No Brand", "type": "Hat"})
+        self.assertEqual(normalized["cat"], "52365")
 
     def test_multiple_rows_export(self):
         text = export_ebay_csv([

@@ -40,6 +40,22 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
 .field input, .field select, .field textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 10px; color: var(--ink); }
 .form { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 0 12px; }
 .wide { grid-column: 1 / -1; }
+.category-panel, .dynamic-aspects { margin: 2px 0 12px; border: 1px solid #b7cffb; border-radius: 10px; background: #f8fbff; padding: 12px; }
+.category-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
+.category-head strong { display: block; }
+.category-head p, .dynamic-aspects p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.category-head > span { border: 1px solid #b7cffb; border-radius: 999px; background: #eff6ff; color: #1e3a8a; padding: 4px 8px; font-size: 12px; font-weight: 800; white-space: nowrap; }
+.category-search { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; margin: 10px 0; }
+.category-search input { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 10px; }
+.category-message { margin: 0 0 8px; }
+.category-suggestions { display: grid; gap: 7px; }
+.category-suggestions button { min-height: 0; border-color: #b7cffb; text-align: left; }
+.category-suggestions button strong, .category-suggestions button span { display: block; }
+.category-suggestions button span { margin-top: 2px; color: var(--muted); font-size: 12px; font-weight: 500; white-space: normal; }
+.dynamic-aspects { border-color: #bbf7d0; background: #f0fdf4; }
+.dynamic-aspects h3 { margin: 0; font-size: 15px; }
+.aspect-grid { margin-top: 12px; }
+.required { color: var(--red) !important; font-weight: 900; }
 .help { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
@@ -132,6 +148,9 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
     .tabs button { padding: 8px 4px; font-size: 12px; }
     .panel { padding: 12px; }
     .form { grid-template-columns: 1fr; }
+    .category-head { display: block; }
+    .category-head > span { display: inline-block; margin-top: 8px; }
+    .category-search { grid-template-columns: 1fr; }
     .stats { grid-template-columns: 1fr; }
     .history-row { display: block; }
     .filter-grid, .advisory-grid, .pilot-summary-grid { grid-template-columns: 1fr; }

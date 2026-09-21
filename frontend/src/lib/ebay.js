@@ -1,13 +1,13 @@
 export const EMPTY_ITEM = {
-    title: '', price: '', cid: '3000', cnote: '', cat: '', brand: '',
+    sku: '', quantity: '1', upc: '', title: '', price: '', cid: '3000', cnote: '', cat: '', categoryName: '', brand: '',
     size: '', color: '', dept: '', type: '', style: '', mat: '', pat: '',
-    slv: '', nk: '', sea: 'All Seasons', occ: 'Casual', st: 'Regular',
+    model: '', theme: '', slv: '', nk: '', sea: 'All Seasons', occ: 'Casual', st: 'Regular',
     vin: 'No', desc: '', notes: '', madeIn: '', serialNumber: '',
-    measurements: '', pic: ''
+    measurements: '', pic: '', itemSpecifics: {}
 };
 
 export const CATEGORY_OPTIONS = [
-    { value: '', label: 'Needs seller review' },
+    { value: '', label: 'Search live eBay categories (hats, kids, accessories, etc.)' },
     { value: '15724', label: "Women's Tops / Blouses / Sports Bras / Crop Tops" },
     { value: '63861', label: "Women's Dresses" },
     { value: '63867', label: "Women's Jeans / Pants" },

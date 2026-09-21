@@ -82,7 +82,7 @@ def create_ebay_draft(item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SEC
     logger.info(f"[eBay Draft] Draft created successfully - OfferId: {offer_id}, Environment: {_environment()}, Marketplace: {_marketplace_id()}")
 
     return {
-        "status": "draft_created",
+        "status": "unpublished_offer_created",
         "provider": "ebay_inventory",
         "sku": sku,
         "offerId": offer_id,
@@ -90,6 +90,8 @@ def create_ebay_draft(item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SEC
         "published": False,
         "title": listing["title"],
         "price": round(price, 2),
+        "sellerHubDraftVisible": False,
+        "nextStep": "This is an unpublished Inventory API offer, not a Seller Hub Draft. Verify it here, then publish it from HHT when ready.",
         "warnings": _draft_warnings(listing),
     }
 
@@ -274,9 +276,19 @@ def _offer_payload(sku: str, listing: dict[str, Any], quantity: int, price: floa
 
 def _product_aspects(listing: dict[str, Any]) -> dict[str, list[str]]:
     aspects: dict[str, list[str]] = {}
+    explicit = listing.get("itemSpecifics") if isinstance(listing.get("itemSpecifics"), dict) else {}
+    for label, value in explicit.items():
+        cleaned_label = str(label or "").strip()[:80]
+        cleaned_value = _clean_aspect_value(value)
+        if cleaned_label and cleaned_value:
+            aspects[cleaned_label] = [cleaned_value]
     for label, key in EBAY_ITEM_SPECIFICS:
         value = _clean_aspect_value(listing.get(key))
-        if value:
+        if value and label not in aspects:
+            aspects[label] = [value]
+    for label, key in (("Model", "model"), ("Theme", "theme"), ("Country/Region of Manufacture", "madeIn"), ("Measurements", "measurements")):
+        value = _clean_aspect_value(listing.get(key))
+        if value and label not in aspects:
             aspects[label] = [value]
     return aspects
 

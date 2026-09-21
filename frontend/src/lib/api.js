@@ -114,6 +114,14 @@ export async function publishEbayOffer(offerId) {
     return body.result || body;
 }
 
+export function ebayCategorySuggestions(query) {
+    return commerceRequest(`/api/ebay/categories?q=${encodeURIComponent(query)}`);
+}
+
+export function ebayCategoryAspects(categoryId) {
+    return commerceRequest(`/api/ebay/categories/${encodeURIComponent(categoryId)}/aspects`);
+}
+
 async function commerceRequest(path, options = {}) {
     const res = await fetch(`${baseUrl()}${path}`, options);
     const body = await parseResponse(res);

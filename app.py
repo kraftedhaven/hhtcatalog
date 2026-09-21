@@ -7,6 +7,7 @@ from flask_cors import CORS
 
 from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, seller_access_token
 from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft, get_ebay_offer, publish_ebay_offer, update_ebay_offer
+from hht_app.ebay_taxonomy import category_aspects, suggest_category
 from hht_app import commerce_agent
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
 from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
@@ -174,6 +175,19 @@ def ebay_oauth_status():
     except EbayAuthError as exc:
         return jsonify({"configured": False, "provider_errors": [exc.to_public()]}), exc.status_code
     return jsonify({"configured": True, "provider": "ebay_oauth"})
+
+
+@app.route("/api/ebay/categories", methods=["GET"])
+def ebay_categories():
+    query = str(request.args.get("q") or "").strip()
+    if len(query) < 2:
+        return jsonify({"result": {"status": "missing", "suggestions": [], "message": "Enter at least two characters to search eBay categories."}})
+    return jsonify({"result": suggest_category(query)})
+
+
+@app.route("/api/ebay/categories/<category_id>/aspects", methods=["GET"])
+def ebay_category_aspects(category_id):
+    return jsonify({"result": category_aspects(category_id)})
 
 
 @app.route("/api/ebay/drafts", methods=["POST"])

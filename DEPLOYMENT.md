@@ -56,7 +56,7 @@ DATABASE_URL
 When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
 Official eBay Browse pricing is optional. When `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` are present, `/analyze` uses generated item keywords to fetch active eBay listings and labels the result `active_listing_estimate`. These are active listings, not sold comps. Without Browse access, the app keeps the vision provider's `ai_estimate`.
 Seller OAuth for future inventory/offer work uses `EBAY_REDIRECT_URI`, `EBAY_RUNAME`, `EBAY_REFRESH_TOKEN`, and optional `EBAY_AUTH_STATE`/`EBAY_USER_SCOPES`. `EBAY_REDIRECT_URI` is the public callback URL that eBay sends the browser back to. `EBAY_RUNAME` is the OAuth-enabled RuName from the eBay Developer portal, and it is the value sent to eBay as the OAuth `redirect_uri` parameter. Use `GET /api/ebay/oauth/start` to generate a consent URL and `GET` or `POST /api/ebay/oauth/callback` to exchange the returned code. The callback returns the refresh token once so it can be copied into `EBAY_REFRESH_TOKEN`; it does not call eBay publish endpoints.
-Direct eBay draft creation uses `POST /api/ebay/drafts` after an item has been reviewed. It creates or replaces the Inventory item and creates an unpublished Inventory offer using `EBAY_MERCHANT_LOCATION_KEY`, `EBAY_PAYMENT_POLICY_ID`, `EBAY_FULFILLMENT_POLICY_ID`, and `EBAY_RETURN_POLICY_ID`. It intentionally does not call `/publish`, so the app cannot create a live listing from this endpoint.
+`POST /api/ebay/drafts` is named for legacy compatibility, but it creates an **unpublished Inventory API offer**, not a Seller Hub Draft. It creates or replaces the Inventory item and creates an unpublished offer using `EBAY_MERCHANT_LOCATION_KEY`, `EBAY_PAYMENT_POLICY_ID`, `EBAY_FULFILLMENT_POLICY_ID`, and `EBAY_RETURN_POLICY_ID`. It intentionally does not call `/publish`, so the app cannot create a live listing from this endpoint. Unpublished Inventory API offers are verified and published from HHT by offer ID; they do not appear in Seller Hub’s **Drafts** folder.
 `ANALYZE_DEADLINE_SECONDS` and `PROVIDER_REQUEST_TIMEOUT_SECONDS` keep the synchronous `/analyze` call below Heroku's normal 30-second router limit while giving Groq enough time for multi-photo vision requests. Phone images are resized server-side before they are sent to a hosted provider.
 
 ## Commerce Agent MVP
@@ -145,7 +145,17 @@ Optional form field `tryAlternate=1` attempts one alternate hosted provider once
 }
 ```
 
-It returns an eBay Seller Hub fixed-price CSV using the exact 35-column header.
+It returns a legacy/File Exchange-style 35-column CSV. Use it only with a matching legacy listing template; it is not the same as the current Seller Hub **Create new drafts** template.
+
+### Seller Hub Draft CSV workflow
+
+`POST /export/draft-csv` returns the current compact Seller Hub draft-template shape. In the application, use **Download Seller Hub Draft CSV** and upload it through **Seller Hub → Reports → Uploads → Upload template**, after downloading the matching **Create new drafts** template for your selected category at least once.
+
+The generated file uses only the 11 columns eBay documents for the Drafts feed. Its rows set `Action` to `Draft`, preserve the selected numeric Category ID, use `NEW` or `USED` rather than API condition IDs, leave photo URL blank unless it is a public `http(s)` URL, and do not include a fake image URL placeholder. After upload, open the upload result file. Accepted rows appear in **Seller Hub → Listings → Drafts**; eBay notes that the feed can take up to roughly 15 minutes and that the result file is the authoritative record of rejected rows.
+
+### Category and field workflow
+
+The editor now provides a live **Find eBay categories** picker. Search specific terms such as `kids baseball hat`, `women's belt`, or `Coach crossbody`. The Taxonomy API returns eBay leaf categories; selecting one retains its actual ID rather than limiting the record to the original clothing-and-bag quick menu. It then loads eBay’s current required and recommended category-specific item fields under **Current eBay fields**. Enter only seller-confirmed facts; those field values are sent as Inventory API product aspects.
 
 ## Migration Note
 

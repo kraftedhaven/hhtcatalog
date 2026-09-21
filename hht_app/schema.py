@@ -47,7 +47,7 @@ EBAY_DRAFT_COLUMNS = [
 ]
 
 SCHEMA_KEYS = [
-    "title", "price", "cid", "cnote", "cat", "brand", "size", "color",
+    "sku", "title", "price", "cid", "cnote", "cat", "categoryName", "brand", "size", "color",
     "dept", "type", "model", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ",
     "st", "vin", "desc", "notes", "madeIn", "serialNumber", "measurements", "pic",
 ]
@@ -177,6 +177,9 @@ def normalize_listing(raw: dict[str, Any] | None) -> dict[str, Any]:
         "serialNumber": serial,
         "measurements": _text(data.get("measurements")),
         "pic": _text(data.get("pic")),
+        "sku": _text(data.get("sku") or data.get("customLabel")),
+        "categoryName": _text(data.get("categoryName")),
+        "itemSpecifics": _normalize_item_specifics(data.get("itemSpecifics")),
     }
     result["desc"] = _html_description(_text(data.get("desc")), result)
     if isinstance(data.get("attributeEvidence"), dict):
@@ -255,11 +258,11 @@ def build_ebay_draft_csv_row(item: dict[str, Any], sku: str = "") -> dict[str, A
         "Custom label (SKU)": _text(sku or item.get("sku") or item.get("customLabel")),
         "Category ID": _text(listing.get("cat")),
         "Title": _text(listing.get("title")),
-        "UPC": _text(item.get("upc")) or "Does not apply",
+        "UPC": _text(item.get("upc")),
         "Price": f"{price:.2f}" if price else "0.00",
         "Quantity": _text(item.get("quantity")) or "1",
-        "Item photo URL": _text(listing.get("pic")) or PIC_PLACEHOLDER,
-        "Condition ID": _text(listing.get("cid")),
+        "Item photo URL": _draft_image_urls(listing.get("pic")),
+        "Condition ID": _draft_condition(listing.get("cid")),
         "Description": _text(listing.get("desc")),
         "Format": "FixedPrice",
     }
@@ -280,6 +283,29 @@ def export_ebay_draft_csv(items: list[dict[str, Any]]) -> str:
     for item in items:
         writer.writerow(build_ebay_draft_csv_row(item))
     return output.getvalue()
+
+
+def _draft_image_urls(value: Any) -> str:
+    """Seller Hub accepts public URLs or blanks; application placeholders are invalid."""
+    urls = [part.strip() for part in re.split(r"[\s,]+", _text(value)) if part.strip().startswith(("https://", "http://"))]
+    return "|".join(urls[:24])
+
+
+def _draft_condition(condition_id: Any) -> str:
+    """Seller Hub's Create new drafts feed accepts NEW or USED, not API IDs."""
+    return "NEW" if _text(condition_id) in {"1000", "1500"} else "USED"
+
+
+def _normalize_item_specifics(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, str] = {}
+    for key, raw in value.items():
+        label = _text(key)[:80]
+        item_value = _text(raw)[:65]
+        if label and item_value and item_value.casefold() not in {"not visible", "n/a", "none"}:
+            cleaned[label] = item_value
+    return cleaned
 
 
 class _HtmlAwareWriter:
@@ -321,6 +347,12 @@ def json_loads(text: str) -> dict[str, Any]:
 def _normalize_category(value: Any, item_type: str) -> str:
     text = _text(value)
     if text in ALLOWED_CATEGORY_IDS:
+        return text
+    # A seller-selected Taxonomy API leaf category can be outside the original
+    # compact quick menu (for example hats, kids, or accessories). Preserve
+    # numeric IDs so Taxonomy validation and seller review—not a stale list—
+    # decide whether the category is suitable.
+    if re.fullmatch(r"\d{1,12}", text):
         return text
     mapped = CATEGORY_LOOKUP.get(_category_lookup_key(text))
     if mapped:

@@ -1,6 +1,6 @@
 <script>
     import "./app.css";
-    import { analyzeImages, createEbayDraft, downloadCSV, downloadDraftCSV, downloadJSON, getEbayOffer, publishEbayOffer, updateEbayOffer } from "$lib/api";
+    import { analyzeImages, createEbayDraft, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, getEbayOffer, publishEbayOffer, updateEbayOffer } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
 
@@ -31,6 +31,11 @@
     let offerAction = "";
     let restoreInput;
     let localPipeline = null;
+    let categoryQuery = "";
+    let categorySuggestions = [];
+    let categoryFields = [];
+    let categoryLoading = false;
+    let categoryNotice = "";
 
     $: titleLength = (item.title || "").length;
     $: queueTotal = queue.reduce((sum, next) => sum + (Number.parseFloat(next.price) || 0), 0);
@@ -240,10 +245,7 @@
             const status = failure.status || failure.httpStatus;
             return `${failure.provider}: ${label}${status ? ` (${status})` : ""}`;
         });
-        const geminiHint = failures.some((failure) => failure.provider === "gemini")
-            ? " If Gemini is out of credits, remove GEMINI_API_KEY from Heroku Config Vars."
-            : "";
-        return `${err.message || "Analysis failed."} ${lines.join("; ")}. No demo data was shown.${geminiHint}`;
+        return `${err.message || "Analysis failed."} ${lines.join("; ")}. No demo data was shown.`;
     }
 
     function friendlyEbayError(err) {
@@ -268,6 +270,69 @@
 
     function applyClientRules(nextItem = item) {
         return applyClientItemRules(nextItem);
+    }
+
+    async function findCategories(query = categoryQuery || item.title || `${item.brand} ${item.type}`) {
+        const search = String(query || "").trim();
+        if (search.length < 2) {
+            categorySuggestions = [];
+            categoryNotice = "Enter at least two words or characters to search eBay categories.";
+            return;
+        }
+        categoryLoading = true;
+        categoryNotice = "Searching live eBay category suggestions...";
+        try {
+            const result = await ebayCategorySuggestions(search);
+            categorySuggestions = result.suggestions || [];
+            categoryNotice = result.message || (categorySuggestions.length ? "Choose the best matching eBay leaf category." : "No category suggestions found. Try a more specific item type.");
+        } catch (err) {
+            categorySuggestions = [];
+            categoryNotice = err.message || "eBay category suggestions are unavailable.";
+        } finally {
+            categoryLoading = false;
+        }
+    }
+
+    async function loadCategoryFields(categoryId = item.cat) {
+        const id = String(categoryId || "").trim();
+        if (!id) {
+            categoryFields = [];
+            return;
+        }
+        categoryLoading = true;
+        try {
+            const result = await ebayCategoryAspects(id);
+            categoryFields = result.fields || [];
+            categoryNotice = result.message || "";
+        } catch (err) {
+            categoryFields = [];
+            categoryNotice = err.message || "eBay category fields are unavailable.";
+        } finally {
+            categoryLoading = false;
+        }
+    }
+
+    async function chooseCategory(suggestion) {
+        item = applyClientRules({
+            ...item,
+            cat: suggestion.categoryId,
+            categoryName: suggestion.path || suggestion.categoryName,
+            itemSpecifics: { ...(item.itemSpecifics || {}) },
+        });
+        categoryQuery = suggestion.path || suggestion.categoryName;
+        categorySuggestions = [];
+        await loadCategoryFields(suggestion.categoryId);
+    }
+
+    function updateCategoryField(name, value) {
+        item = {
+            ...item,
+            itemSpecifics: { ...(item.itemSpecifics || {}), [name]: value },
+        };
+    }
+
+    function categoryFieldValue(name) {
+        return item.itemSpecifics?.[name] || "";
     }
 
     function reviewedCandidate(source = item) {
@@ -368,7 +433,7 @@
         try {
             const result = await createEbayDraft(reviewed);
             queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferId: result.offerId, ebaySku: result.sku, ebayDraftStatus: result.status } : entry);
-            status = `eBay API offer created for ${queued.title}: offer ${result.offerId}. Use the draft CSV for Seller Hub drafts, or publish this offer later after review.`;
+            status = `Unpublished eBay API offer created for ${queued.title}: offer ${result.offerId}. This is not a Seller Hub Draft, so it will not appear in Seller Hub Drafts. Verify it here, then publish it from HHT when ready.`;
         } catch (err) {
             error = friendlyEbayError(err);
         } finally {
@@ -554,15 +619,42 @@
         <section class="panel form">
             <label class="field wide"><span>Title <em>{titleLength}/80</em></span><input bind:value={item.title} maxlength="80" /></label>
             <label class="field"><span>Price</span><input bind:value={item.price} inputmode="decimal" /></label>
+            <label class="field"><span>SKU / Custom label</span><input bind:value={item.sku} placeholder="Optional unique item code" /></label>
+            <label class="field"><span>Quantity</span><input bind:value={item.quantity} inputmode="numeric" placeholder="1" /></label>
+            <label class="field"><span>UPC / GTIN</span><input bind:value={item.upc} placeholder="Leave blank if not available" /></label>
             <label class="field"><span>Condition ID (cid)</span><select bind:value={item.cid}><option value="1000">1000 New with Tags</option><option value="1500">1500 New without Tags</option><option value="3000">3000 Pre-Owned</option><option value="4000">4000 Very Good</option><option value="5000">5000 Good</option><option value="6000">6000 Acceptable</option></select></label>
-            <label class="field wide"><span>eBay Category (cat)</span><select bind:value={item.cat} on:change={() => item = applyClientRules(item)}>{#each CATEGORY_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
+            <div class="wide category-panel">
+                <div class="category-head">
+                    <div>
+                        <strong>eBay category and required fields</strong>
+                        <p>Search live eBay categories by item type; select a leaf category to load eBay’s current required and recommended item specifics.</p>
+                    </div>
+                    {#if item.cat}<span>Selected ID: {item.cat}</span>{/if}
+                </div>
+                <div class="category-search">
+                    <input bind:value={categoryQuery} placeholder="Search: kids hat, Coach bag, women’s sandals" on:keydown={(event) => event.key === "Enter" && (event.preventDefault(), findCategories())} />
+                    <button type="button" disabled={categoryLoading} on:click={() => findCategories()}>{categoryLoading ? "Searching..." : "Find eBay categories"}</button>
+                </div>
+                <label class="field"><span>Quick category menu</span><select bind:value={item.cat} on:change={() => { item = applyClientRules(item); loadCategoryFields(item.cat); }}>{#each CATEGORY_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
+                <label class="field"><span>Manual eBay category ID</span><input bind:value={item.cat} inputmode="numeric" placeholder="Use only a verified eBay leaf category ID" on:change={() => loadCategoryFields(item.cat)} /></label>
+                {#if categoryNotice}<p class="help category-message">{categoryNotice}</p>{/if}
+                {#if categorySuggestions.length}
+                    <div class="category-suggestions" aria-label="eBay category suggestions">
+                        {#each categorySuggestions as suggestion}
+                            <button type="button" on:click={() => chooseCategory(suggestion)}><strong>{suggestion.categoryName}</strong><span>{suggestion.path} · ID {suggestion.categoryId}</span></button>
+                        {/each}
+                    </div>
+                {/if}
+            </div>
             <label class="field wide"><span>Condition Note</span><input bind:value={item.cnote} /></label>
             <label class="field"><span>Brand</span><input bind:value={item.brand} /></label>
+            <label class="field"><span>Model</span><input bind:value={item.model} /></label>
             <label class="field"><span>Size</span><input bind:value={item.size} /></label>
             <label class="field"><span>Color</span><input bind:value={item.color} /></label>
             <label class="field"><span>Department</span><input bind:value={item.dept} /></label>
             <label class="field"><span>Type</span><input bind:value={item.type} on:change={() => item = applyClientRules(item)} /></label>
             <label class="field"><span>Style</span><input bind:value={item.style} /></label>
+            <label class="field"><span>Theme</span><input bind:value={item.theme} /></label>
             <label class="field"><span>Material</span><input bind:value={item.mat} /></label>
             <label class="field"><span>Pattern</span><input bind:value={item.pat} /></label>
             <label class="field"><span>Sleeve Length</span><input bind:value={item.slv} /></label>
@@ -577,6 +669,29 @@
             <label class="field wide"><span>PicURL</span><input bind:value={item.pic} placeholder="[SELLER TO ADD IMAGE URLS]" /></label>
             <label class="field wide"><span>Description HTML</span><textarea bind:value={item.desc} rows="8"></textarea></label>
             <label class="field wide"><span>Seller notes</span><textarea bind:value={item.notes} rows="4"></textarea></label>
+            {#if categoryFields.length}
+                <section class="wide dynamic-aspects" aria-label="Current eBay category-specific fields">
+                    <h3>Current eBay fields for {item.categoryName || `category ${item.cat}`}</h3>
+                    <p>Fields marked <b>Required</b> come directly from eBay’s Taxonomy API. Enter only facts you can confirm.</p>
+                    <div class="form aspect-grid">
+                        {#each categoryFields as field}
+                            <label class="field">
+                                <span>{field.name} {#if field.required}<em class="required">Required</em>{:else if field.recommended}<em>Recommended</em>{/if}</span>
+                                {#if field.values?.length && field.values.length <= 40}
+                                    <select value={categoryFieldValue(field.name)} on:change={(event) => updateCategoryField(field.name, event.currentTarget.value)}>
+                                        <option value="">Select or leave blank</option>
+                                        {#each field.values as value}<option value={value}>{value}</option>{/each}
+                                    </select>
+                                {:else}
+                                    <input value={categoryFieldValue(field.name)} on:input={(event) => updateCategoryField(field.name, event.currentTarget.value)} placeholder={field.multiSelect ? "Use a seller-confirmed value" : "Enter a seller-confirmed value"} />
+                                {/if}
+                            </label>
+                        {/each}
+                    </div>
+                </section>
+            {:else if item.cat}
+                <p class="help wide">Choose “Find eBay categories” or reselect the category to load eBay’s live required item specifics.</p>
+            {/if}
             <div class="actions wide">
                 <button type="button" on:click={() => item.desc = description(item)}>Generate description</button>
                 <button class="primary" type="button" on:click={addToQueue}>Add reviewed item to queue</button>
@@ -596,8 +711,8 @@
             {:else}
                 {#each queue as queued, index}
                     <div class="queue-row">
-                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayOfferId ? ` / eBay offer ${queued.ebayOfferId}` : ""}{queued.ebayListingId ? ` / live listing ${queued.ebayListingId}` : ""}</span></div>
-                        <button type="button" disabled={draftLoading === index} on:click={() => createDraft(index)}>{draftLoading === index ? "Creating..." : "Create API Offer"}</button>
+                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayOfferId ? ` / unpublished API offer ${queued.ebayOfferId}` : ""}{queued.ebayListingId ? ` / live listing ${queued.ebayListingId}` : ""}</span></div>
+                        <button type="button" disabled={draftLoading === index} on:click={() => createDraft(index)}>{draftLoading === index ? "Creating..." : "Create API Offer (not Seller Hub Draft)"}</button>
                         {#if queued.ebayOfferId && !queued.ebayListingId}
                             <button type="button" disabled={offerAction === `verify:${index}`} on:click={() => verifyOffer(index)}>{offerAction === `verify:${index}` ? "Checking..." : "Verify Offer"}</button>
                             <button type="button" disabled={offerAction === `update:${index}`} on:click={() => updateOffer(index)}>{offerAction === `update:${index}` ? "Updating..." : "Update Offer"}</button>
@@ -608,15 +723,20 @@
                     </div>
                 {/each}
                 <div class="actions">
-                    <button class="primary" on:click={exportQueue}>Download eBay CSV</button>
-                    <button on:click={exportDraftQueue}>Download Seller Hub Draft CSV</button>
+                    <button class="primary" on:click={exportDraftQueue}>Download Seller Hub Draft CSV</button>
+                    <button on:click={exportQueue}>Download legacy File Exchange CSV</button>
                     <button on:click={backupQueue}>Download JSON backup</button>
                     <button on:click={() => queue = []}>Clear queue</button>
                 </div>
             {/if}
             <input bind:this={restoreInput} class="hidden" type="file" accept="application/json" on:change={restoreBackup} />
             <button type="button" on:click={() => restoreInput.click()}>Restore JSON backup</button>
-            <p class="help">CSV export uses a PicURL placeholder unless you enter public image URLs. Local phone photos are not attached by CSV alone.</p>
+            <div class="notice warn">
+                <strong>Choose one eBay workflow</strong>
+                <p><b>Seller Hub Draft CSV</b> is the recommended file for <b>Seller Hub → Reports → Uploads → Create new drafts</b>. It creates visible Seller Hub Drafts; it uses only the template’s supported columns and leaves image URLs blank when photos are not public.</p>
+                <p><b>Create API Offer</b> creates an unpublished Inventory API offer, which does <em>not</em> appear in Seller Hub Drafts. Verify it in HHT and publish it from HHT only when ready.</p>
+                <p><b>Legacy File Exchange CSV</b> is for a matching legacy/File Exchange template only; do not upload it as a Seller Hub Draft template. Local phone photos must still be added in eBay or hosted at public URLs.</p>
+            </div>
         </section>
     {/if}
 
@@ -629,7 +749,7 @@
             <label class="field wide"><span>Shipping Profile</span><input bind:value={seller.shippingProfileName} /></label>
             <label class="field wide"><span>Return Profile</span><input bind:value={seller.returnProfileName} /></label>
             <label class="field"><span>Dispatch Days</span><input bind:value={seller.dispatchTimeMax} inputmode="numeric" /></label>
-            <p class="help wide">Hosted analysis uses Heroku Config Vars only: OPENROUTER_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY. Never paste keys into this page.</p>
+            <p class="help wide">Hosted analysis uses Heroku Config Vars only: GROQ_API_KEY, OPENROUTER_API_KEY, or NVIDIA_NIM_API_KEY. Never paste keys into this page.</p>
         </section>
     {/if}
 </div>
