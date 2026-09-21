@@ -155,8 +155,10 @@ class CatalogOptimizationActionabilityTests(unittest.TestCase):
         recommendation = commerce_agent.recommendations()[0]
         self.assertTrue(recommendation["proposed"])
         self.assertEqual(recommendation["risk"], "high")
-        with self.assertRaisesRegex(ValueError, "High-risk recommendations are review-only"):
-            commerce_agent.approve_recommendation(recommendation["recommendationId"])
+        for approved in (None, recommendation["proposed"]):
+            with self.subTest(approved=approved):
+                with self.assertRaisesRegex(ValueError, "High-risk recommendations are review-only"):
+                    commerce_agent.approve_recommendation(recommendation["recommendationId"], approved)
 
     def test_low_risk_proposal_can_be_approved_without_applying(self):
         self._insert_listing(
