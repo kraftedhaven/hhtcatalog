@@ -380,14 +380,18 @@ def _mark_inactive_active_import_records(active_skus: set[str]) -> int:
         rows = db.execute("SELECT id,sku,data_json FROM listings WHERE marketplace=?", (_marketplace(),)).fetchall()
         for row in rows:
             item = _decode(row["data_json"], {})
-            active_origin = str(item.get("activeSource") or item.get("source") or "")
-            if active_origin not in {"trading_active", "trading_get_item"} or str(row["sku"]) in active_skus:
+            if str(row["sku"]) in active_skus:
                 continue
+            active_origin = str(item.get("activeSource") or item.get("source") or "")
             if str(item.get("status") or "active").lower() != "active":
                 continue
             item["status"] = "inactive"
-            item["lifecycle"] = "Not returned by latest active eBay import"
-            item["inactiveReason"] = "Not returned by latest completed active listing refresh."
+            if active_origin in {"trading_active", "trading_get_item"}:
+                item["lifecycle"] = "Not returned by latest active eBay import"
+                item["inactiveReason"] = "Not returned by latest completed active listing refresh."
+            else:
+                item["lifecycle"] = "Legacy local record"
+                item["inactiveReason"] = "No active eBay listing was returned for this locally stored record."
             db.execute("UPDATE listings SET data_json=?, imported_at=? WHERE id=?", (_json(item), utc_now(), row["id"]))
             marked += 1
     return marked
