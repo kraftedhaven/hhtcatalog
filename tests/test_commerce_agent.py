@@ -137,6 +137,7 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(inventory_only["status"], "draft")
         self.assertEqual(active["ebayUrl"], "https://www.ebay.com/itm/L1")
 
+<<<<<<< HEAD
     def test_inventory_import_skips_inventory_only_records_by_default(self):
         responses = [
             {"inventoryItems": [{"sku": "INV-ONLY", "product": {"title": "Inventory Draft"}}]},
@@ -191,6 +192,19 @@ class CommerceAgentTests(unittest.TestCase):
             result = commerce_agent.apply_action(approved["actionId"])
         update.assert_called_once()
         self.assertEqual(result["status"], "Applied")
+=======
+    def test_pricing_always_returns_numeric_seller_fallback(self):
+        audit = commerce_agent.audit_listing({"title": "Used Coat", "brand": "Brand", "type": "Coat", "price": 42.0, "cat": "57988"})
+        self.assertEqual(audit["soldPricing"]["pricingSource"], "seller_price_fallback")
+        self.assertEqual(audit["soldPricing"]["recommendedPrice"], 42.0)
+
+    def test_active_price_is_not_labeled_sold(self):
+        from hht_app.market_metrics import sold_price_summary
+        result = sold_price_summary({"title": "Used Coat", "price": 42.0, "activeListingEstimate": {"sampleSize": 6, "medianActivePrice": 55.0, "lowActivePrice": 45.0, "highActivePrice": 70.0}})
+        self.assertEqual(result["pricingSource"], "active_comparable")
+        self.assertNotIn("sold", result["pricingSource"])
+        self.assertEqual(result["recommendedPrice"], 55.0)
+>>>>>>> eeed06fa7cec048409069a56ede856d0961027fa
 
 
 if __name__ == "__main__":

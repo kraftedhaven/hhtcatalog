@@ -26,7 +26,7 @@ except ImportError:  # Local SQLite fallback remains available without psycopg.
     dict_row = None
 
 from .ebay_auth import EbayAuthError, seller_access_token
-from .ebay_active import EbayActiveError, fetch_active_listings
+from .ebay_active import EbayActiveError, fetch_active_listings, fetch_listing_detail
 from .ebay_drafts import EbayDraftError, get_ebay_offer, update_ebay_offer
 from .schema import normalize_listing
 from .evidence import evidence_for_listing, evidence_summary
@@ -399,6 +399,48 @@ def list_listings(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]
     return items
 
 
+def enrich_listings(listing_ids: list[str], timeout: float = 20.0) -> dict[str, Any]:
+    """Refresh official eBay detail fields for selected listings only.
+
+    This is read-only against eBay. It updates the local normalized catalog and
+    never approves, applies, updates, or publishes an eBay listing.
+    """
+    requested = list(dict.fromkeys(str(value).strip() for value in listing_ids if str(value).strip()))
+    if not requested:
+        raise ValueError("At least one eBay listing ID is required.")
+    if len(requested) > 20:
+        raise ValueError("Pilot enrichment is limited to 20 listing IDs per request.")
+    init_db()
+    updated: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    specifics_map = {label.casefold(): key for label, key in (('Brand', 'brand'), ('Model', 'model'), ('Material', 'mat'), ('Made In', 'madeIn'), ('Country of Origin', 'madeIn'), ('Size', 'size'), ('Color', 'color'), ('Department', 'dept'), ('Type', 'type'), ('Style', 'style'), ('Theme', 'theme'), ('Pattern', 'pat'), ('Sleeve Length', 'slv'), ('Neckline', 'nk'), ('Season', 'sea'), ('Occasion', 'occ'), ('Size Type', 'st'), ('Vintage', 'vin'))}
+    with connect() as db:
+        for listing_id in requested:
+            try:
+                detail = fetch_listing_detail(listing_id, timeout=timeout)
+                row = db.execute("SELECT * FROM listings WHERE listing_id=? ORDER BY id DESC LIMIT 1", (listing_id,)).fetchone()
+                if not row:
+                    errors.append({"listingId": listing_id, "error": "Listing is not present in the local imported catalog."})
+                    continue
+                current = _row_listing(row)
+                raw = {**current, **{key: value for key, value in detail.items() if key not in {"itemSpecifics"}}, "listingId": listing_id}
+                for label, value in (detail.get("itemSpecifics") or {}).items():
+                    field = specifics_map.get(str(label).casefold())
+                    if field and value:
+                        raw[field] = value
+                raw["source"] = "trading_get_item"
+                normalized = normalize_listing(raw)
+                normalized.update({"listingId": listing_id, "offerId": current.get("offerId", ""), "sku": current.get("sku", ""), "marketplace": current.get("marketplace", _marketplace()), "ebayUrl": f"https://www.ebay.com/itm/{listing_id}", "source": "trading_get_item", "itemSpecifics": detail.get("itemSpecifics", {}), "watchCount": detail.get("watchCount", 0), "location": detail.get("location", "")})
+                db.execute("UPDATE listings SET data_json=?, source_updated_at=?, imported_at=? WHERE id=?", (_json(normalized), str(detail.get("sourceUpdatedAt", "")), utc_now(), row["id"]))
+                updated.append({"listingId": listing_id, "sku": normalized.get("sku", ""), "itemSpecifics": detail.get("itemSpecifics", {}), "category": normalized.get("cat", ""), "source": "trading_get_item"})
+            except EbayActiveError as exc:
+                errors.append({"listingId": listing_id, "error": exc.safe_message, "statusCode": exc.status_code})
+            except Exception:
+                logger.exception("eBay detail enrichment failed for listing %s", listing_id)
+                errors.append({"listingId": listing_id, "error": "Listing detail enrichment failed."})
+    return {"requested": len(requested), "updated": len(updated), "failed": len(errors), "records": updated, "errors": errors, "readOnly": True}
+
+
 def _price_float(value: Any) -> float:
     try:
         return float(value or 0)
@@ -471,8 +513,17 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
         findings.append({"field": "price", "severity": "medium", "message": f"Suggested price candidate: ${pricing['recommendedPrice']:.2f} from {pricing['pricingSource']}. Approval required before eBay update."})
     demand = demand_score(item)
     evidence = evidence_for_listing(item)
+<<<<<<< HEAD
     if findings and not proposed:
         proposed["notes"] = _review_note(item, findings, taxonomy, pricing)
+=======
+    recommended_price = _price_float(sold.get("recommendedPrice"))
+    if recommended_price > 0 and price > 0 and sold.get("pricingSource") != "seller_price_fallback" and abs(float(sold.get("recommendedChangePct") or 0)) >= 5:
+        proposed["price"] = recommended_price
+        findings.append({"field": "price", "severity": "medium", "message": f"Pricing signal ({sold.get('pricingSource')}) suggests ${recommended_price:.2f}; seller approval required."})
+    elif recommended_price > 0 and price <= 0:
+        findings.append({"field": "price", "severity": "high", "message": f"Numeric fallback price ${recommended_price:.2f} is available, but seller must confirm the missing current price."})
+>>>>>>> eeed06fa7cec048409069a56ede856d0961027fa
     score = max(0, min(100, 100 - sum(18 if f["severity"] == "high" else 10 for f in findings)))
     classification = "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs Optimization" if score >= 50 else "High Priority"
     if any(f["severity"] == "high" for f in findings):
