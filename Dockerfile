@@ -29,6 +29,9 @@ COPY hht_app ./hht_app
 COPY backend ./backend
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
+RUN ! grep -RIn -E '^(<<<<<<<|=======|>>>>>>>)' --include='*.py' . \
+    && python -m py_compile app.py worker.py hht_app/*.py
+
 RUN mkdir -p /data/uploads
 
 EXPOSE 8080

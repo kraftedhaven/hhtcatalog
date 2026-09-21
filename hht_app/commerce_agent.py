@@ -517,17 +517,8 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
         findings.append({"field": "price", "severity": "medium", "message": f"Suggested price candidate: ${pricing['recommendedPrice']:.2f} from {pricing['pricingSource']}. Approval required before eBay update."})
     demand = demand_score(item)
     evidence = evidence_for_listing(item)
-<<<<<<< HEAD
     if findings and not proposed:
         proposed["notes"] = _review_note(item, findings, taxonomy, pricing)
-=======
-    recommended_price = _price_float(sold.get("recommendedPrice"))
-    if recommended_price > 0 and price > 0 and sold.get("pricingSource") != "seller_price_fallback" and abs(float(sold.get("recommendedChangePct") or 0)) >= 5 and not _same_price(price, recommended_price):
-        proposed["price"] = recommended_price
-        findings.append({"field": "price", "severity": "medium", "message": f"Pricing signal ({sold.get('pricingSource')}) suggests ${recommended_price:.2f}; seller approval required."})
-    elif recommended_price > 0 and price <= 0:
-        findings.append({"field": "price", "severity": "high", "message": f"Numeric fallback price ${recommended_price:.2f} is available, but seller must confirm the missing current price."})
->>>>>>> eeed06fa7cec048409069a56ede856d0961027fa
     score = max(0, min(100, 100 - sum(18 if f["severity"] == "high" else 10 for f in findings)))
     classification = "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs Optimization" if score >= 50 else "High Priority"
     if any(f["severity"] == "high" for f in findings):
