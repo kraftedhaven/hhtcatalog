@@ -103,6 +103,32 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(commerce_agent.recommendations()[0]["status"], "Approved")
         self.assertEqual(commerce_agent.history()[0]["status"], "Approved")
 
+    def test_explain_and_skip_are_stored_review_decisions(self):
+        commerce_agent.audit_all()
+        recommendation = commerce_agent.recommendations()[0]
+        explanation = commerce_agent.explain_recommendation(recommendation["recommendationId"])
+        self.assertIn("reason", explanation)
+        self.assertIn("evidence", explanation)
+        skipped = commerce_agent.set_recommendation_status(recommendation["recommendationId"], "Skipped")
+        self.assertEqual(skipped["status"], "Skipped")
+
+    def test_bulk_approval_never_calls_ebay(self):
+        commerce_agent.audit_all()
+        recommendation = commerce_agent.recommendations()[0]
+        with mock.patch.object(commerce_agent, "update_ebay_offer") as update:
+            result = commerce_agent.bulk_approve([recommendation["recommendationId"]])
+        update.assert_not_called()
+        self.assertEqual(result["approved"], 1)
+
+    def test_applied_action_is_marked_rollback_eligible(self):
+        commerce_agent.audit_all()
+        recommendation = commerce_agent.recommendations()[0]
+        approved = commerce_agent.approve_recommendation(recommendation["recommendationId"], {"title": "Brand Short Coat"})
+        with mock.patch.object(commerce_agent, "update_ebay_offer", return_value={"status": "offer_updated"}):
+            commerce_agent.apply_action(approved["actionId"])
+        entry = commerce_agent.history()[0]
+        self.assertTrue(entry["rollbackEligible"])
+
     def test_approval_accepts_condition_and_notes_fields(self):
         commerce_agent.audit_all()
         recommendation = commerce_agent.recommendations()[0]

@@ -3,8 +3,11 @@
 
     import {
         commerceApprove,
+        commerceBulkApprove,
         commerceApply,
+        commerceDecision,
         commerceDashboard,
+        commerceExplain,
         commerceHistory,
         commerceImport,
         commerceJob,
@@ -13,6 +16,7 @@
         commerceStartActiveImport,
         commerceStartEnrichment,
         commerceStartFullEnrichment,
+        commerceRollback,
         downloadJSON,
     } from "$lib/api";
 
@@ -381,6 +385,69 @@
         }
     }
 
+    async function explain(entry) {
+        loading = true;
+        error = "";
+        try {
+            const result = await commerceExplain(entry.recommendationId);
+            selected = { ...entry, explanation: result };
+        } catch (err) {
+            error = err.message || String(err);
+        } finally {
+            loading = false;
+        }
+    }
+
+    async function decide(entry, decision) {
+        loading = true;
+        error = "";
+        try {
+            await commerceDecision(entry.recommendationId, decision);
+            message = `${decision === "reject" ? "Rejected" : "Skipped"} recommendation for ${entry.listing.title || entry.listing.sku}.`;
+            selected = null;
+            await refresh({ throwOnError: true });
+        } catch (err) {
+            error = err.message || String(err);
+        } finally {
+            loading = false;
+        }
+    }
+
+    async function approveSelected() {
+        const ids = selectedEntries
+            .filter((entry) => entry.status === "Pending" && entry.risk !== "high" && proposedEntries(entry).length)
+            .map((entry) => entry.recommendationId);
+        if (!ids.length) {
+            error = "Select pending low-risk recommendations with proposed fields first.";
+            return;
+        }
+        loading = true;
+        error = "";
+        try {
+            const result = await commerceBulkApprove(ids);
+            message = `Approved ${result.approved || 0} of ${ids.length} selected recommendations. Nothing was sent to eBay.`;
+            await refresh({ throwOnError: true });
+        } catch (err) {
+            error = err.message || String(err);
+        } finally {
+            loading = false;
+        }
+    }
+
+    async function rollback(entry) {
+        loading = true;
+        error = "";
+        try {
+            await commerceRollback(entry.actionId);
+            message = "Rollback completed after eBay state verification.";
+            await refresh({ throwOnError: true });
+        } catch (err) {
+            error = err.message || String(err);
+        } finally {
+            loading = false;
+        }
+    }
+
     async function requestApply(entry) {
         error = "";
         lastFocusedElement = document.activeElement;
@@ -625,6 +692,9 @@
                     on:click={enrichSelectedPilot}
                     >Enrich selected (read-only)</button
                 >
+                <button disabled={loading || !selectedPendingCount} on:click={approveSelected}
+                    >Approve selected (no eBay write)</button
+                >
             </div>
         </div>
         <p class="help workflow-note">
@@ -796,12 +866,15 @@
                         </div>{/if}
                     <div class="actions">
                         <button on:click={() => (selected = entry)}>Review details</button>
+                        <button disabled={loading} on:click={() => explain(entry)}>Explain</button>
                         {#if entry.status === "Pending" && entry.risk !== "high" && proposedEntries(entry).length}<button
                                 class="primary"
                                 disabled={loading}
                                 on:click={() => approve(entry)}
                                 >Approve only</button
                             >{/if}
+                        {#if entry.status === "Pending"}<button disabled={loading} on:click={() => decide(entry, "skip")}>Skip</button>
+                            <button disabled={loading} on:click={() => decide(entry, "reject")}>Reject</button>{/if}
                         {#if entry.status === "Pending" && entry.risk === "high"}<span class="help status-readonly"
                                 >High risk — seller review only</span
                             >{/if}
@@ -862,7 +935,8 @@
             {#if selected}
                 <div class="detail-block">
                     <h4>{selected.listing.title || selected.listing.sku}</h4>
-                    <p>{selected.reason}</p>
+                    <p>{selected.explanation?.reason || selected.reason}</p>
+                    {#if selected.explanation}<p class="help">Loaded from stored evidence and rationale; no new facts were generated.</p>{/if}
                     <p>
                         <b>Confidence:</b> {selected.confidence}. <b>Risk:</b> {selected.risk}.
                     </p>
@@ -885,6 +959,7 @@
             <div class="history-row">
                 <strong>{entry.listing.title || entry.listing.sku}</strong>
                 <span>{entry.status} · {new Date(entry.createdAt).toLocaleString()}</span>
+                {#if entry.rollbackEligible}<button disabled={loading} on:click={() => rollback(entry)}>Rollback safely</button>{/if}
             </div>
         {/each}
     </div>
