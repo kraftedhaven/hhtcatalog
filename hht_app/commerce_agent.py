@@ -572,8 +572,9 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
         raise ValueError("No editable fields were approved.")
     if recommendation.get("risk") == "high":
         proposed = recommendation.get("proposed", {})
-        baseline = {key: value for key, value in proposed.items() if key in EDITABLE_FIELDS} if isinstance(proposed, dict) else {}
-        if approved is None or changes == baseline:
+        baseline = {key: _price_float(value) if key == "price" else value for key, value in proposed.items() if key in EDITABLE_FIELDS} if isinstance(proposed, dict) else {}
+        comparable_changes = {key: _price_float(value) if key == "price" else value for key, value in changes.items()}
+        if approved is None or comparable_changes == baseline:
             raise ValueError("High-risk recommendations are review-only until a seller-reviewed subset of changes is explicitly approved.")
     current = recommendation["listing"]
     rules = settings()
