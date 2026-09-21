@@ -23,6 +23,7 @@ class CatalogOptimizationTests(unittest.TestCase):
         self.old_environment = dict(os.environ)
         ebay_taxonomy._cache.clear()
         ebay_taxonomy._tree_cache.clear()
+        ebay_taxonomy._aspect_cache.clear()
 
     def tearDown(self):
         os.environ.clear()
@@ -109,6 +110,24 @@ class CatalogOptimizationTests(unittest.TestCase):
         self.assertEqual(result["status"], "valid")
         self.assertFalse(result["aspectReviewRequired"])
         self.assertTrue(all(call[0].startswith("https://api.sandbox.ebay.com/") for call in calls))
+
+    def test_taxonomy_caches_category_aspects_for_repeated_listings(self):
+        os.environ["EBAY_TAXONOMY_ENABLED"] = "true"
+        requests_seen = []
+
+        def fake_get(url, **kwargs):
+            requests_seen.append(url)
+            if "get_default_category_tree_id" in url:
+                return FakeResponse(payload={"categoryTreeId": "0"})
+            return FakeResponse(payload={"aspects": [{"localizedAspectName": "Brand", "aspectConstraint": {"aspectRequired": True}}]})
+
+        with mock.patch.object(ebay_taxonomy, "ebay_access_token", return_value="token"), mock.patch.object(ebay_taxonomy.requests, "get", side_effect=fake_get):
+            first = ebay_taxonomy.validate_listing({"cat": "57988", "brand": "Levi's"})
+            second = ebay_taxonomy.validate_listing({"cat": "57988", "brand": "Levi's"})
+        self.assertEqual(first["status"], "valid")
+        self.assertEqual(second["status"], "valid")
+        aspect_requests = [url for url in requests_seen if "get_item_aspects_for_category" in url]
+        self.assertEqual(len(aspect_requests), 1)
 
     def test_taxonomy_enabled_without_credentials_is_not_configured(self):
         os.environ["EBAY_TAXONOMY_ENABLED"] = "true"

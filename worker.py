@@ -15,6 +15,10 @@ def run() -> None:
     while True:
         try:
             commerce_agent.init_db()
+            job = commerce_agent.run_next_queued_job()
+            if job:
+                logging.info("Completed Commerce Agent job id=%s status=%s", job.get("id"), job.get("status"))
+                continue
             time.sleep(interval)
         except KeyboardInterrupt:
             return

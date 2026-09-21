@@ -208,6 +208,42 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertNotIn("sold", result["pricingSource"])
         self.assertEqual(result["recommendedPrice"], 55.0)
 
+    def test_enrichment_preserves_official_title_and_records_ebay_evidence(self):
+        detail = {
+            "title": "Official Coach Willow Leather Handbag Brown",
+            "desc": "Official eBay description with condition and measurement information.",
+            "cat": "169291",
+            "price": 89.99,
+            "itemSpecifics": {
+                "Brand": "Coach",
+                "Model": "Willow",
+                "Material": "Leather",
+                "Country of Origin": "United States",
+            },
+            "watchCount": 3,
+            "pic": "https://example.test/coach.jpg",
+        }
+        with mock.patch.object(commerce_agent, "fetch_listing_detail", return_value=detail):
+            result = commerce_agent.enrich_listings(["L1"])
+        self.assertEqual(result["updated"], 1)
+        enriched = commerce_agent.list_listings()[0]
+        self.assertEqual(enriched["title"], detail["title"])
+        self.assertEqual(enriched["sourceTitle"], detail["title"])
+        self.assertEqual(enriched["brand"], "Coach")
+        self.assertEqual(enriched["attributeEvidence"]["brand"]["source"], "ebay_get_item")
+
+    def test_enrichment_job_is_queued_and_executes_read_only_work(self):
+        with mock.patch.object(commerce_agent.threading, "Thread") as thread:
+            started = commerce_agent.start_enrichment_job(["L1"])
+        self.assertEqual(started["status"], "queued")
+        self.assertTrue(started["readOnly"])
+        thread.return_value.start.assert_called_once()
+        with mock.patch.object(commerce_agent, "enrich_listings", return_value={"updated": 1, "readOnly": True}) as enrich:
+            completed = commerce_agent.run_job(started["jobId"])
+        enrich.assert_called_once_with(["L1"])
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["kind"], "enrichment")
+
 
 if __name__ == "__main__":
     unittest.main()

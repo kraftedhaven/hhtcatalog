@@ -251,6 +251,21 @@ def commerce_enrich():
         return jsonify({"error": "Commerce Agent enrichment failed. Check the Heroku logs for the diagnostic."}), 502
 
 
+@app.route("/api/commerce/enrich/start", methods=["POST"])
+def commerce_enrich_start():
+    body = request.get_json(silent=True) or {}
+    listing_ids = body.get("listingIds") or body.get("listing_ids") or []
+    if not isinstance(listing_ids, list):
+        return jsonify({"error": "listingIds must be an array of eBay listing IDs."}), 400
+    try:
+        return jsonify({"result": commerce_agent.start_enrichment_job(listing_ids)})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Commerce Agent enrichment job could not start")
+        return jsonify({"error": "Commerce Agent enrichment could not start."}), 503
+
+
 @app.route("/api/commerce/import", methods=["POST"])
 def commerce_import():
     try:
@@ -307,6 +322,15 @@ def commerce_audit():
     except Exception as exc:
         app.logger.exception("Commerce Agent audit failed")
         return jsonify({"error": "Commerce Agent audit failed. Check the Heroku logs for the diagnostic."}), 502
+
+
+@app.route("/api/commerce/audit/start", methods=["POST"])
+def commerce_audit_start():
+    try:
+        return jsonify({"result": commerce_agent.start_audit_job()})
+    except Exception:
+        app.logger.exception("Commerce Agent audit job could not start")
+        return jsonify({"error": "Commerce Agent audit could not start."}), 503
 
 
 @app.route("/api/commerce/recommendations", methods=["GET"])

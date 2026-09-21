@@ -9,6 +9,7 @@ from .evidence import has_confirmed_value
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _tree_cache: dict[str, tuple[float, str]] = {}
+_aspect_cache: dict[str, tuple[float, list[str]]] = {}
 
 
 def _default_tree_id(token: str, marketplace: str, timeout: float) -> str:
@@ -37,20 +38,26 @@ def validate_listing(item: dict[str, Any], timeout: float = 5.0) -> dict[str, An
         token = ebay_access_token(timeout=timeout)
         marketplace = os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US")
         tree_id = _default_tree_id(token, marketplace, timeout)
-        url = f"{_api_base_url()}/commerce/taxonomy/v1/category_tree/{tree_id}/get_item_aspects_for_category"
-        response = requests.get(url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": marketplace}, params={"category_id": category}, timeout=timeout)
-        if response.status_code >= 400:
-            return {"status": "unavailable", "categoryId": category, "statusCode": response.status_code, "message": "eBay Taxonomy validation was unavailable; seller review required."}
-        body = response.json()
-        aspect_entries = body.get("aspects", []) if isinstance(body, dict) else []
-        required = []
-        for entry in aspect_entries:
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("localizedAspectName") or "")
-            constraint = entry.get("aspectConstraint") if isinstance(entry.get("aspectConstraint"), dict) else {}
-            if name and constraint.get("aspectRequired") is True:
-                required.append(name)
+        cache_key = f"{marketplace}:{tree_id}:{category}"
+        cached = _aspect_cache.get(cache_key)
+        if cached and cached[0] > time.time():
+            required = cached[1]
+        else:
+            url = f"{_api_base_url()}/commerce/taxonomy/v1/category_tree/{tree_id}/get_item_aspects_for_category"
+            response = requests.get(url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": marketplace}, params={"category_id": category}, timeout=timeout)
+            if response.status_code >= 400:
+                return {"status": "unavailable", "categoryId": category, "statusCode": response.status_code, "message": "eBay Taxonomy validation was unavailable; seller review required."}
+            body = response.json()
+            aspect_entries = body.get("aspects", []) if isinstance(body, dict) else []
+            required = []
+            for entry in aspect_entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("localizedAspectName") or "")
+                constraint = entry.get("aspectConstraint") if isinstance(entry.get("aspectConstraint"), dict) else {}
+                if name and constraint.get("aspectRequired") is True:
+                    required.append(name)
+            _aspect_cache[cache_key] = (time.time() + 86400, required)
         field_for_label = {label.casefold(): key for label, key in EBAY_ITEM_SPECIFICS}
         missing = [name for name in required if not has_confirmed_value(item.get(field_for_label.get(name.casefold(), "")))]
         message = "Required item specifics are missing." if missing else "Category and required item specifics accepted by eBay Taxonomy API."

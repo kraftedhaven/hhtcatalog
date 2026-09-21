@@ -29,7 +29,7 @@ from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_active import EbayActiveError, fetch_active_listings, fetch_listing_detail
 from .ebay_drafts import EbayDraftError, get_ebay_offer, update_ebay_offer
 from .schema import normalize_listing
-from .evidence import evidence_for_listing, evidence_summary
+from .evidence import evidence_for_listing, evidence_summary, normalize_evidence
 from .ebay_taxonomy import validate_listing
 from .title_optimizer import optimize_title
 from .market_metrics import demand_score, pricing_recommendation, seller_recovery_metrics, sold_price_summary
@@ -343,14 +343,34 @@ def import_active_listings() -> dict[str, Any]:
 
 
 def start_active_import_job() -> dict[str, Any]:
+    return _start_background_job("active_import", {})
+
+
+def start_enrichment_job(listing_ids: list[str]) -> dict[str, Any]:
+    requested = list(dict.fromkeys(str(value).strip() for value in listing_ids if str(value).strip()))
+    if not requested:
+        raise ValueError("Select at least one eBay listing before enrichment.")
+    if len(requested) > 20:
+        raise ValueError("Pilot enrichment is limited to 20 listing IDs per job.")
+    return _start_background_job("enrichment", {"listingIds": requested})
+
+
+def start_audit_job() -> dict[str, Any]:
+    return _start_background_job("audit", {})
+
+
+def _start_background_job(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     init_db()
     job_id = str(uuid.uuid4())
     now = utc_now()
     with connect() as db:
-        db.execute("INSERT INTO commerce_jobs(id,kind,status,progress,result_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (job_id, "active_import", "running", 0, "{}", "", now, now))
-    thread = threading.Thread(target=_run_active_import_job, args=(job_id,), daemon=True)
+        db.execute(
+            "INSERT INTO commerce_jobs(id,kind,status,progress,result_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (job_id, kind, "queued", 0, _json(payload), "", now, now),
+        )
+    thread = threading.Thread(target=run_job, args=(job_id,), daemon=True)
     thread.start()
-    return {"jobId": job_id, "status": "running"}
+    return {"jobId": job_id, "status": "queued", "kind": kind, "readOnly": True}
 
 
 def active_import_job(job_id: str) -> dict[str, Any] | None:
@@ -360,13 +380,51 @@ def active_import_job(job_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def _run_active_import_job(job_id: str) -> None:
+def run_job(job_id: str) -> dict[str, Any] | None:
+    """Claim and execute one read-only catalog job.
+
+    The compare-and-set transition lets a web-thread or a separate worker claim a
+    job safely without ever scheduling an eBay mutation.
+    """
+    init_db()
+    with connect() as db:
+        row = db.execute("SELECT * FROM commerce_jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        if row["status"] != "queued":
+            return dict(row)
+        claimed = db.execute(
+            "UPDATE commerce_jobs SET status='running', progress=?, updated_at=? WHERE id=? AND status='queued'",
+            (1, utc_now(), job_id),
+        )
+        if getattr(claimed, "rowcount", 1) != 1:
+            return dict(db.execute("SELECT * FROM commerce_jobs WHERE id=?", (job_id,)).fetchone())
+        kind = str(row["kind"])
+        payload = _decode(row["result_json"], {})
     try:
-        result = import_active_listings()
+        if kind == "active_import":
+            result = import_active_listings()
+        elif kind == "enrichment":
+            result = enrich_listings(payload.get("listingIds", []))
+        elif kind == "audit":
+            audited = audit_all()
+            result = {"count": audited["count"], "readOnly": True}
+        else:
+            raise ValueError("Unsupported Commerce Agent job kind.")
         _update_job(job_id, "completed", 100, result, "")
+        return active_import_job(job_id)
     except Exception as exc:
-        logger.exception("Commerce Agent active import job failed")
+        logger.exception("Commerce Agent job failed: %s", kind)
         _update_job(job_id, "failed", 100, {}, str(exc)[:240])
+        return active_import_job(job_id)
+
+
+def run_next_queued_job() -> dict[str, Any] | None:
+    """Worker entrypoint: run one queued read-only catalog job, if one exists."""
+    init_db()
+    with connect() as db:
+        row = db.execute("SELECT id FROM commerce_jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1").fetchone()
+    return run_job(str(row["id"])) if row else None
 
 
 def _update_job(job_id: str, status: str, progress: int, result: dict[str, Any], error: str) -> None:
@@ -413,7 +471,20 @@ def enrich_listings(listing_ids: list[str], timeout: float = 20.0) -> dict[str, 
     init_db()
     updated: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
-    specifics_map = {label.casefold(): key for label, key in (('Brand', 'brand'), ('Model', 'model'), ('Material', 'mat'), ('Made In', 'madeIn'), ('Country of Origin', 'madeIn'), ('Size', 'size'), ('Color', 'color'), ('Department', 'dept'), ('Type', 'type'), ('Style', 'style'), ('Theme', 'theme'), ('Pattern', 'pat'), ('Sleeve Length', 'slv'), ('Neckline', 'nk'), ('Season', 'sea'), ('Occasion', 'occ'), ('Size Type', 'st'), ('Vintage', 'vin'))}
+    specifics_map = {
+        label.casefold(): key
+        for label, key in (
+            ("Brand", "brand"), ("Model", "model"), ("Material", "mat"),
+            ("Exterior Material", "mat"), ("Upper Material", "mat"),
+            ("Made In", "madeIn"), ("Country of Origin", "madeIn"),
+            ("Size", "size"), ("US Shoe Size", "size"), ("Color", "color"),
+            ("Main Color", "color"), ("Exterior Color", "color"),
+            ("Department", "dept"), ("Type", "type"), ("Style", "style"),
+            ("Theme", "theme"), ("Pattern", "pat"), ("Sleeve Length", "slv"),
+            ("Neckline", "nk"), ("Season", "sea"), ("Occasion", "occ"),
+            ("Size Type", "st"), ("Vintage", "vin"),
+        )
+    }
     with connect() as db:
         for listing_id in requested:
             try:
@@ -430,7 +501,28 @@ def enrich_listings(listing_ids: list[str], timeout: float = 20.0) -> dict[str, 
                         raw[field] = value
                 raw["source"] = "trading_get_item"
                 normalized = normalize_listing(raw)
-                normalized.update({"listingId": listing_id, "offerId": current.get("offerId", ""), "sku": current.get("sku", ""), "marketplace": current.get("marketplace", _marketplace()), "ebayUrl": f"https://www.ebay.com/itm/{listing_id}", "source": "trading_get_item", "itemSpecifics": detail.get("itemSpecifics", {}), "watchCount": detail.get("watchCount", 0), "location": detail.get("location", "")})
+                official_title = str(detail.get("title") or current.get("title") or normalized.get("title") or "").strip()
+                official_description = str(detail.get("desc") or current.get("desc") or "").strip()
+                normalized.update({
+                    "listingId": listing_id,
+                    "offerId": current.get("offerId", ""),
+                    "sku": current.get("sku", ""),
+                    "marketplace": current.get("marketplace", _marketplace()),
+                    "ebayUrl": f"https://www.ebay.com/itm/{listing_id}",
+                    "source": "trading_get_item",
+                    "sourceTitle": official_title,
+                    "sourceDescription": official_description,
+                    "title": official_title,
+                    "desc": official_description,
+                    "itemSpecifics": detail.get("itemSpecifics", {}),
+                    "attributeEvidence": normalize_evidence(
+                        normalized,
+                        source="ebay_get_item",
+                        default_evidence="Official eBay GetItem field.",
+                    ),
+                    "watchCount": detail.get("watchCount", 0),
+                    "location": detail.get("location", ""),
+                })
                 db.execute("UPDATE listings SET data_json=?, source_updated_at=?, imported_at=? WHERE id=?", (_json(normalized), str(detail.get("sourceUpdatedAt", "")), utc_now(), row["id"]))
                 updated.append({"listingId": listing_id, "sku": normalized.get("sku", ""), "itemSpecifics": detail.get("itemSpecifics", {}), "category": normalized.get("cat", ""), "source": "trading_get_item"})
             except EbayActiveError as exc:

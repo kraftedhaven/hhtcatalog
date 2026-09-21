@@ -2,7 +2,6 @@
     import { tick } from "svelte";
 
     import {
-        commerceAudit,
         commerceApprove,
         commerceApply,
         commerceDashboard,
@@ -10,7 +9,9 @@
         commerceImport,
         commerceJob,
         commerceRecommendations,
+        commerceStartAudit,
         commerceStartActiveImport,
+        commerceStartEnrichment,
         downloadJSON,
     } from "$lib/api";
 
@@ -122,8 +123,13 @@
     }
 
     function pricingSource(entry) {
-        if (entry?.soldPricing?.status === "ok") return "Sold comparables";
-        return "Active listing estimate only";
+        const source = entry?.soldPricing?.pricingSource;
+        if (source === "exact_used_sold") return "Exact used sold comparables";
+        if (source === "similar_used_sold") return "Similar used sold comparables";
+        if (source === "active_comparable") return "Active listing estimate only";
+        if (source === "ai_estimate") return "AI estimate only";
+        if (source === "seller_price_fallback") return "Seller price retained — no market evidence";
+        return "No price evidence available";
     }
 
     function demandSummary(entry) {
@@ -224,13 +230,34 @@
         }
     }
 
+    async function waitForJob(jobId, inProgressMessage) {
+        let job = await commerceJob(jobId);
+        while (job.status === "queued" || job.status === "running") {
+            message = inProgressMessage;
+            await new Promise((resolve) => setTimeout(resolve, 2500));
+            job = await commerceJob(jobId);
+        }
+        if (job.status !== "completed") {
+            throw new Error(job.error || "Commerce Agent job failed.");
+        }
+        return job.result || {};
+    }
+
+    async function auditInBackground() {
+        const started = await commerceStartAudit();
+        return waitForJob(
+            started.jobId,
+            "Auditing local catalog evidence and recommendations. No eBay changes are being made.",
+        );
+    }
+
     async function importAndAudit() {
         loading = true;
         error = "";
         message = "Importing existing eBay listings...";
         try {
             const imported = await commerceImport();
-            const audited = await commerceAudit();
+            const audited = await auditInBackground();
             message = `Imported ${imported.imported} listing${imported.imported === 1 ? "" : "s"} and created ${audited.count} recommendation${audited.count === 1 ? "" : "s"}.`;
             await refresh();
         } catch (err) {
@@ -246,18 +273,39 @@
         message = "Importing all active eBay listings...";
         try {
             const started = await commerceStartActiveImport();
-            let job = await commerceJob(started.jobId);
-            while (job.status === "running") {
-                message =
-                    "Importing all active eBay listings. You can leave this page open and refresh later.";
-                await new Promise((resolve) => setTimeout(resolve, 2500));
-                job = await commerceJob(started.jobId);
-            }
-            if (job.status !== "completed")
-                throw new Error(job.error || "Active listing import failed.");
-            const imported = job.result || {};
-            const audited = await commerceAudit();
+            const imported = await waitForJob(
+                started.jobId,
+                "Importing all active eBay listings. You can leave this page open and refresh later.",
+            );
+            const audited = await auditInBackground();
             message = `Imported ${imported.imported} active listing${imported.imported === 1 ? "" : "s"} and created ${audited.count} recommendation${audited.count === 1 ? "" : "s"}.`;
+            await refresh();
+        } catch (err) {
+            error = err.message || String(err);
+        } finally {
+            loading = false;
+        }
+    }
+
+    async function enrichSelectedPilot() {
+        const listingIds = selectedEntries
+            .map((entry) => String(entry?.listing?.listingId || "").trim())
+            .filter(Boolean);
+        if (!listingIds.length) {
+            error = "The selected records do not have active eBay listing IDs to enrich.";
+            return;
+        }
+        loading = true;
+        error = "";
+        message = "Starting read-only eBay detail enrichment for the selected pilot...";
+        try {
+            const started = await commerceStartEnrichment(listingIds);
+            const enriched = await waitForJob(
+                started.jobId,
+                "Fetching official eBay details and item specifics. No eBay changes are being made.",
+            );
+            const audited = await auditInBackground();
+            message = `Read-only enrichment completed for ${enriched.updated || 0} of ${enriched.requested || listingIds.length} selected listing${listingIds.length === 1 ? "" : "s"}; refreshed ${audited.count || 0} recommendations.`;
             await refresh();
         } catch (err) {
             error = err.message || String(err);
@@ -510,6 +558,15 @@
                     on:click={exportPilotResults}
                     >Export pilot results</button
                 >
+                <button
+                    class="primary"
+                    disabled={
+                        loading ||
+                        !selectedEntries.some((entry) => entry?.listing?.listingId)
+                    }
+                    on:click={enrichSelectedPilot}
+                    >Enrich selected (read-only)</button
+                >
             </div>
         </div>
         <p class="help workflow-note">
@@ -533,9 +590,9 @@
             </div>
         </div>
         {#if dashboard.recovery}<div class="help">
-                Recovery tracking: {dashboard.recovery.pendingReviews} pending reviews
-                · {dashboard.recovery.highRiskPending} high-risk · {dashboard.recovery.appliedChanges} applied
-                · {dashboard.recovery.coverage}% catalog coverage
+                Recovery tracking: {dashboard.recovery.listingsNeedingReview} pending reviews
+                · {dashboard.recovery.highRiskPendingReviews} high-risk · {dashboard.recovery.appliedChanges} applied
+                · {dashboard.recovery.catalogReviewCoverage}% catalog coverage
             </div>{/if}
     {/if}
     <div class="commerce-grid">
@@ -670,11 +727,17 @@
                         </div>{/if}
                     <div class="actions">
                         <button on:click={() => (selected = entry)}>Review details</button>
-                        {#if entry.status === "Pending"}<button
+                        {#if entry.status === "Pending" && entry.risk !== "high" && proposedEntries(entry).length}<button
                                 class="primary"
                                 disabled={loading}
                                 on:click={() => approve(entry)}
                                 >Approve only</button
+                            >{/if}
+                        {#if entry.status === "Pending" && entry.risk === "high"}<span class="help status-readonly"
+                                >High risk — seller review only</span
+                            >{/if}
+                        {#if entry.status === "Pending" && entry.risk !== "high" && !proposedEntries(entry).length}<span class="help status-readonly"
+                                >No safe field change proposed</span
                             >{/if}
                         {#if entry.status === "Approved"}<button
                                 class="primary"

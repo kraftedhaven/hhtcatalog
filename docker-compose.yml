@@ -13,10 +13,19 @@ services:
       LOCAL_UPLOAD_DIR: "/data/uploads"
       SAVE_UPLOADS: "true"
       MAX_UPLOAD_MB: "10"
-      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
-      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
+      DATABASE_URL: "${DATABASE_URL:-}"
+      COMMERCE_AGENT_DB: "${COMMERCE_AGENT_DB:-/data/commerce_agent.sqlite3}"
+      EBAY_CLIENT_ID: "${EBAY_CLIENT_ID:-}"
+      EBAY_CLIENT_SECRET: "${EBAY_CLIENT_SECRET:-}"
+      EBAY_REFRESH_TOKEN: "${EBAY_REFRESH_TOKEN:-}"
+      EBAY_TAXONOMY_ENABLED: "${EBAY_TAXONOMY_ENABLED:-false}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      NVIDIA_NIM_BASE_URL: "${NVIDIA_NIM_BASE_URL:-}"
+      NVIDIA_NIM_API_KEY: "${NVIDIA_NIM_API_KEY:-}"
+      NVIDIA_CATEGORY_MODEL: "${NVIDIA_CATEGORY_MODEL:-}"
     volumes:
-      - hht_uploads:/data/uploads
+      - hht_app_data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read()"]
@@ -54,11 +63,16 @@ services:
       COMMERCE_AGENT_DB: "${COMMERCE_AGENT_DB:-/data/commerce_agent.sqlite3}"
       WORKER_POLL_SECONDS: "${WORKER_POLL_SECONDS:-10}"
       EBAY_TAXONOMY_ENABLED: "${EBAY_TAXONOMY_ENABLED:-false}"
+      EBAY_CLIENT_ID: "${EBAY_CLIENT_ID:-}"
+      EBAY_CLIENT_SECRET: "${EBAY_CLIENT_SECRET:-}"
+      EBAY_REFRESH_TOKEN: "${EBAY_REFRESH_TOKEN:-}"
+      EBAY_MARKETPLACE_ID: "${EBAY_MARKETPLACE_ID:-EBAY_US}"
+      EBAY_ENVIRONMENT: "${EBAY_ENVIRONMENT:-production}"
       NVIDIA_NIM_BASE_URL: "${NVIDIA_NIM_BASE_URL:-}"
       NVIDIA_NIM_API_KEY: "${NVIDIA_NIM_API_KEY:-}"
       NVIDIA_CATEGORY_MODEL: "${NVIDIA_CATEGORY_MODEL:-}"
     volumes:
-      - hht_worker_data:/data
+      - hht_app_data:/data
     depends_on:
       hht-api:
         condition: service_healthy
@@ -79,6 +93,5 @@ services:
               capabilities: [gpu]
 
 volumes:
-  hht_uploads:
+  hht_app_data:
   frontend_node_modules:
-  hht_worker_data:

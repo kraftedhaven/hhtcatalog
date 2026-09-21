@@ -144,8 +144,20 @@ export function commerceJob(jobId) {
     return commerceRequest(`/api/commerce/jobs/${encodeURIComponent(jobId)}`);
 }
 
+export function commerceStartEnrichment(listingIds) {
+    return commerceRequest('/api/commerce/enrich/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ listingIds }),
+    });
+}
+
 export function commerceAudit() {
     return commerceRequest('/api/commerce/audit', { method: 'POST' });
+}
+
+export function commerceStartAudit() {
+    return commerceRequest('/api/commerce/audit/start', { method: 'POST' });
 }
 
 export function commerceRecommendations(status = '') {
