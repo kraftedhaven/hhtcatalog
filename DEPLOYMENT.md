@@ -45,13 +45,14 @@ EBAY_MARKETPLACE_ID=EBAY_US
 EBAY_SITE_ID=0
 OPENROUTER_API_KEY
 OPENROUTER_MODEL
-GEMINI_API_KEY
-GEMINI_MODEL
+NVIDIA_NIM_BASE_URL
+NVIDIA_NIM_API_KEY
+NVIDIA_CATEGORY_MODEL
 DEMO_MODE=false
 DATABASE_URL
 ```
 
-`PRIMARY_VISION_PROVIDER=groq` calls only Groq and does not fan out to every configured provider. Groq model values are trimmed, and a 404/model-unavailable response is retried once with `GROQ_FALLBACK_MODEL`; both defaults are current multimodal models documented by Groq. Z.AI can remain configured but unused until you want to test it again. `DEMO_MODE=false` is the production default.
+`PRIMARY_VISION_PROVIDER=groq` calls only Groq and does not fan out to every configured provider. Groq model values are trimmed, and a 404/model-unavailable response is retried once with `GROQ_FALLBACK_MODEL`. The active hosted fallback order is `groq,openrouter,nvidia`; Gemini is not part of the active provider chain. Z.AI can remain configured but unused until you want to test it again. `DEMO_MODE=false` is the production default.
 When no provider is configured, `/analyze` returns an actionable error instead of fabricated listing data.
 Official eBay Browse pricing is optional. When `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` are present, `/analyze` uses generated item keywords to fetch active eBay listings and labels the result `active_listing_estimate`. These are active listings, not sold comps. Without Browse access, the app keeps the vision provider's `ai_estimate`.
 Seller OAuth for future inventory/offer work uses `EBAY_REDIRECT_URI`, `EBAY_RUNAME`, `EBAY_REFRESH_TOKEN`, and optional `EBAY_AUTH_STATE`/`EBAY_USER_SCOPES`. `EBAY_REDIRECT_URI` is the public callback URL that eBay sends the browser back to. `EBAY_RUNAME` is the OAuth-enabled RuName from the eBay Developer portal, and it is the value sent to eBay as the OAuth `redirect_uri` parameter. Use `GET /api/ebay/oauth/start` to generate a consent URL and `GET` or `POST /api/ebay/oauth/callback` to exchange the returned code. The callback returns the refresh token once so it can be copied into `EBAY_REFRESH_TOKEN`; it does not call eBay publish endpoints.
@@ -68,7 +69,11 @@ Commerce Agent routes:
 
 - `GET /api/commerce/dashboard` — summary counts and current mode.
 - `POST /api/commerce/import` — imports existing eBay inventory items/offers through official APIs.
+- `POST /api/commerce/import-active/start` — queues a paginated active-listing import and returns a job ID.
+- `POST /api/commerce/enrich/start` — queues bounded, read-only GetItem enrichment for 1–20 selected active listing IDs.
 - `POST /api/commerce/audit` — audits imported listings and stores structured recommendations.
+- `POST /api/commerce/audit/start` — queues a read-only audit and returns a job ID.
+- `GET /api/commerce/jobs/<id>` — returns queued, running, completed, or failed job status and result.
 - `GET /api/commerce/listings` and `GET /api/commerce/recommendations` — review data.
 - `GET /api/commerce/recommendations/<id>` — detailed recommendation and rationale.
 - `POST /api/commerce/recommendations/<id>/approve` — records explicit field-level approval.
@@ -81,6 +86,16 @@ The seller OAuth scopes used by the repository default to the Trading API base s
 The **Analyze Active Listings** action uses the Trading API `GetMyeBaySelling` with pagination and is separate from **Import API Inventory**, which only covers Inventory API records. Active-listing import may require reauthorizing the seller token with the appropriate Trading API user scope. `POST /api/photo-quality` provides deterministic resolution, brightness, and sharpness checks before export. Active pricing lookups use a bounded in-process TTL cache controlled by `PRICING_CACHE_TTL_SECONDS`; active asking prices are not sold prices.
 
 NVIDIA GPU category classification is optional and reserved for an approved NVIDIA NIM/OpenAI-compatible endpoint configured with `NVIDIA_NIM_BASE_URL`, `NVIDIA_NIM_API_KEY`, and `NVIDIA_CATEGORY_MODEL`. The app remains usable without those variables. Bulk active import is paginated and bounded; future GPU image workers must use bounded concurrency and must not issue unbounded eBay requests.
+
+### Background worker
+
+The web process can claim a read-only catalog job immediately, so small pilots work without a separate process. For durable queue processing at catalog scale, `heroku.yml` also defines a `worker` process using the same container image. Scale it only after confirming the available Heroku plan capacity:
+
+```sh
+heroku ps:scale worker=1 -a hht-catalog-b34ed1b32417
+```
+
+The worker can run **only** active imports, GetItem enrichment, and recommendation audits. It never approves, updates, publishes, or otherwise mutates an eBay listing. The Docker Compose stack uses the same shared catalog storage for the API and worker, with no Azure, Appwrite, DigitalOcean, or Gemini configuration.
 
 Example commands:
 
