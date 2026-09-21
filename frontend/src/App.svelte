@@ -1,6 +1,6 @@
 <script>
     import "./app.css";
-    import { analyzeImages, createEbayDraft, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, getEbayOffer, publishEbayOffer, updateEbayOffer } from "$lib/api";
+    import { analyzeImages, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, sendDraftFeed } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
 
@@ -27,8 +27,7 @@
     let loading = false;
     let canTryAlternate = false;
     let alternateProvider = "";
-    let draftLoading = -1;
-    let offerAction = "";
+    let draftLoading = false;
     let restoreInput;
     let localPipeline = null;
     let categoryQuery = "";
@@ -417,85 +416,30 @@
         }
     }
 
-    async function createDraft(index) {
-        error = "";
-        const queued = queue[index];
-        if (!queued) return;
-        const reviewed = reviewedCandidate(queued);
-        const validation = validateItem(reviewed);
-        if (validation) {
-            error = `Queue item ${index + 1}: ${validation}`;
-            item = { ...reviewed };
+    async function sendDraftQueue() {
+        if (!queue.length) {
+            error = "Queue is empty.";
+            return;
+        }
+        const invalid = firstInvalidQueuedItem();
+        if (invalid) {
+            error = `Queue item ${invalid.index + 1}: ${invalid.message}`;
+            item = { ...invalid.reviewed };
             tab = "edit";
             return;
         }
-        draftLoading = index;
-        try {
-            const result = await createEbayDraft(reviewed);
-            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferId: result.offerId, ebaySku: result.sku, ebayDraftStatus: result.status } : entry);
-            status = `Unpublished eBay API offer created for ${queued.title}: offer ${result.offerId}. This is not a Seller Hub Draft, so it will not appear in Seller Hub Drafts. Verify it here, then publish it from HHT when ready.`;
-        } catch (err) {
-            error = friendlyEbayError(err);
-        } finally {
-            draftLoading = -1;
-        }
-    }
-
-    async function verifyOffer(index) {
-        error = "";
-        const queued = queue[index];
-        if (!queued?.ebayOfferId) return;
-        offerAction = `verify:${index}`;
-        try {
-            const result = await getEbayOffer(queued.ebayOfferId);
-            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferStatus: result.status || "verified", ebaySku: entry.ebaySku || result.sku } : entry);
-            status = `Verified eBay offer ${result.offerId}. It is still not live until you publish it.`;
-        } catch (err) {
-            error = friendlyEbayError(err);
-        } finally {
-            offerAction = "";
-        }
-    }
-
-    async function updateOffer(index) {
-        error = "";
-        const queued = queue[index];
-        if (!queued?.ebayOfferId) return;
-        const reviewed = reviewedCandidate(queued);
-        const validation = validateItem(reviewed);
-        if (validation) {
-            error = `Queue item ${index + 1}: ${validation}`;
-            item = { ...reviewed };
-            tab = "edit";
-            return;
-        }
-        offerAction = `update:${index}`;
-        try {
-            const result = await updateEbayOffer(queued.ebayOfferId, { ...reviewed, sku: queued.ebaySku || queued.sku });
-            queue = queue.map((entry, i) => i === index ? { ...entry, ebayOfferStatus: result.status, ebaySku: result.sku || entry.ebaySku } : entry);
-            status = `Updated eBay offer ${result.offerId}. Review again before publishing live.`;
-        } catch (err) {
-            error = friendlyEbayError(err);
-        } finally {
-            offerAction = "";
-        }
-    }
-
-    async function publishOffer(index) {
-        error = "";
-        const queued = queue[index];
-        if (!queued?.ebayOfferId) return;
-        const confirmed = window.confirm(`This will publish "${queued.title}" as a LIVE eBay listing. Only continue if the title, price, category, policies, quantity, condition, and photos are ready.`);
+        const confirmed = window.confirm("Send this queue to eBay as a Seller Hub FX_LISTING draft feed? This submits drafts for processing; it does not publish live listings.");
         if (!confirmed) return;
-        offerAction = `publish:${index}`;
+        error = "";
+        draftLoading = true;
         try {
-            const result = await publishEbayOffer(queued.ebayOfferId);
-            queue = queue.map((entry, i) => i === index ? { ...entry, ebayListingId: result.listingId, ebayOfferStatus: result.status, ebayDraftStatus: result.status } : entry);
-            status = `Published live on eBay: listing ${result.listingId}.`;
+            const result = await sendDraftFeed(queue);
+            queue = queue.map((entry) => ({ ...entry, ebayFeedTaskId: result.taskId, ebayDraftStatus: result.status }));
+            status = `Seller Hub draft feed submitted to eBay. Task ${result.taskId}; ${result.itemCount} item${result.itemCount === 1 ? "" : "s"} sent. Check Seller Hub Reports for processing results.`;
         } catch (err) {
             error = friendlyEbayError(err);
         } finally {
-            offerAction = "";
+            draftLoading = false;
         }
     }
 
@@ -544,7 +488,7 @@
     <header class="topbar">
         <div>
             <h1>HHT eBay Listing Builder</h1>
-            <p>Photo analysis, seller review, API offers, and Seller Hub draft CSV export</p>
+            <p>Photo analysis, seller review, and Seller Hub draft feed submission</p>
         </div>
         <strong>{queue.length} item{queue.length === 1 ? "" : "s"}</strong>
     </header>
@@ -714,19 +658,14 @@
             {:else}
                 {#each queue as queued, index}
                     <div class="queue-row">
-                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayOfferId ? ` / unpublished API offer ${queued.ebayOfferId}` : ""}{queued.ebayListingId ? ` / live listing ${queued.ebayListingId}` : ""}</span></div>
-                        <button type="button" disabled={draftLoading === index} on:click={() => createDraft(index)}>{draftLoading === index ? "Creating..." : "Create API Offer (not Seller Hub Draft)"}</button>
-                        {#if queued.ebayOfferId && !queued.ebayListingId}
-                            <button type="button" disabled={offerAction === `verify:${index}`} on:click={() => verifyOffer(index)}>{offerAction === `verify:${index}` ? "Checking..." : "Verify Offer"}</button>
-                            <button type="button" disabled={offerAction === `update:${index}`} on:click={() => updateOffer(index)}>{offerAction === `update:${index}` ? "Updating..." : "Update Offer"}</button>
-                            <button type="button" disabled={offerAction === `publish:${index}`} on:click={() => publishOffer(index)}>{offerAction === `publish:${index}` ? "Publishing..." : "Publish Live"}</button>
-                        {/if}
+                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayFeedTaskId ? ` / feed task ${queued.ebayFeedTaskId}` : ""}</span></div>
                         <button type="button" on:click={() => editQueued(index)}>Edit</button>
                         <button type="button" on:click={() => queue = queue.filter((_, i) => i !== index)}>Remove</button>
                     </div>
                 {/each}
                 <div class="actions">
-                    <button class="primary" on:click={exportDraftQueue}>Download Seller Hub Draft CSV</button>
+                    <button class="primary" disabled={draftLoading} on:click={sendDraftQueue}>{draftLoading ? "Sending..." : "Send Seller Hub Drafts to eBay"}</button>
+                    <button on:click={exportDraftQueue}>Download Seller Hub Draft CSV</button>
                     <button on:click={exportQueue}>Download legacy File Exchange CSV</button>
                     <button on:click={backupQueue}>Download JSON backup</button>
                     <button on:click={() => queue = []}>Clear queue</button>
@@ -735,9 +674,9 @@
             <input bind:this={restoreInput} class="hidden" type="file" accept="application/json" on:change={restoreBackup} />
             <button type="button" on:click={() => restoreInput.click()}>Restore JSON backup</button>
             <div class="notice warn">
-                <strong>Choose one eBay workflow</strong>
-                <p><b>Seller Hub Draft CSV</b> is the recommended file for <b>Seller Hub → Reports → Uploads → Create new drafts</b>. It creates visible Seller Hub Drafts; it uses only the template’s supported columns and leaves image URLs blank when photos are not public.</p>
-                <p><b>Create API Offer</b> creates an unpublished Inventory API offer, which does <em>not</em> appear in Seller Hub Drafts. Verify it in HHT and publish it from HHT only when ready.</p>
+                <strong>Seller Hub draft workflow</strong>
+                <p><b>Send Seller Hub Drafts to eBay</b> uploads this queue through eBay’s Sell Feed API as an FX_LISTING draft feed. It is intended for Seller Hub draft processing, not direct live publishing.</p>
+                <p><b>Download Seller Hub Draft CSV</b> remains available if you want to inspect the file or upload manually in <b>Seller Hub → Reports → Uploads → Create new drafts</b>.</p>
                 <p><b>Legacy File Exchange CSV</b> is for a matching legacy/File Exchange template only; do not upload it as a Seller Hub Draft template. Local phone photos must still be added in eBay or hosted at public URLs.</p>
             </div>
         </section>

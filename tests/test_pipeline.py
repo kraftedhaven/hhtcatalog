@@ -13,6 +13,7 @@ import app
 from hht_app import providers
 from hht_app import ebay_auth
 from hht_app import ebay_drafts
+from hht_app import ebay_feed
 from hht_app.ebay_pricing import (
     active_listing_keywords,
     clear_token_cache,
@@ -902,49 +903,47 @@ class MergePipelineTests(unittest.TestCase):
         self.assertIn("/offer/offer-123", calls[1][1])
         self.assertEqual(calls[1][2]["json"]["pricingSummary"]["price"]["value"], "29.99")
 
-    def test_ebay_offer_publish_requires_confirmation_before_request(self):
-        with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-token") as token:
-            with mock.patch("hht_app.ebay_drafts.requests.request") as request:
-                with self.assertRaises(ebay_drafts.EbayDraftError) as ctx:
-                    ebay_drafts.publish_ebay_offer("offer-123", confirm_publish=False)
-
-        self.assertEqual(ctx.exception.status_code, 400)
-        self.assertEqual(ctx.exception.category, "confirmation_required")
-        token.assert_not_called()
-        request.assert_not_called()
-
-    def test_ebay_offer_publish_returns_live_listing_id(self):
+    def test_seller_hub_draft_feed_upload_uses_fx_listing(self):
         calls = []
 
         def fake_request(method, url, **kwargs):
             calls.append((method, url, kwargs))
-            return FakeResponse(status_code=200, payload={"listingId": "listing-456"})
+            if url.endswith("/sell/feed/v1/task") and method == "POST":
+                return FakeResponse(status_code=201, payload={"taskId": "task-123"})
+            if url.endswith("/upload_file") and method == "POST":
+                return FakeResponse(status_code=202, payload={})
+            return FakeResponse(status_code=200, payload={"taskId": "task-123", "status": "IN_PROCESS"})
 
-        with mock.patch("hht_app.ebay_drafts.seller_access_token", return_value="seller-token"):
-            with mock.patch("hht_app.ebay_drafts.requests.request", side_effect=fake_request):
-                result = ebay_drafts.publish_ebay_offer("offer-123", confirm_publish=True)
+        with env(EBAY_ENVIRONMENT="production"):
+            with mock.patch("hht_app.ebay_feed.seller_access_token", return_value="seller-token"):
+                with mock.patch("hht_app.ebay_feed.requests.request", side_effect=fake_request):
+                    result = ebay_feed.upload_seller_hub_draft_csv([{"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}])
 
-        self.assertEqual(result["status"], "published")
-        self.assertEqual(result["offerId"], "offer-123")
-        self.assertEqual(result["listingId"], "listing-456")
-        self.assertTrue(result["published"])
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], "POST")
-        self.assertIn("/sell/inventory/v1/offer/offer-123/publish", calls[0][1])
-        self.assertNotIn("json", calls[0][2])
+        self.assertEqual(result["status"], "submitted")
+        self.assertEqual(result["taskId"], "task-123")
+        self.assertEqual(calls[0][2]["json"], {"feedType": "FX_LISTING", "schemaVersion": "1.0"})
+        self.assertEqual(calls[1][0], "POST")
+        self.assertIn("/sell/feed/v1/task/task-123/upload_file", calls[1][1])
+        self.assertIn("files", calls[1][2])
+        self.assertIn("fileName", calls[1][2]["data"])
 
-    def test_ebay_offer_publish_endpoint_requires_confirmation(self):
-        with mock.patch("app.publish_ebay_offer") as publish:
-            response = self.client.post("/api/ebay/offers/offer-123/publish", json={})
-        self.assertEqual(response.status_code, 400)
-        publish.assert_not_called()
+    def test_seller_hub_draft_feed_rejects_sandbox(self):
+        with env(EBAY_ENVIRONMENT="sandbox"):
+            with self.assertRaises(ebay_feed.EbayFeedError) as ctx:
+                ebay_feed.upload_seller_hub_draft_csv([{"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}])
+        self.assertEqual(ctx.exception.category, "configuration")
+        self.assertIn("production-only", ctx.exception.safe_message)
 
-    def test_ebay_offer_publish_endpoint_returns_listing(self):
-        with mock.patch("app.publish_ebay_offer", return_value={"status": "published", "offerId": "offer-123", "listingId": "listing-456", "published": True}) as publish:
-            response = self.client.post("/api/ebay/offers/offer-123/publish", json={"confirmPublish": True})
+    def test_draft_feed_endpoint_returns_task(self):
+        with mock.patch("app.upload_seller_hub_draft_csv", return_value={"status": "submitted", "taskId": "task-123"}) as upload:
+            response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}]})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["result"]["listingId"], "listing-456")
-        publish.assert_called_once_with("offer-123", confirm_publish=True)
+        self.assertEqual(response.get_json()["result"]["taskId"], "task-123")
+        upload.assert_called_once()
+
+    def test_offer_verify_and_publish_endpoints_are_removed(self):
+        self.assertEqual(self.client.get("/api/ebay/offers/offer-123").status_code, 404)
+        self.assertEqual(self.client.post("/api/ebay/offers/offer-123/publish", json={"confirmPublish": True}).status_code, 404)
 
     def test_ebay_token_failure_is_sanitized(self):
         with env(EBAY_CLIENT_ID="real-client-id", EBAY_CLIENT_SECRET="real-secret"):

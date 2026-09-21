@@ -10,6 +10,7 @@ import requests
 DEFAULT_EBAY_USER_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
+    "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
 ]
 TOKEN_CACHE_SKEW_SECONDS = 60
 DEFAULT_TIMEOUT_SECONDS = 8.0

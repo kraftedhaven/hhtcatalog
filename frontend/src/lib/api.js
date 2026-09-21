@@ -88,12 +88,6 @@ export async function createEbayDraft(item) {
     return body.result || body;
 }
 
-export async function getEbayOffer(offerId) {
-    const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`);
-    const body = await parseResponse(res);
-    return body.result || body;
-}
-
 export async function updateEbayOffer(offerId, item) {
     const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`, {
         method: 'PUT',
@@ -104,14 +98,18 @@ export async function updateEbayOffer(offerId, item) {
     return body.result || body;
 }
 
-export async function publishEbayOffer(offerId) {
-    const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}/publish`, {
+export async function sendDraftFeed(items) {
+    const res = await fetch(`${baseUrl()}/api/ebay/draft-feed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirmPublish: true })
+        body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)) })
     });
     const body = await parseResponse(res);
     return body.result || body;
+}
+
+export function ebayFeedTask(taskId) {
+    return commerceRequest(`/api/ebay/feed/tasks/${encodeURIComponent(taskId)}`);
 }
 
 export function ebayCategorySuggestions(query) {

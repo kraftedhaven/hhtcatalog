@@ -27,7 +27,7 @@ except ImportError:  # Local SQLite fallback remains available without psycopg.
 
 from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_active import EbayActiveError, fetch_active_listings, fetch_listing_detail
-from .ebay_drafts import EbayDraftError, get_ebay_offer, update_ebay_offer
+from .ebay_drafts import EbayDraftError, update_ebay_offer
 from .schema import normalize_listing
 from .evidence import evidence_for_listing, evidence_summary, normalize_evidence
 from .ebay_taxonomy import validate_listing

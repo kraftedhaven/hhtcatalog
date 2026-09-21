@@ -96,21 +96,6 @@ def create_ebay_draft(item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SEC
     }
 
 
-def get_ebay_offer(offer_id: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
-    offer_id = _offer_id(offer_id)
-    token = _seller_token(timeout)
-    offer = _request(
-        "GET",
-        f"{_api_base_url()}/sell/inventory/v1/offer/{quote(offer_id, safe='')}",
-        token,
-        None,
-        timeout,
-        expected_statuses={200},
-        operation="get_offer",
-    )
-    return _offer_summary(offer, offer_id)
-
-
 def update_ebay_offer(offer_id: str, item: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     offer_id = _offer_id(offer_id)
     listing = normalize_listing(item)
@@ -149,32 +134,6 @@ def update_ebay_offer(offer_id: str, item: dict[str, Any], timeout: float = DEFA
         "price": round(price, 2),
         "offer": _offer_summary(updated_offer, offer_id) if updated_offer else {},
         "warnings": _draft_warnings(listing),
-    }
-
-
-def publish_ebay_offer(offer_id: str, confirm_publish: bool, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
-    offer_id = _offer_id(offer_id)
-    if not confirm_publish:
-        raise EbayDraftError(400, "confirmation_required", "Confirm publish before creating a live eBay listing.", operation="publish_offer")
-    token = _seller_token(timeout)
-    response = _request(
-        "POST",
-        f"{_api_base_url()}/sell/inventory/v1/offer/{quote(offer_id, safe='')}/publish",
-        token,
-        None,
-        timeout,
-        expected_statuses={200, 201},
-        operation="publish_offer",
-    )
-    listing_id = str(response.get("listingId") or "")
-    if not listing_id:
-        raise EbayDraftError(502, "malformed_json", "eBay published the offer but did not return a listingId.", operation="publish_offer")
-    return {
-        "status": "published",
-        "provider": "ebay_inventory",
-        "offerId": offer_id,
-        "listingId": listing_id,
-        "published": True,
     }
 
 
