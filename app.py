@@ -1,5 +1,6 @@
 import mimetypes
 import os
+import html
 from typing import Any
 
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -143,7 +144,11 @@ def normalize():
 def ebay_oauth_start():
     try:
         state = os.environ.get("EBAY_AUTH_STATE", "").strip() or None
-        return jsonify({"authorizationUrl": ebay_authorization_url(state), "stateRequired": bool(state)})
+        return jsonify({
+            "authorizationUrl": ebay_authorization_url(state),
+            "stateRequired": bool(state),
+            "nextStep": "Open authorizationUrl, approve eBay access, then Copy the returned EBAY_REFRESH_TOKEN into your host config.",
+        })
     except EbayAuthError as exc:
         return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
 
@@ -160,6 +165,34 @@ def ebay_oauth_callback():
         tokens = exchange_authorization_code(str(code or ""))
     except EbayAuthError as exc:
         return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    if request.method == "GET":
+        token = html.escape(tokens["refresh_token"])
+        body = f"""<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>eBay Reconnect Complete</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; margin: 0; padding: 32px; background: #f8fafc; color: #0f172a; }}
+    main {{ max-width: 760px; margin: 0 auto; background: white; border: 1px solid #dbe3ef; border-radius: 8px; padding: 24px; }}
+    code, textarea {{ font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    textarea {{ width: 100%; min-height: 150px; box-sizing: border-box; margin: 12px 0; padding: 12px; border: 1px solid #cbd5e1; border-radius: 6px; }}
+    button {{ background: #0f172a; color: white; border: 0; border-radius: 6px; padding: 10px 14px; cursor: pointer; }}
+    .note {{ color: #475569; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>eBay reconnect complete</h1>
+    <p>Copy this value into your host config as <code>EBAY_REFRESH_TOKEN</code>, then restart the app.</p>
+    <textarea id=\"token\" readonly>{token}</textarea>
+    <button onclick=\"navigator.clipboard.writeText(document.getElementById('token').value).then(() => this.textContent = 'Copied')\">Copy refresh token</button>
+    <p class=\"note\">Keep this token private. After updating the config var, close this tab.</p>
+  </main>
+</body>
+</html>"""
+        return Response(body, mimetype="text/html", headers={"Cache-Control": "no-store"})
     return jsonify({
         "status": "ok",
         "message": "Copy refreshToken into Heroku Config Var EBAY_REFRESH_TOKEN, then remove this setup response from your history.",

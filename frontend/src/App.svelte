@@ -1,6 +1,6 @@
 <script>
     import "./app.css";
-    import { analyzeImages, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, sendDraftFeed } from "$lib/api";
+    import { analyzeImages, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, sendDraftFeed } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
 
@@ -35,6 +35,8 @@
     let categoryFields = [];
     let categoryLoading = false;
     let categoryNotice = "";
+    let oauthLoading = false;
+    let oauthStatus = "";
 
     $: titleLength = (item.title || "").length;
     $: queueTotal = queue.reduce((sum, next) => sum + (Number.parseFloat(next.price) || 0), 0);
@@ -443,6 +445,34 @@
         }
     }
 
+    async function checkEbayConnection() {
+        error = "";
+        oauthLoading = true;
+        try {
+            const result = await ebayOAuthStatus();
+            oauthStatus = result.configured ? "eBay OAuth is connected." : "eBay OAuth is not connected.";
+        } catch (err) {
+            oauthStatus = "";
+            error = err.message || "Unable to check eBay OAuth status.";
+        } finally {
+            oauthLoading = false;
+        }
+    }
+
+    async function reconnectEbay() {
+        error = "";
+        oauthLoading = true;
+        try {
+            const result = await ebayOAuthStart();
+            oauthStatus = "Opening eBay authorization...";
+            window.location.href = result.authorizationUrl;
+        } catch (err) {
+            oauthStatus = "";
+            error = err.message || "Unable to start eBay reconnect.";
+            oauthLoading = false;
+        }
+    }
+
     function backupQueue() {
         downloadJSON({ queue, seller }, "hht-listings-backup.json");
     }
@@ -684,6 +714,15 @@
 
     {#if tab === "settings"}
         <section class="panel form">
+            <div class="wide notice info">
+                <strong>eBay connection</strong>
+                <p>Reconnect when eBay permissions change. After approving access, copy the returned <code>EBAY_REFRESH_TOKEN</code> into your host config and restart the app.</p>
+                {#if oauthStatus}<p>{oauthStatus}</p>{/if}
+                <div class="actions">
+                    <button type="button" disabled={oauthLoading} on:click={reconnectEbay}>{oauthLoading ? "Opening..." : "Reconnect eBay"}</button>
+                    <button type="button" disabled={oauthLoading} on:click={checkEbayConnection}>Check connection</button>
+                </div>
+            </div>
             <label class="field"><span>Location</span><input bind:value={seller.location} /></label>
             <label class="field"><span>Postal Code</span><input bind:value={seller.postalCode} /></label>
             <label class="field"><span>Country Code</span><input bind:value={seller.countryCode} /></label>

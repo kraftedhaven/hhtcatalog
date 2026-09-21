@@ -624,7 +624,9 @@ class MergePipelineTests(unittest.TestCase):
         self.assertIn("redirect_uri=Korin_KraftedHaven-KraftedHHT-PRD-abc", body["authorizationUrl"])
         self.assertNotIn("hht.example", body["authorizationUrl"])
         self.assertIn("sell.inventory", body["authorizationUrl"])
+        self.assertIn("sell.fulfillment", body["authorizationUrl"])
         self.assertIn("state=setup-state", body["authorizationUrl"])
+        self.assertIn("Copy", body["nextStep"])
         self.assertNotIn("secret", body["authorizationUrl"])
 
     def test_ebay_seller_exchange_code_returns_refresh_token_once(self):
@@ -698,6 +700,24 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["refreshToken"], "refresh-1")
         self.assertNotIn("access-1", good.get_data(as_text=True))
+
+    def test_ebay_oauth_callback_get_returns_copy_page(self):
+        token_payload = {
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+            "expires_in": 7200,
+            "token_type": "User Access Token",
+        }
+        with env(EBAY_CLIENT_ID="client", EBAY_CLIENT_SECRET="secret", EBAY_REDIRECT_URI="https://hht.example/callback"):
+            with mock.patch("hht_app.ebay_auth.requests.post", return_value=FakeResponse(payload=token_payload)):
+                response = self.client.get("/api/ebay/oauth/callback?code=code-1")
+        text = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.content_type)
+        self.assertIn("EBAY_REFRESH_TOKEN", text)
+        self.assertIn("refresh-1", text)
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        self.assertNotIn("access-1", text)
 
     def test_ebay_draft_creation_creates_unpublished_inventory_offer(self):
         item = {

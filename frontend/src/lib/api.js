@@ -112,6 +112,15 @@ export function ebayFeedTask(taskId) {
     return commerceRequest(`/api/ebay/feed/tasks/${encodeURIComponent(taskId)}`);
 }
 
+export function ebayOAuthStatus() {
+    return commerceRequest('/api/ebay/oauth/status');
+}
+
+export async function ebayOAuthStart() {
+    const res = await fetch(`${baseUrl()}/api/ebay/oauth/start`);
+    return parseResponse(res);
+}
+
 export function ebayCategorySuggestions(query) {
     return commerceRequest(`/api/ebay/categories?q=${encodeURIComponent(query)}`);
 }
