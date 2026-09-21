@@ -82,6 +82,34 @@ def get_feed_task(task_id: str, *, token: str | None = None, timeout: float = DE
     )
 
 
+def get_feed_result_file(task_id: str, *, token: str | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> tuple[bytes, str, str]:
+    """Download eBay's compressed result/error file for a completed feed task."""
+    task_id = _task_id(task_id)
+    token = token or _seller_token(timeout)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/octet-stream, application/gzip, text/csv, application/xml, application/json",
+        "X-EBAY-C-MARKETPLACE-ID": _marketplace_id(),
+    }
+    url = f"{_api_base_url()}/sell/feed/v1/task/{task_id}/download_result_file"
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout)
+    except requests.Timeout as exc:
+        raise EbayFeedError(504, "timeout", _safe_error_message(504, "", "download_result_file"), operation="download_result_file") from exc
+    except requests.RequestException as exc:
+        raise EbayFeedError(502, "transport", _safe_error_message(502, "", "download_result_file"), operation="download_result_file") from exc
+    if response.status_code != 200:
+        code = _ebay_error_code(response)
+        raise EbayFeedError(response.status_code, _category_for_status(response.status_code), _safe_error_message(response.status_code, code, "download_result_file"), code, operation="download_result_file")
+    content_type = response.headers.get("Content-Type", "application/octet-stream")
+    disposition = response.headers.get("Content-Disposition", "")
+    filename = "ebay_feed_result"
+    match = re.search(r"filename=\"?([^\";]+)", disposition)
+    if match:
+        filename = match.group(1).strip()
+    return response.content, content_type, filename
+
+
 def _create_task(token: str, timeout: float) -> str:
     response = _request(
         "POST",
