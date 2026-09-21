@@ -46,11 +46,12 @@ class FeatureTests(unittest.TestCase):
             status_code = 200
             content = xml
 
-        with patch('hht_app.ebay_active.seller_access_token', return_value='token'), patch('hht_app.ebay_active.requests.post', return_value=Response()):
+        with patch('hht_app.ebay_active.seller_access_token', return_value='token'), patch('hht_app.ebay_active.requests.post', return_value=Response()) as post:
             result = fetch_active_listings()
         self.assertEqual(result['totalEntries'], 1)
         self.assertEqual(result['items'][0]['cat'], '57884')
         self.assertEqual(result['items'][0]['categoryName'], "Boys' Hats")
+        self.assertIn(b'<DetailLevel>ReturnAll</DetailLevel>', post.call_args.kwargs['data'])
 
 
 if __name__ == "__main__":

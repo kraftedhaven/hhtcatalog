@@ -109,6 +109,7 @@ def fetch_active_listings(page: int = 1, entries_per_page: int = 200, timeout: f
     body = f'''<?xml version="1.0" encoding="utf-8"?>
 <GetMyeBaySellingRequest xmlns="{NS}">
   <RequesterCredentials><eBayAuthToken>{_xml(token)}</eBayAuthToken></RequesterCredentials>
+  <DetailLevel>ReturnAll</DetailLevel>
   <ActiveList><Include>true</Include><Pagination><EntriesPerPage>{int(entries_per_page)}</EntriesPerPage><PageNumber>{int(page)}</PageNumber></Pagination></ActiveList>
 </GetMyeBaySellingRequest>'''
     root = _trading_request("GetMyeBaySelling", body, token, timeout)
