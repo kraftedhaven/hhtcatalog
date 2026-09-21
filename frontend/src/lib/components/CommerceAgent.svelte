@@ -593,6 +593,7 @@
                 Recovery tracking: {dashboard.recovery.listingsNeedingReview} pending reviews
                 · {dashboard.recovery.highRiskPendingReviews} high-risk · {dashboard.recovery.appliedChanges} applied
                 · {dashboard.recovery.catalogReviewCoverage}% catalog coverage
+                · {dashboard.recovery.categoryConfirmationNeeded || 0} category confirmations needed
             </div>{/if}
     {/if}
     <div class="commerce-grid">

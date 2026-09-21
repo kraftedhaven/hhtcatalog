@@ -323,6 +323,7 @@ def import_active_listings() -> dict[str, Any]:
     page = 1
     imported = 0
     total_entries = 0
+    active_skus: set[str] = set()
     while True:
         result = fetch_active_listings(page=page)
         total_entries = result["totalEntries"]
@@ -333,13 +334,63 @@ def import_active_listings() -> dict[str, Any]:
                 if not sku:
                     continue
                 now = utc_now()
-                normalized = {**listing, "sku": sku, "marketplace": _marketplace(), "source": "trading_active", "status": "active", "lifecycle": listing.get("lifecycle") or "Active listing"}
+                previous = db.execute("SELECT * FROM listings WHERE sku=? AND marketplace=?", (sku, _marketplace())).fetchone()
+                existing = _row_listing(previous) if previous else {}
+                normalized = _merge_active_listing(existing, listing, sku)
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now))
+                active_skus.add(sku)
                 imported += 1
         if page >= int(result.get("totalPages") or 1) or not items:
             break
         page += 1
-    return {"imported": imported, "totalEntries": total_entries, "total": count_listings(), "source": "trading_active"}
+    stale = _mark_inactive_active_import_records(active_skus)
+    return {"imported": imported, "totalEntries": total_entries, "total": count_listings(), "staleMarkedInactive": stale, "source": "trading_active"}
+
+
+def _merge_active_listing(existing: dict[str, Any], listing: dict[str, Any], sku: str) -> dict[str, Any]:
+    """Keep prior official detail values when the active-list summary omits them."""
+    normalized = {**existing, **listing}
+    for field in (
+        "cat", "categoryName", "itemSpecifics", "brand", "model", "size", "color",
+        "dept", "type", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ",
+        "st", "vin", "madeIn", "serialNumber", "measurements", "attributeEvidence",
+        "sourceTitle", "sourceDescription", "watchCount", "location",
+    ):
+        if not listing.get(field) and existing.get(field):
+            normalized[field] = existing[field]
+    normalized.update({
+        "sku": sku,
+        "marketplace": _marketplace(),
+        "source": existing.get("source") if existing.get("source") == "trading_get_item" else "trading_active",
+        "activeSource": "trading_active",
+        "status": "active",
+        "lifecycle": listing.get("lifecycle") or "Active listing",
+    })
+    return normalized
+
+
+def _mark_inactive_active_import_records(active_skus: set[str]) -> int:
+    """Mark local active-import records absent from a completed refresh as inactive.
+
+    This changes local catalog state only. It never calls eBay or changes a
+    seller listing, and it runs only after every active-list page completed.
+    """
+    marked = 0
+    with connect() as db:
+        rows = db.execute("SELECT id,sku,data_json FROM listings WHERE marketplace=?", (_marketplace(),)).fetchall()
+        for row in rows:
+            item = _decode(row["data_json"], {})
+            active_origin = str(item.get("activeSource") or item.get("source") or "")
+            if active_origin not in {"trading_active", "trading_get_item"} or str(row["sku"]) in active_skus:
+                continue
+            if str(item.get("status") or "active").lower() != "active":
+                continue
+            item["status"] = "inactive"
+            item["lifecycle"] = "Not returned by latest active eBay import"
+            item["inactiveReason"] = "Not returned by latest completed active listing refresh."
+            db.execute("UPDATE listings SET data_json=?, imported_at=? WHERE id=?", (_json(item), utc_now(), row["id"]))
+            marked += 1
+    return marked
 
 
 def start_active_import_job() -> dict[str, Any]:
@@ -453,7 +504,7 @@ def list_listings(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]
     items = [_row_listing(row) for row in rows]
     status = str(filters.get("status") or "").lower()
     if status:
-        items = [item for item in items if str(item.get("status", "active")).lower() == status]
+        items = [item for item in items if str(item.get("status") or "").lower() == status]
     return items
 
 
@@ -627,6 +678,11 @@ def audit_all() -> dict[str, Any]:
     with connect() as db:
         for row in db.execute("SELECT * FROM listings").fetchall():
             item = _row_listing(row)
+            if str(item.get("status") or "active").lower() != "active":
+                # A completed active-list refresh may retain historical local
+                # records. They must not remain in the live approval queue.
+                db.execute("DELETE FROM recommendations WHERE listing_row_id=? AND status='Pending'", (row["id"],))
+                continue
             audit = audit_listing(item)
             # Re-auditing is idempotent for pending work. Preserve approved and
             # applied history, but never create a second pending card for a row.
@@ -735,7 +791,8 @@ def dashboard() -> dict[str, Any]:
     items = list_listings()
     recs = recommendations()
     active_items = [item for item in items if str(item.get("status") or "active").lower() == "active"]
-    return {"connectedStore": "eBay", "listingsFound": len(active_items), "recordsFound": len(items), "recommendations": len(recs), "needOptimization": sum(1 for r in recs if r["classification"] in {"Needs Optimization", "High Priority", "Needs Review"}), "titleImprovements": sum(1 for r in recs if any(f.get("field") == "title" for f in r["findings"])), "missingItemSpecifics": sum(1 for r in recs if any(f.get("field") == "item_specifics" for f in r["findings"])), "needsReview": sum(1 for r in recs if r["classification"] == "Needs Review"), "recovery": seller_recovery_metrics(recs, active_items), "mode": "recommend"}
+    active_recs = [recommendation for recommendation in recs if str((recommendation.get("listing") or {}).get("status") or "active").lower() == "active"]
+    return {"connectedStore": "eBay", "listingsFound": len(active_items), "recordsFound": len(items), "recommendations": len(active_recs), "needOptimization": sum(1 for r in active_recs if r["classification"] in {"Needs Optimization", "High Priority", "Needs Review"}), "titleImprovements": sum(1 for r in active_recs if any(f.get("field") == "title" for f in r["findings"])), "missingItemSpecifics": sum(1 for r in active_recs if any(f.get("field") == "item_specifics" for f in r["findings"])), "needsReview": sum(1 for r in active_recs if r["classification"] == "Needs Review"), "recovery": seller_recovery_metrics(active_recs, active_items), "mode": "recommend"}
 
 
 def _safe_price_proposal(item: dict[str, Any], pricing: dict[str, Any]) -> bool:

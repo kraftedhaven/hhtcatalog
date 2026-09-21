@@ -216,7 +216,17 @@ def seller_recovery_metrics(recommendations: list[dict[str, Any]], listings: lis
     missing_specifics = sum(1 for recommendation in recommendations if any(finding.get("field") == "item_specifics" for finding in recommendation.get("findings", [])))
     title_opportunities = sum(1 for recommendation in recommendations if any(finding.get("field") == "title" for finding in recommendation.get("findings", [])))
     pricing_opportunities = sum(1 for recommendation in recommendations if any(finding.get("field") == "price" for finding in recommendation.get("findings", [])))
-    taxonomy_failures = sum(1 for recommendation in recommendations if (recommendation.get("taxonomy") or {}).get("status") in {"missing", "unavailable"} or (recommendation.get("taxonomy") or {}).get("aspectReviewRequired"))
+    category_confirmation_needed = sum(
+        1
+        for recommendation in recommendations
+        if (recommendation.get("taxonomy") or {}).get("status") == "missing"
+        or (recommendation.get("taxonomy") or {}).get("aspectReviewRequired")
+    )
+    taxonomy_unavailable = sum(
+        1
+        for recommendation in recommendations
+        if (recommendation.get("taxonomy") or {}).get("status") in {"unavailable", "not_configured"}
+    )
     low_confidence = sum(1 for recommendation in recommendations if recommendation.get("confidence") == "low" or (recommendation.get("soldPricing") or {}).get("pricingConfidence") == "low")
     evidence_gaps = sum(1 for recommendation in recommendations if any(finding.get("field") in {"item_specifics", "taxonomy", "price"} for finding in recommendation.get("findings", [])))
     coverage = round((len(recommendations) / total) * 100, 1) if total else 0.0
@@ -231,7 +241,11 @@ def seller_recovery_metrics(recommendations: list[dict[str, Any]], listings: lis
         "appliedChanges": applied,
         "catalogReviewCoverage": coverage,
         "lowConfidenceRecommendations": low_confidence,
-        "categoryValidationFailures": taxonomy_failures,
+        # Kept for compatibility with early dashboard clients. A missing seller
+        # category is a confirmation task, not a failed eBay validation.
+        "categoryValidationFailures": taxonomy_unavailable,
+        "categoryConfirmationNeeded": category_confirmation_needed,
+        "taxonomyValidationUnavailable": taxonomy_unavailable,
         "unresolvedEvidenceGaps": evidence_gaps,
         "label": "Operational catalog metrics only",
         "note": "These are operational recovery indicators only; official eBay Seller Hub performance metrics are not connected.",

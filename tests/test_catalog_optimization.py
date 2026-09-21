@@ -89,6 +89,17 @@ class CatalogOptimizationTests(unittest.TestCase):
         self.assertEqual(result["methodology"], "listing_quantity_proxy")
         self.assertEqual(result["confidence"], "low")
 
+    def test_recovery_metrics_separate_missing_category_from_taxonomy_outage(self):
+        recommendations = [
+            {"status": "Pending", "taxonomy": {"status": "missing"}, "findings": []},
+            {"status": "Pending", "taxonomy": {"status": "unavailable"}, "findings": []},
+            {"status": "Pending", "taxonomy": {"status": "valid", "aspectReviewRequired": True}, "findings": []},
+        ]
+        metrics = market_metrics.seller_recovery_metrics(recommendations, [{}, {}, {}])
+        self.assertEqual(metrics["categoryConfirmationNeeded"], 2)
+        self.assertEqual(metrics["taxonomyValidationUnavailable"], 1)
+        self.assertEqual(metrics["categoryValidationFailures"], 1)
+
     def test_taxonomy_is_advisory_when_not_enabled(self):
         os.environ.pop("EBAY_TAXONOMY_ENABLED", None)
         result = ebay_taxonomy.validate_listing({"cat": "57988"})

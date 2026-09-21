@@ -181,6 +181,39 @@ class CommerceAgentTests(unittest.TestCase):
         stored = [item for item in commerce_agent.list_listings() if item["sku"] == "SKU0"][0]
         self.assertEqual(stored["title"], "Duplicate Active Item")
 
+    def test_active_import_marks_absent_active_record_inactive_without_ebay_mutation(self):
+        with commerce_agent.connect() as db:
+            db.execute(
+                "INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,imported_at) VALUES(?,?,?,?,?,?)",
+                ("STALE", "", "STALE-SKU", "EBAY_US", commerce_agent._json({
+                    "listingId": "STALE", "sku": "STALE-SKU", "title": "No longer active", "status": "active", "source": "trading_active", "activeSource": "trading_active"
+                }), commerce_agent.utc_now()),
+            )
+        page = {"items": [{"listingId": "L1", "sku": "SKU1", "title": "Current Active Item", "price": 19.99}], "totalEntries": 1, "totalPages": 1}
+        with mock.patch.object(commerce_agent, "fetch_active_listings", return_value=page):
+            result = commerce_agent.import_active_listings()
+        self.assertEqual(result["staleMarkedInactive"], 1)
+        stale = [item for item in commerce_agent.list_listings({"status": "inactive"}) if item["sku"] == "STALE-SKU"][0]
+        self.assertEqual(stale["lifecycle"], "Not returned by latest active eBay import")
+
+    def test_active_import_preserves_previous_get_item_details_when_summary_omits_them(self):
+        with commerce_agent.connect() as db:
+            db.execute(
+                "UPDATE listings SET data_json=? WHERE sku=?",
+                (commerce_agent._json({
+                    "listingId": "L1", "sku": "SKU1", "title": "Official Coach Bag", "status": "active", "source": "trading_get_item", "activeSource": "trading_active",
+                    "cat": "169291", "categoryName": "Handbags", "brand": "Coach", "itemSpecifics": {"Brand": "Coach"},
+                    "attributeEvidence": [{"field": "brand", "source": "ebay_get_item"}],
+                }), "SKU1"),
+            )
+        page = {"items": [{"listingId": "L1", "sku": "SKU1", "title": "Official Coach Bag", "price": 89.99}], "totalEntries": 1, "totalPages": 1}
+        with mock.patch.object(commerce_agent, "fetch_active_listings", return_value=page):
+            commerce_agent.import_active_listings()
+        stored = [item for item in commerce_agent.list_listings() if item["sku"] == "SKU1"][0]
+        self.assertEqual(stored["cat"], "169291")
+        self.assertEqual(stored["brand"], "Coach")
+        self.assertEqual(stored["source"], "trading_get_item")
+
     def test_approval_does_not_call_ebay_and_apply_requires_approval(self):
         commerce_agent.audit_all()
         recommendation = commerce_agent.recommendations()[0]
