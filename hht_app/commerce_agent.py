@@ -442,6 +442,10 @@ def _price_float(value: Any) -> float:
         return 0.0
 
 
+def _same_price(current: float, proposed: float) -> bool:
+    return abs(current - proposed) < 0.01
+
+
 def _title_candidate(item: dict[str, Any]) -> str:
     """Build a conservative, category-aware title from confirmed listing fields."""
     current = str(item.get("title") or "").strip()
@@ -500,7 +504,7 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     demand = demand_score(item)
     evidence = evidence_for_listing(item)
     recommended_price = _price_float(sold.get("recommendedPrice"))
-    if recommended_price > 0 and price > 0 and sold.get("pricingSource") != "seller_price_fallback" and abs(float(sold.get("recommendedChangePct") or 0)) >= 5:
+    if recommended_price > 0 and price > 0 and sold.get("pricingSource") != "seller_price_fallback" and abs(float(sold.get("recommendedChangePct") or 0)) >= 5 and not _same_price(price, recommended_price):
         proposed["price"] = recommended_price
         findings.append({"field": "price", "severity": "medium", "message": f"Pricing signal ({sold.get('pricingSource')}) suggests ${recommended_price:.2f}; seller approval required."})
     elif recommended_price > 0 and price <= 0:
@@ -566,6 +570,12 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
     changes = {key: value for key, value in changes.items() if key in EDITABLE_FIELDS}
     if not changes:
         raise ValueError("No editable fields were approved.")
+    if recommendation.get("risk") == "high":
+        proposed = recommendation.get("proposed", {})
+        baseline = {key: _price_float(value) if key == "price" else value for key, value in proposed.items() if key in EDITABLE_FIELDS} if isinstance(proposed, dict) else {}
+        comparable_changes = {key: _price_float(value) if key == "price" else value for key, value in changes.items()}
+        if approved is None or comparable_changes == baseline:
+            raise ValueError("High-risk recommendations are review-only until a seller-reviewed subset of changes is explicitly approved.")
     current = recommendation["listing"]
     rules = settings()
     if "price" in changes:
