@@ -33,6 +33,7 @@ ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
 GROQ_DEFAULT_MODEL = "qwen/qwen3.6-27b"
 GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
+NVIDIA_DEFAULT_VISION_MODEL = "z-ai/glm-5.3-flash"
 MAX_PROVIDER_IMAGES = 5
 MAX_ZAI_IMAGES = 3
 MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
@@ -370,7 +371,14 @@ def _groq_once(model: str, content: list[dict[str, Any]], context: dict[str, Any
 
 
 def _nvidia(images: list[UploadedImage], context: dict[str, Any]) -> str:
-    model = (os.environ.get("NVIDIA_CATEGORY_MODEL") or "").strip()
+    configured_model = (os.environ.get("NVIDIA_CATEGORY_MODEL") or "").strip()
+    # The previously deployed Llama 3.2 vision identifier is no longer reliable
+    # on NVIDIA's hosted catalog. Keep the Heroku variable backward-compatible,
+    # but replace that retired value with the current multimodal model default.
+    model = NVIDIA_DEFAULT_VISION_MODEL if configured_model in {
+        "meta/llama-3.2-11b-vision-instruct",
+        "",
+    } else configured_model
     base_url = (os.environ.get("NVIDIA_NIM_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
     if not model:
         raise ProviderError("NVIDIA category model is not configured.", 503, provider="nvidia", category="configuration")
@@ -380,7 +388,7 @@ def _nvidia(images: list[UploadedImage], context: dict[str, Any]) -> str:
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.1,
-        "max_tokens": 1400,
+        "max_completion_tokens": 1400,
         "stream": False,
     }
     return _post_openai_compatible("nvidia", model, f"{base_url}/chat/completions", os.environ["NVIDIA_NIM_API_KEY"], payload, context)
