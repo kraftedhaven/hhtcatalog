@@ -905,15 +905,14 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
         findings.append({"field": "price", "severity": "medium", "message": f"Suggested price candidate: ${pricing['recommendedPrice']:.2f} from {pricing['pricingSource']}. Approval required before eBay update."})
     demand = demand_score(item)
     evidence = evidence_for_listing(item)
-    if findings and not proposed:
-        proposed["notes"] = _review_note(item, findings, taxonomy, pricing)
+    note_only_review = bool(findings and not proposed)
     score = max(0, min(100, 100 - sum(18 if f["severity"] == "high" else 10 for f in findings)))
     classification = "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs Optimization" if score >= 50 else "High Priority"
-    if any(f["severity"] == "high" for f in findings):
+    if any(f["severity"] == "high" for f in findings) or note_only_review:
         classification = "Needs Review"
-    confidence = "high" if findings and all(f["field"] not in {"cat", "price"} for f in findings) else "medium"
+    confidence = "low" if note_only_review else "high" if findings and all(f["field"] not in {"cat", "price"} for f in findings) else "medium"
     reason = "; ".join(f["message"] for f in findings) or "No material listing quality issue was identified from the imported data."
-    return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) else "low", "evidence": evidence_summary(item), "taxonomy": taxonomy, "soldPricing": pricing, "soldComparableSummary": sold, "demand": demand}
+    return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) or note_only_review else "low", "evidence": evidence_summary(item), "taxonomy": taxonomy, "soldPricing": pricing, "soldComparableSummary": sold, "demand": demand}
 
 
 def audit_all() -> dict[str, Any]:
