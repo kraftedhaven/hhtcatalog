@@ -12,11 +12,14 @@ async function parseResponse(res) {
     const contentType = res.headers.get('content-type') || '';
     const body = contentType.includes('application/json') ? await res.json() : await res.text();
     if (!res.ok) {
-        const message = typeof body === 'object' ? body.error : body;
+        const htmlError = typeof body === 'string' && /<!doctype html|<html[\s>]/i.test(body);
+        const message = htmlError
+            ? `The server returned a temporary application error (${res.status}). Please retry in a moment.`
+            : typeof body === 'object' ? body.error : body;
         const error = new Error(message || `Request failed: ${res.status}`);
+        error.status = res.status;
         if (body && typeof body === 'object') {
             error.providerFailures = body.provider_errors || body.providerFailures || [];
-            error.status = res.status;
             error.retryAfterSeconds = body.retry_after_seconds || body.retryAfterSeconds || null;
             error.canTryAlternate = Boolean(body.can_try_alternate || body.canTryAlternate);
             error.alternateProvider = body.alternate_provider || body.alternateProvider || '';
