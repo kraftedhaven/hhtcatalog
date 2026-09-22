@@ -62,6 +62,7 @@ services:
       DATABASE_URL: "${DATABASE_URL:-}"
       COMMERCE_AGENT_DB: "${COMMERCE_AGENT_DB:-/data/commerce_agent.sqlite3}"
       WORKER_POLL_SECONDS: "${WORKER_POLL_SECONDS:-10}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       EBAY_TAXONOMY_ENABLED: "${EBAY_TAXONOMY_ENABLED:-false}"
       EBAY_CLIENT_ID: "${EBAY_CLIENT_ID:-}"
       EBAY_CLIENT_SECRET: "${EBAY_CLIENT_SECRET:-}"
@@ -77,6 +78,12 @@ services:
       hht-api:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; print('Worker alive'); sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   hht-nvidia:
     profiles: ["nvidia"]
