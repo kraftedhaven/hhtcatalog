@@ -258,7 +258,7 @@ def _provider_plan(context: dict[str, Any] | None = None):
     # Prefer an explicitly configured image-capable provider over generic/free
     # OpenRouter routing. The free OpenRouter model may be text-only even when
     # its API key is present, which is not suitable for Analyze image uploads.
-    alternate_priority = ("nvidia", "openrouter", "zai", "groq")
+    alternate_priority = ("nvidia", "openrouter", "groq")
     alternates = [name for name in alternate_priority if name in configured and name != primary]
     fallback_index = int(context.get("fallback_index", 0))
     chosen = alternates[fallback_index] if (try_alternate and alternates and fallback_index < len(alternates)) else primary
