@@ -40,8 +40,8 @@ MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
 MAX_GROQ_IMAGES = 3
 MAX_GROQ_REQUEST_BYTES = 4 * 1024 * 1024
 TRANSIENT_STATUS_CODES = {429, 502, 503}
-DEFAULT_ANALYZE_DEADLINE_SECONDS = 28.0
-DEFAULT_PROVIDER_TIMEOUT_SECONDS = 18.0
+DEFAULT_ANALYZE_DEADLINE_SECONDS = 24.0
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 10.0
 MAX_PROVIDER_RETRY_DELAY_SECONDS = 3.0
 ZAI_IMAGE_MAX_EDGE = 896
 ZAI_IMAGE_RETRY_MAX_EDGE = 640
@@ -200,7 +200,11 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
             _log_provider(selected, exc.status_code, exc.category, exc.retryable)
             if _should_trip_circuit(exc.status_code, exc.category, exc.upstream_error):
                 cooldown_seconds = _set_provider_cooldown(selected, exc.retry_after_seconds)
-                raise _rate_limited_error(plan, selected, cooldown_seconds, failures) from exc
+                # A transient provider failure should not end the request when
+                # another configured image provider can still run inside the
+                # overall deadline. Preserve the circuit cooldown and continue.
+                if not _has_remaining_alternate(plan, context):
+                    raise _rate_limited_error(plan, selected, cooldown_seconds, failures) from exc
         except Exception:
             failures.append(_failure(selected, _model_for_provider(selected), 502, "provider_error", False))
             _log_provider(selected, 502, "provider_error", False)
@@ -209,11 +213,12 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
     # configured provider within the same request instead of returning a 502.
     # The frontend's one-click retry sets try_alternate; fallback_index prevents
     # loops while preserving the original request deadline.
-    if context.get("try_alternate"):
-        fallback_index = int(context.get("fallback_index", 0))
+    if plan.get("alternates"):
+        fallback_index = int(context.get("fallback_index", -1 if not context.get("try_alternate") else 0))
         alternates = plan.get("alternates", [])
         if fallback_index + 1 < len(alternates) and _remaining_seconds(context) >= 5:
             next_context = dict(context)
+            next_context["try_alternate"] = True
             next_context["fallback_index"] = fallback_index + 1
             return analyze_images(compact_images, next_context)
 
@@ -222,6 +227,13 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
         demo["providerFailures"] = failures
         return demo
     raise ProviderError("Configured vision provider failed. No demo listing was generated.", 502, failures)
+
+
+def _has_remaining_alternate(plan: dict[str, Any], context: dict[str, Any]) -> bool:
+    alternates = plan.get("alternates", [])
+    index = int(context.get("fallback_index", -1 if not context.get("try_alternate") else 0))
+    next_index = index + 1 if index >= 0 else 0
+    return bool(alternates) and next_index < len(alternates) and _remaining_seconds(context) >= 5
 
 
 def _provider_plan(context: dict[str, Any] | None = None):
@@ -260,7 +272,7 @@ def _provider_plan(context: dict[str, Any] | None = None):
     # its API key is present, which is not suitable for Analyze image uploads.
     alternate_priority = ("nvidia", "openrouter", "groq")
     alternates = [name for name in alternate_priority if name in configured and name != primary]
-    fallback_index = int(context.get("fallback_index", 0))
+    fallback_index = int(context.get("fallback_index", -1 if not try_alternate else 0))
     chosen = alternates[fallback_index] if (try_alternate and alternates and fallback_index < len(alternates)) else primary
     if try_alternate and not alternates:
         raise ProviderError(
@@ -856,7 +868,7 @@ def _parse_retry_after_header(value: str) -> int | None:
 def _rate_limited_error(plan: dict[str, Any], provider: str, retry_after_seconds: int, failures: list[dict[str, Any]]) -> ProviderError:
     can_try_alternate = bool(plan.get("alternate")) and not plan.get("try_alternate")
     all_unavailable = _all_configured_providers_unavailable(plan["configured"])
-    next_retry = retry_after_seconds
+    next_retry = _next_retry_after_seconds(plan["configured"]) or retry_after_seconds
     retry_text = f" Retry after about {next_retry} second{'s' if next_retry != 1 else ''}." if next_retry else " Retry after cooldown expires."
     if all_unavailable:
         message = f"All hosted providers are temporarily unavailable.{retry_text} Use browser-local SmolVLM where supported."

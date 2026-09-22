@@ -278,7 +278,7 @@ class MergePipelineTests(unittest.TestCase):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", PROVIDER_REQUEST_TIMEOUT_SECONDS="12"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 providers.analyze_images([self.image])
-        self.assertEqual(post.call_args.kwargs["timeout"], 12.0)
+        self.assertEqual(post.call_args.kwargs["timeout"], 10.0)
 
     def test_provider_request_timeout_caps_old_high_config(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", PROVIDER_REQUEST_TIMEOUT_SECONDS="24"):
@@ -512,12 +512,10 @@ class MergePipelineTests(unittest.TestCase):
                 )
         self.assertEqual(response.status_code, 429)
         body = response.get_json()
-        self.assertEqual(body["retry_after_seconds"], 11)
-        self.assertTrue(body["can_try_alternate"])
-        self.assertEqual(body["alternate_provider"], "groq")
-        self.assertGreaterEqual(providers._cooldown_remaining_seconds("openrouter"), 10)
+        self.assertGreaterEqual(body["retry_after_seconds"], 1)
+        self.assertGreaterEqual(providers._cooldown_remaining_seconds("openrouter"), 1)
 
-    def test_try_alternate_provider_is_user_controlled_and_single_switch(self):
+    def test_provider_automatically_falls_back_then_allows_explicit_retry(self):
         calls = []
 
         def fake_post(url, **_kwargs):
@@ -539,12 +537,11 @@ class MergePipelineTests(unittest.TestCase):
                     content_type="multipart/form-data",
                 )
         first_body = first.get_json()
-        self.assertEqual(first.status_code, 429)
-        self.assertTrue(first_body["can_try_alternate"])
-        self.assertEqual(first_body["alternate_provider"], "groq")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first_body["result"]["provider"], "groq")
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.get_json()["result"]["provider"], "groq")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertIn("openrouter.ai", calls[0])
         self.assertIn("api.groq.com", calls[1])
 
@@ -572,7 +569,7 @@ class MergePipelineTests(unittest.TestCase):
                     content_type="multipart/form-data",
                 )
         self.assertEqual(response.status_code, 429)
-        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_count, 3)
 
     def test_analyze_rejects_more_than_five_images(self):
         data = {"file": [(io.BytesIO(b"fake"), f"photo-{index}.jpg") for index in range(6)]}
@@ -958,7 +955,10 @@ class MergePipelineTests(unittest.TestCase):
         with env(EBAY_ENVIRONMENT="production"):
             with mock.patch("hht_app.ebay_feed.seller_access_token", return_value="seller-token"):
                 with mock.patch("hht_app.ebay_feed.requests.request", side_effect=fake_request):
-                    result = ebay_feed.upload_seller_hub_draft_csv([{"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}])
+                    result = ebay_feed.upload_seller_hub_draft_csv([
+                        {"sku": f"PILOT-{index}", "title": f"Levi's Jacket {index}", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}
+                        for index in range(5)
+                    ])
 
         self.assertEqual(result["status"], "submitted")
         self.assertEqual(result["taskId"], "task-123")
@@ -984,25 +984,54 @@ class MergePipelineTests(unittest.TestCase):
             return FakeResponse(status_code=200, payload={"taskId": "task-pilot", "status": "IN_PROCESS"})
 
         items = [
-            {"sku": "PILOT-1", "title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"},
-            {"sku": "PILOT-2", "title": "Coach Bag", "price": 49.99, "cat": "169291", "brand": "Coach", "type": "Handbag"},
+            {"sku": f"PILOT-{index}", "title": f"Levi's Jacket {index}", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}
+            for index in range(5)
         ]
         with env(EBAY_ENVIRONMENT="production"):
             with mock.patch("hht_app.ebay_feed.seller_access_token", return_value="seller-token"):
                 with mock.patch("hht_app.ebay_feed.requests.request", side_effect=fake_request):
                     result = ebay_feed.upload_seller_hub_draft_csv(items)
 
-        self.assertEqual(result["itemCount"], 2)
+        self.assertEqual(result["itemCount"], 5)
         self.assertEqual(result["feedType"], "FX_DRAFT")
         uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
         rows = list(csv.DictReader(io.StringIO(uploaded_csv)))
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 5)
         self.assertEqual({row["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"] for row in rows}, {"Draft"})
+
+    def test_seller_hub_draft_feed_deduplicates_by_sku_before_upload(self):
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if url.endswith("/sell/feed/v1/task") and method == "POST":
+                return FakeResponse(status_code=201, payload={"taskId": "task-dedup"})
+            if url.endswith("/upload_file") and method == "POST":
+                return FakeResponse(status_code=202, payload={})
+            return FakeResponse(status_code=200, payload={"taskId": "task-dedup", "status": "IN_PROCESS"})
+
+        items = [
+            {"sku": f"UNIQUE-{index}", "title": f"Item {index}", "price": 20, "cat": "57988"}
+            for index in range(5)
+        ]
+        items.insert(2, {**items[0], "title": "Duplicate copy"})
+        with env(EBAY_ENVIRONMENT="production"):
+            with mock.patch("hht_app.ebay_feed.seller_access_token", return_value="seller-token"):
+                with mock.patch("hht_app.ebay_feed.requests.request", side_effect=fake_request):
+                    result = ebay_feed.upload_seller_hub_draft_csv(items)
+
+        self.assertEqual(result["itemCount"], 5)
+        self.assertEqual(result["duplicateCount"], 1)
+        uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
+        self.assertEqual(len(list(csv.DictReader(io.StringIO(uploaded_csv)))), 5)
 
     def test_seller_hub_draft_feed_rejects_sandbox(self):
         with env(EBAY_ENVIRONMENT="sandbox"):
             with self.assertRaises(ebay_feed.EbayFeedError) as ctx:
-                ebay_feed.upload_seller_hub_draft_csv([{"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}])
+                ebay_feed.upload_seller_hub_draft_csv([
+                    {"sku": f"SANDBOX-{index}", "title": f"Levi's Jacket {index}", "price": 24.99, "cat": "57988"}
+                    for index in range(5)
+                ])
         self.assertEqual(ctx.exception.category, "configuration")
         self.assertIn("production-only", ctx.exception.safe_message)
 

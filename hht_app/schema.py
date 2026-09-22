@@ -280,9 +280,36 @@ def export_ebay_draft_csv(items: list[dict[str, Any]]) -> str:
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=EBAY_DRAFT_COLUMNS, extrasaction="ignore")
     writer.writeheader()
-    for item in items:
+    for item in deduplicate_draft_items(items):
         writer.writerow(build_ebay_draft_csv_row(item))
     return output.getvalue()
+
+
+def deduplicate_draft_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one CSV row per stable listing identity, preserving queue order."""
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = _draft_item_identity(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _draft_item_identity(item: dict[str, Any]) -> str:
+    for field in ("listingId", "offerId", "sku", "customLabel", "ebayUrl", "id"):
+        value = _text(item.get(field)).strip()
+        if value:
+            return f"{field}:{value.casefold()}"
+    fallback = "|".join(
+        _text(item.get(field)).strip().casefold()
+        for field in ("title", "cat", "price", "pic")
+    )
+    return f"content:{fallback}"
 
 
 def _draft_image_urls(value: Any) -> str:

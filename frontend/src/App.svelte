@@ -356,12 +356,27 @@
         return null;
     }
 
+    function queueIdentity(candidate) {
+        for (const field of ["listingId", "offerId", "sku", "customLabel", "ebayUrl"]) {
+            const value = String(candidate?.[field] || "").trim().toLowerCase();
+            if (value) return `${field}:${value}`;
+        }
+        return `content:${[candidate?.title, candidate?.cat, candidate?.price, candidate?.pic]
+            .map((value) => String(value || "").trim().toLowerCase())
+            .join("|")}`;
+    }
+
     function addToQueue() {
         const reviewed = reviewedCandidate(item);
         const validation = validateItem(reviewed);
         if (validation) {
             error = validation;
             tab = "edit";
+            return;
+        }
+        if (queue.some((entry) => queueIdentity(entry) === queueIdentity(reviewed))) {
+            error = "This listing is already in the queue. Edit the existing row instead of adding a duplicate.";
+            tab = "queue";
             return;
         }
         queue = [...queue, reviewed];
@@ -426,6 +441,10 @@
     async function sendDraftQueue() {
         if (!queue.length) {
             error = "Queue is empty.";
+            return;
+        }
+        if (queue.length < 5) {
+            error = "Seller Hub draft upload requires at least 5 unique reviewed items.";
             return;
         }
         const invalid = firstInvalidQueuedItem();
@@ -699,7 +718,7 @@
                     </div>
                 {/each}
                 <div class="actions">
-                    <button class="primary" disabled={draftLoading} on:click={sendDraftQueue}>{draftLoading ? "Sending..." : "Send Seller Hub Drafts to eBay"}</button>
+                    <button class="primary" disabled={draftLoading || queue.length < 5} on:click={sendDraftQueue}>{draftLoading ? "Sending..." : "Send Seller Hub Drafts to eBay (5+ items)"}</button>
                     <button on:click={exportDraftQueue}>Download Seller Hub Draft CSV</button>
                     <button on:click={exportQueue}>Download legacy File Exchange CSV</button>
                     <button on:click={backupQueue}>Download JSON backup</button>

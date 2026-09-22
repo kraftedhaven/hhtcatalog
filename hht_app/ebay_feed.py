@@ -10,12 +10,13 @@ import requests
 
 from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_pricing import DEFAULT_MARKETPLACE_ID
-from .schema import export_ebay_draft_csv
+from .schema import deduplicate_draft_items, export_ebay_draft_csv
 
 
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE = "FX_DRAFT"
 SELLER_HUB_SCHEMA_VERSION = "1.0"
+MIN_DRAFT_UPLOAD_ITEMS = 5
 
 
 class EbayFeedError(RuntimeError):
@@ -45,9 +46,18 @@ class EbayFeedError(RuntimeError):
 def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     if not isinstance(items, list) or not items:
         raise EbayFeedError(400, "invalid_request", "Queue must include at least one reviewed item.", operation="create_task")
+    unique_items = deduplicate_draft_items(items)
+    if len(unique_items) < MIN_DRAFT_UPLOAD_ITEMS:
+        duplicate_note = " after removing duplicates" if len(unique_items) != len(items) else ""
+        raise EbayFeedError(
+            400,
+            "invalid_request",
+            f"Seller Hub draft upload requires at least {MIN_DRAFT_UPLOAD_ITEMS} unique reviewed items; received {len(unique_items)}{duplicate_note}.",
+            operation="create_task",
+        )
     if _environment() == "sandbox":
         raise EbayFeedError(503, "configuration", f"Seller Hub {_draft_feed_type()} feed uploads are production-only; eBay does not support this Seller Hub upload flow in sandbox.", operation="create_task")
-    csv_text = export_ebay_draft_csv(items)
+    csv_text = export_ebay_draft_csv(unique_items)
     token = _seller_token(timeout)
     task_id = _create_task(token, timeout)
     filename = f"hht_seller_hub_drafts_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
@@ -60,7 +70,8 @@ def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DE
         "schemaVersion": SELLER_HUB_SCHEMA_VERSION,
         "taskId": task_id,
         "marketplaceId": _marketplace_id(),
-        "itemCount": len(items),
+        "itemCount": len(unique_items),
+        "duplicateCount": len(items) - len(unique_items),
         "fileName": filename,
         "uploadStatus": upload.get("status", "accepted"),
         "task": task,
