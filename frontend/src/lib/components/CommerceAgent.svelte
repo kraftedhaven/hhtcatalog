@@ -153,6 +153,32 @@
         return category || "Seller review required";
     }
 
+    function recommendationAction(entry) {
+        const proposed = entry?.proposed || {};
+        if (proposed.title) return "Improve the title first";
+        if (proposed.price !== undefined && proposed.price !== null && proposed.price !== "") return "Review the market price";
+        if (Object.keys(proposed).some((field) => field !== "title" && field !== "price")) return "Add searchable item specifics";
+        if (entry?.risk === "high" || entry?.confidence === "low") return "Seller review required";
+        return "Review the evidence";
+    }
+
+    function recommendationImpact(entry) {
+        const proposed = entry?.proposed || {};
+        const changes = [];
+        if (proposed.title) changes.push("better search matching");
+        if (proposed.price !== undefined && proposed.price !== null && proposed.price !== "") changes.push("a more competitive price");
+        if (Object.keys(proposed).some((field) => !["title", "price"].includes(field))) changes.push("more complete item specifics");
+        return changes.length ? `May improve ${changes.join(" and ")}.` : "No safe field change is ready from the available evidence.";
+    }
+
+    function scoreLabel(score) {
+        const value = Number(score);
+        if (!Number.isFinite(value)) return "Needs review";
+        if (value >= 75) return "Strong opportunity";
+        if (value >= 50) return "Worth reviewing";
+        return "Needs evidence";
+    }
+
     function toggleSelection(entry) {
         const id = entry.recommendationId;
         if (selectedIds.includes(id)) {
@@ -571,10 +597,11 @@
     <div class="commerce-head">
         <div>
             <p class="eyebrow">COMMERCE AGENT</p>
-            <h2>What needs your attention?</h2>
+            <h2>Improve listings, one clear action at a time</h2>
             <p class="help">
-                eBay listings are imported from official APIs. Recommendations
-                are reviewed before any approved fields are sent back to eBay.
+                Start with the highest-value opportunities. The agent uses listing evidence,
+                eBay category rules, market pricing signals, and searchable item specifics.
+                You approve every change before anything is sent to eBay.
             </p>
         </div>
         <span class="mode-badge">Recommend only</span>
@@ -584,8 +611,8 @@
     <div class="agent-next-step panel">
         <div>
             <span class="step-label">NEXT STEP</span>
-            <h3>{dashboard?.missingItemSpecifics ? `Review ${dashboard.missingItemSpecifics} missing item specifics` : "Review the recommendations below"}</h3>
-            <p class="help">Start with the first card. Open the details only when you need to verify evidence.</p>
+            <h3>{dashboard?.titleImprovements ? `Start with ${dashboard.titleImprovements} title opportunities` : "Review the recommendations below"}</h3>
+            <p class="help">Recommended order: title and item specifics first, then price. Open evidence only when you need to verify a suggestion.</p>
         </div>
         <button class="primary" disabled={loading} on:click={refresh}>Refresh recommendations</button>
     </div>
@@ -662,9 +689,9 @@
     </details>
     {#if dashboard}
         <div class="attention-summary" aria-label="Catalog attention summary">
-            <div><strong>{dashboard.listingsFound}</strong><span>active listings</span></div>
-            <div class:attention={dashboard.missingItemSpecifics > 0}><strong>{dashboard.missingItemSpecifics}</strong><span>need item specifics</span></div>
-            <div><strong>{dashboard.titleImprovements || 0}</strong><span>title changes</span></div>
+            <div><strong>{dashboard.listingsFound}</strong><span>active listings analyzed</span></div>
+            <div class:attention={dashboard.titleImprovements > 0}><strong>{dashboard.titleImprovements || 0}</strong><span>search-title opportunities</span></div>
+            <div class:attention={dashboard.missingItemSpecifics > 0}><strong>{dashboard.missingItemSpecifics}</strong><span>missing specifics</span></div>
             <div><strong>{dashboard.recovery?.appliedChanges || 0}</strong><span>changes applied</span></div>
         </div>
         <p class="help summary-note">Recommendations are suggestions, not automatic changes. Nothing is sent to eBay until you approve it.</p>
@@ -702,7 +729,7 @@
                         <div class="recommendation-heading">
                             <strong>{entry.listing.title || "Untitled listing"}</strong>
                             <span>
-                                {entry.classification} · Score {entry.score}/100 · {entry.status}
+                                {recommendationAction(entry)} · {scoreLabel(entry.score)} · {entry.status}
                             </span>
                         </div>
                         <span class="risk">{entry.risk} risk</span>
@@ -719,7 +746,10 @@
                                 rel="noreferrer">Open on eBay</a
                             >{/if}
                     </div>
-                    <p>{entry.reason}</p>
+                    <div class="recommendation-why">
+                        <strong>{recommendationAction(entry)}</strong>
+                        <p>{recommendationImpact(entry)} {entry.reason}</p>
+                    </div>
                     <div class="advisory-grid">
                         <div>
                             <span>Title candidate</span>
@@ -737,14 +767,8 @@
                             <span>Demand score</span>
                             <strong>{demandSummary(entry)}</strong>
                         </div>
-                        <div>
-                            <span>Confidence</span>
-                            <strong>{entry.confidence}</strong>
-                        </div>
-                        <div>
-                            <span>Risk</span>
-                            <strong>{entry.risk}</strong>
-                        </div>
+                        <div><span>Confidence</span><strong>{entry.confidence}</strong></div>
+                        <div><span>Seller action</span><strong>{entry.risk === "high" ? "Review manually" : "Approve only if evidence is clear"}</strong></div>
                     </div>
                     {#if proposedEntries(entry).length}
                         <details class="card-details">

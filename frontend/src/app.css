@@ -110,6 +110,9 @@ button.primary { border-color: var(--blue); background: var(--blue); color: #fff
 .recommendation-card { border-top: 1px solid var(--line); padding: 14px 0; }
 .recommendation-card:first-of-type { border-top: 0; padding-top: 0; }
 .recommendation-card p { color: #475569; font-size: 14px; }
+.recommendation-why { margin: 10px 0; border-left: 4px solid var(--blue); border-radius: 0 8px 8px 0; background: #f8fbff; padding: 10px 12px; }
+.recommendation-why strong { color: #1e3a8a; font-size: 14px; }
+.recommendation-why p { margin: 3px 0 0; }
 .recommendation-title { display: flex; justify-content: space-between; gap: 12px; }
 .recommendation-heading { min-width: 0; flex: 1; }
 .recommendation-title strong, .recommendation-title span { display: block; }

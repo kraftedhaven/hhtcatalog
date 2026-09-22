@@ -33,14 +33,15 @@ ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
 GROQ_DEFAULT_MODEL = "qwen/qwen3.6-27b"
 GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
+NVIDIA_DEFAULT_VISION_MODEL = "z-ai/glm-5.3-flash"
 MAX_PROVIDER_IMAGES = 5
 MAX_ZAI_IMAGES = 3
 MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
 MAX_GROQ_IMAGES = 3
 MAX_GROQ_REQUEST_BYTES = 4 * 1024 * 1024
 TRANSIENT_STATUS_CODES = {429, 502, 503}
-DEFAULT_ANALYZE_DEADLINE_SECONDS = 28.0
-DEFAULT_PROVIDER_TIMEOUT_SECONDS = 18.0
+DEFAULT_ANALYZE_DEADLINE_SECONDS = 24.0
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 10.0
 MAX_PROVIDER_RETRY_DELAY_SECONDS = 3.0
 ZAI_IMAGE_MAX_EDGE = 896
 ZAI_IMAGE_RETRY_MAX_EDGE = 640
@@ -199,16 +200,40 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
             _log_provider(selected, exc.status_code, exc.category, exc.retryable)
             if _should_trip_circuit(exc.status_code, exc.category, exc.upstream_error):
                 cooldown_seconds = _set_provider_cooldown(selected, exc.retry_after_seconds)
-                raise _rate_limited_error(plan, selected, cooldown_seconds, failures) from exc
+                # A transient provider failure should not end the request when
+                # another configured image provider can still run inside the
+                # overall deadline. Preserve the circuit cooldown and continue.
+                if not _has_remaining_alternate(plan, context):
+                    raise _rate_limited_error(plan, selected, cooldown_seconds, failures) from exc
         except Exception:
             failures.append(_failure(selected, _model_for_provider(selected), 502, "provider_error", False))
             _log_provider(selected, 502, "provider_error", False)
+
+    # If the first alternate is unavailable or times out, continue to the next
+    # configured provider within the same request instead of returning a 502.
+    # The frontend's one-click retry sets try_alternate; fallback_index prevents
+    # loops while preserving the original request deadline.
+    if plan.get("alternates"):
+        fallback_index = int(context.get("fallback_index", -1 if not context.get("try_alternate") else 0))
+        alternates = plan.get("alternates", [])
+        if fallback_index + 1 < len(alternates) and _remaining_seconds(context) >= 5:
+            next_context = dict(context)
+            next_context["try_alternate"] = True
+            next_context["fallback_index"] = fallback_index + 1
+            return analyze_images(compact_images, next_context)
 
     if demo_mode():
         demo = _demo_listing()
         demo["providerFailures"] = failures
         return demo
     raise ProviderError("Configured vision provider failed. No demo listing was generated.", 502, failures)
+
+
+def _has_remaining_alternate(plan: dict[str, Any], context: dict[str, Any]) -> bool:
+    alternates = plan.get("alternates", [])
+    index = int(context.get("fallback_index", -1 if not context.get("try_alternate") else 0))
+    next_index = index + 1 if index >= 0 else 0
+    return bool(alternates) and next_index < len(alternates) and _remaining_seconds(context) >= 5
 
 
 def _provider_plan(context: dict[str, Any] | None = None):
@@ -242,8 +267,13 @@ def _provider_plan(context: dict[str, Any] | None = None):
         )
     else:
         primary = configured[0]
-    alternates = [name for name in configured if name != primary]
-    chosen = alternates[0] if (try_alternate and alternates) else primary
+    # Prefer an explicitly configured image-capable provider over generic/free
+    # OpenRouter routing. The free OpenRouter model may be text-only even when
+    # its API key is present, which is not suitable for Analyze image uploads.
+    alternate_priority = ("nvidia", "openrouter", "groq")
+    alternates = [name for name in alternate_priority if name in configured and name != primary]
+    fallback_index = int(context.get("fallback_index", -1 if not try_alternate else 0))
+    chosen = alternates[fallback_index] if (try_alternate and alternates and fallback_index < len(alternates)) else primary
     if try_alternate and not alternates:
         raise ProviderError(
             "No alternate hosted provider is configured. Configure both OpenRouter and Groq to enable one-click failover.",
@@ -256,6 +286,7 @@ def _provider_plan(context: dict[str, Any] | None = None):
         "caller": callers[chosen][1],
         "primary": primary,
         "alternate": alternates[0] if alternates else None,
+        "alternates": alternates,
         "configured": configured,
         "try_alternate": try_alternate,
     }
@@ -311,6 +342,12 @@ def _zai_once(images: list[UploadedImage], context: dict[str, Any], model: str, 
 
 
 def _openrouter(images: list[UploadedImage], context: dict[str, Any]) -> str:
+    configured_model = os.environ.get("OPENROUTER_MODEL", "").strip()
+    # openrouter/free can resolve to a text-only model. Use a current free
+    # multimodal model unless the operator has explicitly selected a model.
+    model = configured_model or "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    if model == "openrouter/free":
+        model = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     content = [{"type": "text", "text": _prompt(context)}]
     content.extend({"type": "image_url", "image_url": {"url": image.data_url}} for image in images)
     response = requests.post(
@@ -322,7 +359,7 @@ def _openrouter(images: list[UploadedImage], context: dict[str, Any]) -> str:
             "X-Title": "HHT Catalog",
         },
         json={
-            "model": os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
+            "model": model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.1,
             "max_tokens": 1400,
@@ -366,7 +403,14 @@ def _groq_once(model: str, content: list[dict[str, Any]], context: dict[str, Any
 
 
 def _nvidia(images: list[UploadedImage], context: dict[str, Any]) -> str:
-    model = (os.environ.get("NVIDIA_CATEGORY_MODEL") or "").strip()
+    configured_model = (os.environ.get("NVIDIA_CATEGORY_MODEL") or "").strip()
+    # The previously deployed Llama 3.2 vision identifier is no longer reliable
+    # on NVIDIA's hosted catalog. Keep the Heroku variable backward-compatible,
+    # but replace that retired value with the current multimodal model default.
+    model = NVIDIA_DEFAULT_VISION_MODEL if configured_model in {
+        "meta/llama-3.2-11b-vision-instruct",
+        "",
+    } else configured_model
     base_url = (os.environ.get("NVIDIA_NIM_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
     if not model:
         raise ProviderError("NVIDIA category model is not configured.", 503, provider="nvidia", category="configuration")
@@ -376,7 +420,7 @@ def _nvidia(images: list[UploadedImage], context: dict[str, Any]) -> str:
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.1,
-        "max_tokens": 1400,
+        "max_completion_tokens": 1400,
         "stream": False,
     }
     return _post_openai_compatible("nvidia", model, f"{base_url}/chat/completions", os.environ["NVIDIA_NIM_API_KEY"], payload, context)
@@ -824,7 +868,7 @@ def _parse_retry_after_header(value: str) -> int | None:
 def _rate_limited_error(plan: dict[str, Any], provider: str, retry_after_seconds: int, failures: list[dict[str, Any]]) -> ProviderError:
     can_try_alternate = bool(plan.get("alternate")) and not plan.get("try_alternate")
     all_unavailable = _all_configured_providers_unavailable(plan["configured"])
-    next_retry = retry_after_seconds
+    next_retry = _next_retry_after_seconds(plan["configured"]) or retry_after_seconds
     retry_text = f" Retry after about {next_retry} second{'s' if next_retry != 1 else ''}." if next_retry else " Retry after cooldown expires."
     if all_unavailable:
         message = f"All hosted providers are temporarily unavailable.{retry_text} Use browser-local SmolVLM where supported."

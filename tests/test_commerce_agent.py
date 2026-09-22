@@ -46,7 +46,7 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertIn("Coach", audit["proposed"]["title"])
         self.assertNotEqual(audit["proposed"]["title"].casefold(), "brown signature handbag")
 
-    def test_audit_always_has_actionable_proposed_change_for_findings(self):
+    def test_audit_marks_note_only_findings_as_review_only(self):
         audit = commerce_agent.audit_listing({
             "title": "Complete Seller Reviewed Patagonia Fleece Jacket Blue Mens Medium",
             "price": 42,
@@ -59,8 +59,10 @@ class CommerceAgentTests(unittest.TestCase):
             "cnote": "Pre-owned with light wear.",
             "pic": "",
         })
-        self.assertIn("notes", audit["proposed"])
-        self.assertIn("Seller review required", audit["proposed"]["notes"])
+        self.assertEqual(audit["proposed"], {})
+        self.assertEqual(audit["classification"], "Needs Review")
+        self.assertEqual(audit["risk"], "high")
+        self.assertEqual(audit["confidence"], "low")
 
     def test_sold_comparable_summary_creates_price_proposal(self):
         audit = commerce_agent.audit_listing({
