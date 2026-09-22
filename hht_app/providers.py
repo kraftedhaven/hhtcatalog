@@ -205,6 +205,18 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
             failures.append(_failure(selected, _model_for_provider(selected), 502, "provider_error", False))
             _log_provider(selected, 502, "provider_error", False)
 
+    # If the first alternate is unavailable or times out, continue to the next
+    # configured provider within the same request instead of returning a 502.
+    # The frontend's one-click retry sets try_alternate; fallback_index prevents
+    # loops while preserving the original request deadline.
+    if context.get("try_alternate"):
+        fallback_index = int(context.get("fallback_index", 0))
+        alternates = plan.get("alternates", [])
+        if fallback_index + 1 < len(alternates) and _remaining_seconds(context) >= 5:
+            next_context = dict(context)
+            next_context["fallback_index"] = fallback_index + 1
+            return analyze_images(compact_images, next_context)
+
     if demo_mode():
         demo = _demo_listing()
         demo["providerFailures"] = failures
@@ -248,7 +260,8 @@ def _provider_plan(context: dict[str, Any] | None = None):
     # its API key is present, which is not suitable for Analyze image uploads.
     alternate_priority = ("nvidia", "openrouter", "zai", "groq")
     alternates = [name for name in alternate_priority if name in configured and name != primary]
-    chosen = alternates[0] if (try_alternate and alternates) else primary
+    fallback_index = int(context.get("fallback_index", 0))
+    chosen = alternates[fallback_index] if (try_alternate and alternates and fallback_index < len(alternates)) else primary
     if try_alternate and not alternates:
         raise ProviderError(
             "No alternate hosted provider is configured. Configure both OpenRouter and Groq to enable one-click failover.",
@@ -261,6 +274,7 @@ def _provider_plan(context: dict[str, Any] | None = None):
         "caller": callers[chosen][1],
         "primary": primary,
         "alternate": alternates[0] if alternates else None,
+        "alternates": alternates,
         "configured": configured,
         "try_alternate": try_alternate,
     }
@@ -316,6 +330,12 @@ def _zai_once(images: list[UploadedImage], context: dict[str, Any], model: str, 
 
 
 def _openrouter(images: list[UploadedImage], context: dict[str, Any]) -> str:
+    configured_model = os.environ.get("OPENROUTER_MODEL", "").strip()
+    # openrouter/free can resolve to a text-only model. Use a current free
+    # multimodal model unless the operator has explicitly selected a model.
+    model = configured_model or "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    if model == "openrouter/free":
+        model = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     content = [{"type": "text", "text": _prompt(context)}]
     content.extend({"type": "image_url", "image_url": {"url": image.data_url}} for image in images)
     response = requests.post(
@@ -327,7 +347,7 @@ def _openrouter(images: list[UploadedImage], context: dict[str, Any]) -> str:
             "X-Title": "HHT Catalog",
         },
         json={
-            "model": os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
+            "model": model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.1,
             "max_tokens": 1400,
