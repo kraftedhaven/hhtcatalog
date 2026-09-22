@@ -14,7 +14,7 @@ from .schema import export_ebay_draft_csv
 
 
 DEFAULT_TIMEOUT_SECONDS = 15.0
-SELLER_HUB_LISTING_FEED_TYPE = "FX_LISTING"
+DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE = "FX_DRAFT"
 SELLER_HUB_SCHEMA_VERSION = "1.0"
 
 
@@ -46,7 +46,7 @@ def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DE
     if not isinstance(items, list) or not items:
         raise EbayFeedError(400, "invalid_request", "Queue must include at least one reviewed item.", operation="create_task")
     if _environment() == "sandbox":
-        raise EbayFeedError(503, "configuration", "Seller Hub FX_LISTING feed uploads are production-only; eBay does not support this Seller Hub upload flow in sandbox.", operation="create_task")
+        raise EbayFeedError(503, "configuration", f"Seller Hub {_draft_feed_type()} feed uploads are production-only; eBay does not support this Seller Hub upload flow in sandbox.", operation="create_task")
     csv_text = export_ebay_draft_csv(items)
     token = _seller_token(timeout)
     task_id = _create_task(token, timeout)
@@ -56,7 +56,7 @@ def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DE
     return {
         "status": "submitted",
         "provider": "ebay_feed",
-        "feedType": SELLER_HUB_LISTING_FEED_TYPE,
+        "feedType": _draft_feed_type(),
         "schemaVersion": SELLER_HUB_SCHEMA_VERSION,
         "taskId": task_id,
         "marketplaceId": _marketplace_id(),
@@ -64,7 +64,7 @@ def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DE
         "fileName": filename,
         "uploadStatus": upload.get("status", "accepted"),
         "task": task,
-        "nextStep": "Open Seller Hub Reports or poll this task for processing results. This FX_LISTING upload is intended for Seller Hub draft CSV files, not direct live publishing.",
+        "nextStep": "Open Seller Hub Reports or poll this task for processing results. This Seller Hub draft feed is intended for draft CSV files, not direct live publishing.",
     }
 
 
@@ -115,7 +115,7 @@ def _create_task(token: str, timeout: float) -> str:
         "POST",
         f"{_api_base_url()}/sell/feed/v1/task",
         token,
-        {"feedType": SELLER_HUB_LISTING_FEED_TYPE, "schemaVersion": SELLER_HUB_SCHEMA_VERSION},
+        {"feedType": _draft_feed_type(), "schemaVersion": SELLER_HUB_SCHEMA_VERSION},
         timeout,
         expected_statuses={200, 201, 202},
         operation="create_task",
@@ -140,7 +140,7 @@ def _upload_file(token: str, task_id: str, filename: str, payload: bytes, timeou
         timeout,
         expected_statuses={200, 201, 202, 204},
         operation="upload_file",
-        data={"fileName": filename, "creationDate": now, "modificationDate": now},
+        data={"fileName": filename, "name": "file", "type": "form-data", "creationDate": now, "modificationDate": now},
         files={"file": (filename, payload, "text/csv")},
     ) or {"status": "accepted"}
 
@@ -213,6 +213,10 @@ def _environment() -> str:
 
 def _marketplace_id() -> str:
     return os.environ.get("EBAY_MARKETPLACE_ID") or DEFAULT_MARKETPLACE_ID
+
+
+def _draft_feed_type() -> str:
+    return os.environ.get("EBAY_SELLER_HUB_DRAFT_FEED_TYPE", DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE).strip() or DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE
 
 
 def _api_base_url() -> str:

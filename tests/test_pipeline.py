@@ -944,7 +944,7 @@ class MergePipelineTests(unittest.TestCase):
         self.assertIn("/offer/offer-123", calls[1][1])
         self.assertEqual(calls[1][2]["json"]["pricingSummary"]["price"]["value"], "29.99")
 
-    def test_seller_hub_draft_feed_upload_uses_fx_listing(self):
+    def test_seller_hub_draft_feed_upload_uses_draft_feed_type(self):
         calls = []
 
         def fake_request(method, url, **kwargs):
@@ -962,11 +962,42 @@ class MergePipelineTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "submitted")
         self.assertEqual(result["taskId"], "task-123")
-        self.assertEqual(calls[0][2]["json"], {"feedType": "FX_LISTING", "schemaVersion": "1.0"})
+        self.assertEqual(calls[0][2]["json"], {"feedType": "FX_DRAFT", "schemaVersion": "1.0"})
         self.assertEqual(calls[1][0], "POST")
         self.assertIn("/sell/feed/v1/task/task-123/upload_file", calls[1][1])
         self.assertIn("files", calls[1][2])
         self.assertIn("fileName", calls[1][2]["data"])
+        self.assertEqual(calls[1][2]["data"]["name"], "file")
+        self.assertEqual(calls[1][2]["data"]["type"], "form-data")
+        uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
+        self.assertEqual(next(csv.DictReader(io.StringIO(uploaded_csv)))["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"], "Draft")
+
+    def test_seller_hub_draft_feed_two_item_pilot_payload(self):
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if url.endswith("/sell/feed/v1/task") and method == "POST":
+                return FakeResponse(status_code=201, payload={"taskId": "task-pilot"})
+            if url.endswith("/upload_file") and method == "POST":
+                return FakeResponse(status_code=202, payload={})
+            return FakeResponse(status_code=200, payload={"taskId": "task-pilot", "status": "IN_PROCESS"})
+
+        items = [
+            {"sku": "PILOT-1", "title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"},
+            {"sku": "PILOT-2", "title": "Coach Bag", "price": 49.99, "cat": "169291", "brand": "Coach", "type": "Handbag"},
+        ]
+        with env(EBAY_ENVIRONMENT="production"):
+            with mock.patch("hht_app.ebay_feed.seller_access_token", return_value="seller-token"):
+                with mock.patch("hht_app.ebay_feed.requests.request", side_effect=fake_request):
+                    result = ebay_feed.upload_seller_hub_draft_csv(items)
+
+        self.assertEqual(result["itemCount"], 2)
+        self.assertEqual(result["feedType"], "FX_DRAFT")
+        uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
+        rows = list(csv.DictReader(io.StringIO(uploaded_csv)))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"] for row in rows}, {"Draft"})
 
     def test_seller_hub_draft_feed_rejects_sandbox(self):
         with env(EBAY_ENVIRONMENT="sandbox"):

@@ -430,7 +430,7 @@
             tab = "edit";
             return;
         }
-        const confirmed = window.confirm("Send this queue to eBay as a Seller Hub FX_LISTING draft feed? This submits drafts for processing; it does not publish live listings.");
+        const confirmed = window.confirm("Send this queue to eBay as a Seller Hub draft feed? This submits drafts for processing; it does not publish live listings.");
         if (!confirmed) return;
         error = "";
         draftLoading = true;
@@ -705,7 +705,7 @@
             <button type="button" on:click={() => restoreInput.click()}>Restore JSON backup</button>
             <div class="notice warn">
                 <strong>Seller Hub draft workflow</strong>
-                <p><b>Send Seller Hub Drafts to eBay</b> uploads this queue through eBay’s Sell Feed API as an FX_LISTING draft feed. It is intended for Seller Hub draft processing, not direct live publishing.</p>
+                <p><b>Send Seller Hub Drafts to eBay</b> uploads this queue through eBay’s Sell Feed API as a Seller Hub draft feed. It is intended for Seller Hub draft processing, not direct live publishing.</p>
                 <p><b>Download Seller Hub Draft CSV</b> remains available if you want to inspect the file or upload manually in <b>Seller Hub → Reports → Uploads → Create new drafts</b>.</p>
                 <p><b>Legacy File Exchange CSV</b> is for a matching legacy/File Exchange template only; do not upload it as a Seller Hub Draft template. Local phone photos must still be added in eBay or hosted at public URLs.</p>
             </div>
