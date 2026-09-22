@@ -482,12 +482,12 @@ class MergePipelineTests(unittest.TestCase):
         providers.PROVIDER_COOLDOWNS["openrouter"] = providers.time.monotonic() - 1
         self.assertEqual(providers._cooldown_remaining_seconds("openrouter"), 0)
 
-    def test_production_provider_order_is_groq_openrouter_nvidia(self):
+    def test_production_provider_order_prefers_nvidia_for_image_failover(self):
         with env(GROQ_API_KEY="gr", OPENROUTER_API_KEY="or", NVIDIA_NIM_API_KEY="nv"):
             plan = providers._provider_plan()
         self.assertEqual(plan["configured"], ["groq", "openrouter", "nvidia"])
         self.assertEqual(plan["primary"], "groq")
-        self.assertEqual(plan["alternate"], "openrouter")
+        self.assertEqual(plan["alternate"], "nvidia")
 
     def test_unapproved_google_provider_configuration_is_ignored(self):
         with env(GROQ_API_KEY="gr", **{"GE" + "MINI_API_KEY": "gm"}):

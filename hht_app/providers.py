@@ -242,7 +242,11 @@ def _provider_plan(context: dict[str, Any] | None = None):
         )
     else:
         primary = configured[0]
-    alternates = [name for name in configured if name != primary]
+    # Prefer an explicitly configured image-capable provider over generic/free
+    # OpenRouter routing. The free OpenRouter model may be text-only even when
+    # its API key is present, which is not suitable for Analyze image uploads.
+    alternate_priority = ("nvidia", "openrouter", "zai", "groq")
+    alternates = [name for name in alternate_priority if name in configured and name != primary]
     chosen = alternates[0] if (try_alternate and alternates) else primary
     if try_alternate and not alternates:
         raise ProviderError(
