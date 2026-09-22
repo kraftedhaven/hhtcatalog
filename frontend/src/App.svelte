@@ -99,6 +99,11 @@
             status = result.demo ? "Demo result loaded. Review required." : `Analysis complete via ${result.provider || engine}. Review required.`;
             tab = "edit";
         } catch (err) {
+            if (engine === "hosted" && err.canTryAlternate && !options.tryAlternate) {
+                status = `Primary vision provider unavailable. Retrying with ${err.alternateProvider || "the alternate provider"}...`;
+                await analyze({ ...options, tryAlternate: true });
+                return;
+            }
             error = friendlyAnalyzeError(err);
             canTryAlternate = engine === "hosted" && Boolean(err.canTryAlternate) && !options.tryAlternate;
             alternateProvider = canTryAlternate ? (err.alternateProvider || "") : "";
@@ -548,13 +553,13 @@
             <label class="field">
                 <span>Analysis engine</span>
                 <select bind:value={engine}>
-                    <option value="hosted">Fast hosted Groq vision</option>
+                    <option value="hosted">Hosted vision with automatic fallback</option>
                     <option value="local">Browser-local SmolVLM experimental</option>
                 </select>
             </label>
             <p class="help">
                 {engine === "hosted"
-                    ? "Photos go to this Heroku app, which calls Groq with server-side provider keys only."
+                    ? "Photos go to this Heroku app. It uses the primary provider and automatically retries with the configured alternate provider if the primary is temporarily unavailable."
                     : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
             </p>
             <label class="dropzone">
