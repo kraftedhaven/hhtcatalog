@@ -581,32 +581,37 @@
     </div>
     {#if error}<div class="notice error" role="alert">{error}</div>{/if}
     {#if message}<div class="notice info" aria-live="polite">{message}</div>{/if}
-    <div class="notice warn" role="note" aria-live="polite">
-        <strong>Pricing warning</strong>
-        <p>
-            Active prices are not sold prices. Review every pricing recommendation
-            against approved sold-comparable evidence before applying any update.
-        </p>
+    <div class="agent-next-step panel">
+        <div>
+            <span class="step-label">NEXT STEP</span>
+            <h3>{dashboard?.missingItemSpecifics ? `Review ${dashboard.missingItemSpecifics} missing item specifics` : "Review the recommendations below"}</h3>
+            <p class="help">Start with the first card. Open the details only when you need to verify evidence.</p>
+        </div>
+        <button class="primary" disabled={loading} on:click={refresh}>Refresh recommendations</button>
     </div>
-    <div class="actions commerce-actions">
-        <button
-            class="primary"
-            disabled={loading}
-            on:click={importActiveAndAudit}
-            >{loading ? "Working..." : "Analyze Active Listings"}</button
-        >
-        <button disabled={loading} on:click={importAndAudit}
-            >Import API Inventory</button
-        >
-        <button disabled={loading} on:click={() => enrichFullCatalog(false)}
-            >Enrich active catalog (read-only)</button
-        >
-        <button disabled={loading} on:click={() => enrichFullCatalog(true)}
-            >Resume failed enrichment</button
-        >
-        <button disabled={loading} on:click={refresh}>Refresh Queue</button>
-    </div>
-    <div class="panel nested-panel filters-panel">
+    <details class="panel advanced-panel">
+        <summary>Import, enrich, and pilot tools</summary>
+        <p class="help">These tools are safe to run, but are not needed for everyday review.</p>
+        <div class="actions commerce-actions">
+            <button class="primary" disabled={loading} on:click={importActiveAndAudit}>{loading ? "Working..." : "Analyze Active Listings"}</button>
+            <button disabled={loading} on:click={importAndAudit}>Import API Inventory</button>
+            <button disabled={loading} on:click={() => enrichFullCatalog(false)}>Enrich active catalog (read-only)</button>
+            <button disabled={loading} on:click={() => enrichFullCatalog(true)}>Resume failed enrichment</button>
+        </div>
+        <div class="pilot-toolbar">
+            <div><strong>Pilot workflow</strong><p class="help">Review 10–20 listings before expanding to the full catalog.</p></div>
+            <div class="actions">
+                <label class="pilot-size"><span>Pilot size</span><select bind:value={pilotSize} aria-label="Pilot size">{#each PILOT_SIZES as size}<option value={size}>{size} listings</option>{/each}</select></label>
+                <button disabled={loading || visible.length < 10} on:click={selectPilotBatch}>Select first {pilotSize}</button>
+                <button disabled={!selectedIds.length} on:click={clearPilotSelection}>Clear selection</button>
+                <button disabled={selectedEntries.length < 10 || selectedEntries.length > 20} on:click={exportPilotResults}>Export pilot results</button>
+                <button class="primary" disabled={loading || !selectedEntries.some((entry) => entry?.listing?.listingId)} on:click={enrichSelectedPilot}>Enrich selected (read-only)</button>
+                <button disabled={loading || !selectedPendingCount} on:click={approveSelected}>Approve selected (no eBay write)</button>
+            </div>
+        </div>
+    </details>
+    <details class="panel filters-panel">
+        <summary>Filter recommendations</summary>
         <div class="filter-grid">
             <label>
                 <span>Status</span>
@@ -654,75 +659,15 @@
                 </select>
             </label>
         </div>
-        <div class="pilot-toolbar">
-            <div>
-                <strong>Pilot workflow</strong>
-                <p class="help">
-                    Review a pilot set of 10–20 listings before expanding to the full catalog.
-                </p>
-            </div>
-            <div class="actions">
-                <label class="pilot-size">
-                    <span>Pilot size</span>
-                    <select bind:value={pilotSize} aria-label="Pilot size">
-                        {#each PILOT_SIZES as size}
-                            <option value={size}>{size} listings</option>
-                        {/each}
-                    </select>
-                </label>
-                <button disabled={loading || visible.length < 10} on:click={selectPilotBatch}
-                    >Select first {pilotSize}</button
-                >
-                <button disabled={!selectedIds.length} on:click={clearPilotSelection}
-                    >Clear selection</button
-                >
-                <button
-                    disabled={
-                        selectedEntries.length < 10 || selectedEntries.length > 20
-                    }
-                    on:click={exportPilotResults}
-                    >Export pilot results</button
-                >
-                <button
-                    class="primary"
-                    disabled={
-                        loading ||
-                        !selectedEntries.some((entry) => entry?.listing?.listingId)
-                    }
-                    on:click={enrichSelectedPilot}
-                    >Enrich selected (read-only)</button
-                >
-                <button disabled={loading || !selectedPendingCount} on:click={approveSelected}
-                    >Approve selected (no eBay write)</button
-                >
-            </div>
-        </div>
-        <p class="help workflow-note">
-            Pending → <b>Approve only</b> · Approved → <b>Apply approved change</b> · Applied →
-            read-only history
-        </p>
-    </div>
+    </details>
     {#if dashboard}
-        <div class="stats commerce-stats">
-            <div>
-                <strong>{dashboard.listingsFound}</strong><span>Listings found</span>
-            </div>
-            <div>
-                <strong>{dashboard.needOptimization}</strong><span>Need optimization</span>
-            </div>
-            <div>
-                <strong>{dashboard.titleImprovements}</strong><span>Title opportunities</span>
-            </div>
-            <div>
-                <strong>{dashboard.missingItemSpecifics}</strong><span>Missing specifics</span>
-            </div>
+        <div class="attention-summary" aria-label="Catalog attention summary">
+            <div><strong>{dashboard.listingsFound}</strong><span>active listings</span></div>
+            <div class:attention={dashboard.missingItemSpecifics > 0}><strong>{dashboard.missingItemSpecifics}</strong><span>need item specifics</span></div>
+            <div><strong>{dashboard.titleImprovements || 0}</strong><span>title changes</span></div>
+            <div><strong>{dashboard.recovery?.appliedChanges || 0}</strong><span>changes applied</span></div>
         </div>
-        {#if dashboard.recovery}<div class="help">
-                Recovery tracking: {dashboard.recovery.listingsNeedingReview} pending reviews
-                · {dashboard.recovery.highRiskPendingReviews} high-risk · {dashboard.recovery.appliedChanges} applied
-                · {dashboard.recovery.catalogReviewCoverage}% catalog coverage
-                · {dashboard.recovery.categoryConfirmationNeeded || 0} category confirmations needed
-            </div>{/if}
+        <p class="help summary-note">Recommendations are suggestions, not automatic changes. Nothing is sent to eBay until you approve it.</p>
     {/if}
     <div class="commerce-grid">
         <div class="panel nested-panel">
@@ -802,6 +747,8 @@
                         </div>
                     </div>
                     {#if proposedEntries(entry).length}
+                        <details class="card-details">
+                            <summary>Show proposed changes ({proposedEntries(entry).length})</summary>
                         <div class="table-scroll">
                             <table class="comparison-table" aria-label="Current and proposed changes">
                                 <thead>
@@ -824,10 +771,13 @@
                                 </tbody>
                             </table>
                         </div>
+                        </details>
                     {:else}<p class="help">
                             No field changes recommended from the available evidence.
                         </p>{/if}
                     {#if entry.evidence?.length}
+                        <details class="card-details">
+                            <summary>Show evidence ({entry.evidence.length} fields)</summary>
                         <div class="table-scroll">
                             <table class="evidence-table" aria-label="Attribute evidence">
                                 <thead>
@@ -854,6 +804,7 @@
                                 </tbody>
                             </table>
                         </div>
+                        </details>
                     {/if}
                     {#if entry.taxonomy}<div class="help meta-note">
                             <b>Taxonomy:</b> {entry.taxonomy.message}
