@@ -323,6 +323,24 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertTrue(context["background_worker"])
         self.assertGreater(context["provider_timeout_seconds"], 8)
 
+    def test_failed_nvidia_vision_job_persists_sanitized_provider_diagnostics(self):
+        from hht_app.providers import ProviderError
+
+        image = {"data": b"tiny-image", "mimeType": "image/jpeg", "filename": "coat.jpg"}
+        started = commerce_agent.start_nvidia_vision_job([image])
+        failure = ProviderError(
+            "Configured vision provider failed.",
+            502,
+            failures=[{"provider": "nvidia", "category": "timeout", "message": "NVIDIA analysis timed out.", "retryable": True}],
+        )
+        with mock.patch("hht_app.providers.analyze_images", side_effect=failure):
+            completed = commerce_agent.run_job(started["jobId"])
+        self.assertEqual(completed["status"], "failed")
+        self.assertEqual(completed["error"], "Configured vision provider failed.")
+        result = commerce_agent._decode(completed["result_json"], {})
+        self.assertEqual(result["providerFailures"][0]["provider"], "nvidia")
+        self.assertNotIn("tiny-image", str(result))
+
     def test_checkpointed_full_enrichment_runs_in_20_item_chunks_and_remains_read_only(self):
         for index in range(2, 23):
             with commerce_agent.connect() as db:

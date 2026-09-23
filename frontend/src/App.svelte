@@ -137,7 +137,12 @@
         while (Date.now() < expiresAt) {
             const job = await commerceJob(jobId);
             if (job.status === "completed") return job.result || {};
-            if (job.status === "failed") throw new Error(job.error || "NVIDIA analysis failed in the worker.");
+            if (job.status === "failed") {
+                const failure = new Error(job.error || "NVIDIA analysis failed in the worker.");
+                failure.providerFailures = job.result?.providerFailures || [];
+                failure.retryAfterSeconds = job.result?.retryAfterSeconds || null;
+                throw failure;
+            }
             status = job.status === "running"
                 ? "NVIDIA is analyzing the product in the background..."
                 : "NVIDIA analysis is queued. It will continue even if this page closes.";

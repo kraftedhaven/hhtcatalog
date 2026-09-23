@@ -666,7 +666,23 @@ def run_job(job_id: str) -> dict[str, Any] | None:
         return active_import_job(job_id)
     except Exception as exc:
         logger.exception("Commerce Agent job failed: %s", kind)
-        _update_job(job_id, "failed", 100, {}, str(exc)[:240])
+        details: dict[str, Any] = {}
+        message = str(exc)[:240]
+        # Vision jobs must expose only normalized, credential-safe diagnostics
+        # through the existing job endpoint. This allows the UI to explain why
+        # NVIDIA or its fallback could not complete without leaking upstream
+        # bodies, image data, or API credentials.
+        if kind == "nvidia_vision":
+            try:
+                from .providers import ProviderError
+                if isinstance(exc, ProviderError):
+                    details = {"providerFailures": exc.failures}
+                    if exc.retry_after_seconds is not None:
+                        details["retryAfterSeconds"] = exc.retry_after_seconds
+                    message = str(exc.safe_message or exc)[:240]
+            except Exception:
+                pass
+        _update_job(job_id, "failed", 100, details, message)
         return active_import_job(job_id)
 
 
