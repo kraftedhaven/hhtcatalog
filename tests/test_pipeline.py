@@ -398,6 +398,13 @@ class MergePipelineTests(unittest.TestCase):
     def test_zai_503_failure_retries_once(self):
         self._assert_zai_failure(503, "server_error", True)
 
+    def test_nvidia_transient_failure_does_not_consume_fallback_budget_with_retry(self):
+        with env(NVIDIA_NIM_API_KEY="nv", NVIDIA_NIM_BASE_URL="https://nvidia.example/v1", NVIDIA_CATEGORY_MODEL="vision-model"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=503)) as post:
+                with self.assertRaises(providers.ProviderError):
+                    providers._nvidia([self.image], {"deadline": providers.time.monotonic() + 20})
+        self.assertEqual(post.call_count, 1)
+
     def test_zai_malformed_json_failure_is_sanitized(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload={"choices": [{"message": {"content": "not json"}}]})):

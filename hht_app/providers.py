@@ -474,7 +474,11 @@ def _post_openai_compatible(
         category = _provider_category(provider, response.status_code, upstream_error)
         retryable = _retryable_provider_status(response.status_code, category)
         if response.status_code >= 400:
-            if attempts == 1 and retryable and _remaining_seconds(context) >= 5:
+            # NVIDIA's hosted endpoint can hold a request while capacity is
+            # unavailable. Retrying it consumes the entire web-request budget
+            # and prevents the configured OpenRouter fallback from running.
+            # Fail fast for NVIDIA and continue through the provider chain.
+            if attempts == 1 and retryable and provider != "nvidia" and _remaining_seconds(context) >= 5:
                 _provider_backoff(attempts, response)
                 continue
             raise ProviderError(
