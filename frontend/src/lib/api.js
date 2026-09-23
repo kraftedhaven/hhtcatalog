@@ -9,7 +9,7 @@ function baseUrl() {
 }
 
 async function parseResponse(res) {
-    const contentType = res.headers.get('content-type') || '';
+    const contentType = (res.headers?.get('content-type') || '').toLowerCase();
     const body = contentType.includes('application/json') ? await res.json() : await res.text();
     if (!res.ok) {
         const htmlError = typeof body === 'string' && /<!doctype html|<html[\s>]/i.test(body);
@@ -56,11 +56,14 @@ export async function downloadCSV(items, defaults = {}) {
         throw new Error(body.error || `CSV export failed: ${res.status}`);
     }
     const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = url;
     a.download = `hht_ebay_listings_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
     a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
 
 export async function downloadDraftCSV(items) {
@@ -74,11 +77,14 @@ export async function downloadDraftCSV(items) {
         throw new Error(body.error || `Draft CSV export failed: ${res.status}`);
     }
     const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = url;
     a.download = `hht_ebay_drafts_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
     a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
 
 export async function createEbayDraft(item) {
@@ -240,9 +246,12 @@ export function commerceHistory() {
 
 export function downloadJSON(data, filename = 'hht-listings-backup.json') {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = url;
     a.download = filename;
+    document.body.appendChild(a);
     a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
