@@ -38,6 +38,14 @@
     let oauthLoading = false;
     let oauthStatus = "";
 
+    const canonicalAspectKeys = {
+        brand: "brand", model: "model", size: "size", color: "color", department: "dept",
+        type: "type", style: "style", theme: "theme", material: "mat", pattern: "pat",
+        "sleeve length": "slv", neckline: "nk", season: "sea", occasion: "occ",
+        "size type": "st", vintage: "vin", "made in": "madeIn", "country/region of manufacture": "madeIn",
+        "serial number": "serialNumber", measurements: "measurements", condition: "cnote"
+    };
+
     $: titleLength = (item.title || "").length;
     $: queueTotal = queue.reduce((sum, next) => sum + (Number.parseFloat(next.price) || 0), 0);
     $: queueAverage = queue.length ? queueTotal / queue.length : 0;
@@ -45,6 +53,7 @@
     $: persist("hht_seller_defaults", seller);
     $: persist("hht_current_item", item);
     $: reviewNotes = sellerReviewNotes(item);
+    $: visibleCategoryFields = categoryFields.filter((field) => !canonicalAspectKeys[aspectKey(field.name)]);
 
     function load(key, fallback) {
         try {
@@ -330,15 +339,22 @@
         await loadCategoryFields(suggestion.categoryId);
     }
 
-    function updateCategoryField(name, value) {
-        item = {
-            ...item,
-            itemSpecifics: { ...(item.itemSpecifics || {}), [name]: value },
-        };
+    function categoryFieldValue(name) {
+        const key = canonicalAspectKeys[aspectKey(name)];
+        return key ? item[key] || "" : item.itemSpecifics?.[name] || "";
     }
 
-    function categoryFieldValue(name) {
-        return item.itemSpecifics?.[name] || "";
+    function aspectKey(name) {
+        return String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
+    }
+
+    function updateCategoryField(name, value) {
+        const key = canonicalAspectKeys[aspectKey(name)];
+        if (key) {
+            item = { ...item, [key]: value };
+            return;
+        }
+        item = { ...item, itemSpecifics: { ...(item.itemSpecifics || {}), [name]: value } };
     }
 
     function reviewedCandidate(source = item) {
@@ -615,6 +631,10 @@
             </div>
         {/if}
         <section class="panel form">
+            <div class="wide notice info">
+                <strong>One listing form for both export methods</strong>
+                <p>Complete each fact once in this eBay-aligned form. Seller Hub Draft CSV and the legacy CSV export use the same values automatically; you do not need to re-enter a second set of fields.</p>
+            </div>
             <label class="field wide"><span>Title <em>{titleLength}/80</em></span><input bind:value={item.title} maxlength="80" /></label>
             <label class="field"><span>Price</span><input bind:value={item.price} inputmode="decimal" /></label>
             <label class="field"><span>SKU / Custom label</span><input bind:value={item.sku} placeholder="Optional unique item code" /></label>
@@ -633,11 +653,7 @@
                     <input bind:value={categoryQuery} placeholder="Search: kids hat, Coach bag, women’s sandals" on:keydown={(event) => event.key === "Enter" && (event.preventDefault(), findCategories())} />
                     <button type="button" disabled={categoryLoading} on:click={() => findCategories()}>{categoryLoading ? "Searching..." : "Find eBay categories"}</button>
                 </div>
-                <label class="field"><span>Quick category menu</span><select bind:value={item.cat} on:change={() => { item = applyClientRules(item); loadCategoryFields(item.cat); }}>{#each CATEGORY_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-                <div class="category-manual">
-                    <label class="field"><span>Manual eBay category ID</span><input bind:value={item.cat} inputmode="numeric" placeholder="Use only a verified eBay leaf category ID" on:change={() => loadCategoryFields(item.cat)} /></label>
-                    <button type="button" disabled={categoryLoading || !item.cat} on:click={() => loadCategoryFields(item.cat)}>Load fields for selected category</button>
-                </div>
+                <label class="field"><span>Quick category menu <em>or use search above</em></span><select bind:value={item.cat} on:change={() => { item = applyClientRules(item); loadCategoryFields(item.cat); }}><option value="">Choose a category</option>{#each CATEGORY_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
                 {#if categoryNotice}<p class="help category-message">{categoryNotice}</p>{/if}
                 {#if categorySuggestions.length}
                     <div class="category-suggestions" aria-label="eBay category suggestions">
@@ -672,10 +688,11 @@
             <label class="field wide"><span>Seller notes</span><textarea bind:value={item.notes} rows="4"></textarea></label>
             {#if categoryFields.length}
                 <section class="wide dynamic-aspects" aria-label="Current eBay category-specific fields">
-                    <h3>Current eBay fields for {item.categoryName || `category ${item.cat}`}</h3>
-                    <p>Fields marked <b>Required</b> come directly from eBay’s Taxonomy API. Enter only facts you can confirm.</p>
+                    <h3>Additional eBay fields for {item.categoryName || `category ${item.cat}`}</h3>
+                    <p>Your common fields above are the single source of truth for brand, model, size, color, material, condition, and similar values. Only category-specific fields not already represented are shown here.</p>
+                    {#if visibleCategoryFields.length === 0}<p class="help">No additional category-specific fields are needed beyond the fields above.</p>{/if}
                     <div class="form aspect-grid">
-                        {#each categoryFields as field}
+                        {#each visibleCategoryFields as field}
                             <label class="field">
                                 <span>{field.name} {#if field.required}<em class="required">Required</em>{:else if field.recommended}<em>Recommended</em>{/if}</span>
                                 {#if field.values?.length && field.values.length <= 40}
