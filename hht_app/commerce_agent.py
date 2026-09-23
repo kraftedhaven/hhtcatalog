@@ -1030,6 +1030,11 @@ def _meaningful_proposed(listing: dict[str, Any], proposed: Any) -> dict[str, An
     aliases = {"material": "mat"}
     result = {}
     for key, value in proposed.items():
+        # Legacy audits stored explanatory review text as an editable `notes`
+        # proposal. Notes are advisory evidence, not an optimization change;
+        # never present them as a current-to-proposed field mutation.
+        if key == "notes":
+            continue
         current = listing.get(aliases.get(key, key))
         if key == "price":
             if abs(_price_float(current) - _price_float(value)) < 0.01:
