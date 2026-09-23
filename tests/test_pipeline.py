@@ -405,6 +405,14 @@ class MergePipelineTests(unittest.TestCase):
                     providers._nvidia([self.image], {"deadline": providers.time.monotonic() + 20})
         self.assertEqual(post.call_count, 1)
 
+    def test_nvidia_request_uses_low_reasoning_budget_for_listing_extraction(self):
+        with env(NVIDIA_NIM_API_KEY="nv", NVIDIA_NIM_BASE_URL="https://nvidia.example/v1", NVIDIA_CATEGORY_MODEL="vision-model"):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
+                providers._nvidia([self.image], {"deadline": providers.time.monotonic() + 20})
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertEqual(payload["chat_template_kwargs"], {"clear_thinking": True})
+
     def test_zai_malformed_json_failure_is_sanitized(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload={"choices": [{"message": {"content": "not json"}}]})):

@@ -424,6 +424,11 @@ def _nvidia(images: list[UploadedImage], context: dict[str, Any]) -> str:
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.1,
         "max_completion_tokens": 1400,
+        # NVIDIA GLM-5.3 Flash defaults to a maximum reasoning budget. Listing
+        # extraction is a short structured task, so constrain reasoning and
+        # clear it from the answer to keep the request inside web latency.
+        "reasoning_effort": "low",
+        "chat_template_kwargs": {"clear_thinking": True},
         "stream": False,
     }
     return _post_openai_compatible("nvidia", model, f"{base_url}/chat/completions", os.environ["NVIDIA_NIM_API_KEY"], payload, context)
