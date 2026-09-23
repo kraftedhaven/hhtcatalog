@@ -237,6 +237,11 @@ def _draft_feed_type() -> str:
     return configured if configured == DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE else DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE
 
 
+def seller_hub_feed_type() -> str:
+    """Return the non-secret Seller Hub task type used for draft uploads."""
+    return _draft_feed_type()
+
+
 def _api_base_url() -> str:
     return "https://api.sandbox.ebay.com" if _environment() == "sandbox" else "https://api.ebay.com"
 

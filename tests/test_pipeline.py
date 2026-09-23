@@ -111,6 +111,7 @@ class MergePipelineTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["providers"]["zai"], True)
+        self.assertEqual(body["seller_hub_feed_type"], "FX_LISTING")
         self.assertNotIn("secret", response.get_data(as_text=True))
 
     def test_unknown_credential_like_file_returns_404(self):

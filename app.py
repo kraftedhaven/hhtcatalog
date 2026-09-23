@@ -8,7 +8,7 @@ from flask_cors import CORS
 
 from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, seller_access_token
 from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft, update_ebay_offer
-from hht_app.ebay_feed import EbayFeedError, get_feed_result_file, get_feed_task, upload_seller_hub_draft_csv
+from hht_app.ebay_feed import EbayFeedError, get_feed_result_file, get_feed_task, seller_hub_feed_type, upload_seller_hub_draft_csv
 from hht_app.ebay_taxonomy import category_aspects, suggest_category
 from hht_app import commerce_agent
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
@@ -36,6 +36,7 @@ def health():
         "providers": configured_providers(),
         "demo_mode": demo_mode(),
         "csv_columns": len(HEADERS),
+        "seller_hub_feed_type": seller_hub_feed_type(),
     })
 
 
