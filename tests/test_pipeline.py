@@ -541,7 +541,7 @@ class MergePipelineTests(unittest.TestCase):
 
     def test_production_provider_order_prefers_nvidia_for_image_failover(self):
         with env(GROQ_API_KEY="gr", OPENROUTER_API_KEY="or", NVIDIA_NIM_API_KEY="nv"):
-            plan = providers._provider_plan()
+            plan = providers._provider_plan({"background_worker": True})
         self.assertEqual(plan["configured"], ["groq", "openrouter", "nvidia"])
         self.assertEqual(plan["primary"], "groq")
         self.assertEqual(plan["alternate"], "nvidia")
@@ -601,6 +601,33 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertIn("openrouter.ai", calls[0])
         self.assertIn("api.groq.com", calls[1])
+
+    def test_browser_analysis_skips_nvidia_and_falls_from_groq_to_openrouter(self):
+        calls = []
+
+        def fake_post(url, **_kwargs):
+            calls.append(url)
+            if "api.groq.com" in url:
+                return FakeResponse(status_code=429, payload={"error": {"message": "rate limit"}}, headers={"Retry-After": "9"})
+            return FakeResponse(payload=provider_payload("Patagonia Fleece"))
+
+        with env(
+            PRIMARY_VISION_PROVIDER="groq",
+            GROQ_API_KEY="gr",
+            OPENROUTER_API_KEY="or",
+            NVIDIA_NIM_API_KEY="nv",
+            NVIDIA_NIM_BASE_URL="https://nvidia.example/v1",
+            NVIDIA_CATEGORY_MODEL="z-ai/glm-5.3-flash",
+        ):
+            with mock.patch.object(providers.requests, "post", side_effect=fake_post):
+                response = self.client.post(
+                    "/analyze",
+                    data={"file": (io.BytesIO(b"fake"), "photo.jpg")},
+                    content_type="multipart/form-data",
+                )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["result"]["provider"], "openrouter")
+        self.assertFalse(any("nvidia.example" in url for url in calls))
 
     def test_successful_fallback_preserves_sanitized_prior_failure(self):
         with env(

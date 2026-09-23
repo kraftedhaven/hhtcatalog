@@ -266,6 +266,12 @@ def _provider_plan(context: dict[str, Any] | None = None):
             category="configuration",
         )
     configured = _configured_provider_order(callers)
+    # NVIDIA can legitimately require longer image inference than a Heroku web
+    # request safely allows. Standard browser analysis therefore uses Groq and
+    # OpenRouter; the dedicated NVIDIA worker route selects NVIDIA explicitly
+    # and persists the request before any long-running inference begins.
+    if context.get("web_request") and selected != "nvidia":
+        configured = [name for name in configured if name != "nvidia"]
     if not configured:
         return None
     if selected and selected in configured:
@@ -283,7 +289,7 @@ def _provider_plan(context: dict[str, Any] | None = None):
     # Prefer an explicitly configured image-capable provider over generic/free
     # OpenRouter routing. The free OpenRouter model may be text-only even when
     # its API key is present, which is not suitable for Analyze image uploads.
-    alternate_priority = ("nvidia", "openrouter", "groq")
+    alternate_priority = ("nvidia", "openrouter", "groq") if context.get("background_worker") else ("openrouter", "groq")
     alternates = [name for name in alternate_priority if name in configured and name != primary]
     fallback_index = int(context.get("fallback_index", -1 if not try_alternate else 0))
     chosen = alternates[fallback_index] if (try_alternate and alternates and fallback_index < len(alternates)) else primary

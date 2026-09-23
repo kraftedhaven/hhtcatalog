@@ -36,7 +36,7 @@ The complete backend regression suite passed after the final changes: **160 test
 
 In HHT Catalog, open **Analyze** and choose **NVIDIA vision worker (reliable background analysis)** from the analysis-engine menu. Select one to three product photos and choose **Analyze photos**. The interface will show that the job is queued or running, then load the returned listing result for seller review. The result remains a draft in HHT until the reseller explicitly exports it or chooses an approval-controlled eBay workflow.
 
-The normal **Hosted vision with automatic fallback** option remains the quickest choice for ordinary photo analysis. Use the NVIDIA worker option when NVIDIA capability is specifically desired or when the hosted model is temporarily unavailable. No Heroku configuration change is required for this worker route; the live worker is already consuming queued jobs.
+The normal **Hosted vision with automatic fallback** option remains the quickest choice for ordinary photo analysis. Its browser-safe fallback sequence is Groq to OpenRouter, so it does not enter a potentially long NVIDIA web request. Use the **NVIDIA vision worker** option when NVIDIA capability is specifically desired or when the hosted model is temporarily unavailable. No Heroku configuration change is required for this worker route; the live worker is already consuming queued jobs.
 
 ## Model and API Basis
 

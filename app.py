@@ -50,6 +50,7 @@ def analyze():
         result = analyze_images(images, {
             "seller_defaults": _seller_defaults_from_form(),
             "try_alternate": _truthy(request.form.get("tryAlternate")),
+            "web_request": True,
         })
         return jsonify({"result": result, "provider": result.get("provider"), "demo": result.get("demo", False)})
     except ValueError as exc:
