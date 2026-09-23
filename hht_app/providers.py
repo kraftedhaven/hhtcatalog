@@ -40,8 +40,11 @@ MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
 MAX_GROQ_IMAGES = 3
 MAX_GROQ_REQUEST_BYTES = 4 * 1024 * 1024
 TRANSIENT_STATUS_CODES = {429, 502, 503}
-DEFAULT_ANALYZE_DEADLINE_SECONDS = 24.0
-DEFAULT_PROVIDER_TIMEOUT_SECONDS = 10.0
+# Keep time for Flask to serialize a structured response before Heroku's
+# routing limit. The cap applies even when an old Config Var requests longer.
+DEFAULT_ANALYZE_DEADLINE_SECONDS = 22.0
+MAX_ANALYZE_DEADLINE_SECONDS = 22.0
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 8.0
 MAX_PROVIDER_RETRY_DELAY_SECONDS = 3.0
 ZAI_IMAGE_MAX_EDGE = 896
 ZAI_IMAGE_RETRY_MAX_EDGE = 640
@@ -143,7 +146,7 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
     if len(images) > MAX_PROVIDER_IMAGES:
         raise ProviderError("Upload one to five images.", 400, category="invalid_request")
     context = context or {}
-    context.setdefault("deadline", time.monotonic() + _env_float("ANALYZE_DEADLINE_SECONDS", DEFAULT_ANALYZE_DEADLINE_SECONDS))
+    context.setdefault("deadline", time.monotonic() + _analysis_deadline_seconds())
     compact_images = images[:MAX_PROVIDER_IMAGES]
     failures: list[dict[str, Any]] = []
     plan = _provider_plan(context)
@@ -610,6 +613,11 @@ def _log_provider(provider: str, status_code: int, category: str, retryable: boo
 
 def _remaining_seconds(context: dict[str, Any]) -> float:
     return max(0.0, float(context.get("deadline", time.monotonic())) - time.monotonic())
+
+
+def _analysis_deadline_seconds() -> float:
+    configured = _env_float("ANALYZE_DEADLINE_SECONDS", DEFAULT_ANALYZE_DEADLINE_SECONDS)
+    return max(10.0, min(MAX_ANALYZE_DEADLINE_SECONDS, configured))
 
 
 def _request_timeout(context: dict[str, Any]) -> float:

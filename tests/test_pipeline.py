@@ -279,13 +279,17 @@ class MergePipelineTests(unittest.TestCase):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", PROVIDER_REQUEST_TIMEOUT_SECONDS="12"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 providers.analyze_images([self.image])
-        self.assertEqual(post.call_args.kwargs["timeout"], 10.0)
+        self.assertEqual(post.call_args.kwargs["timeout"], 8.0)
 
     def test_provider_request_timeout_caps_old_high_config(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai", PROVIDER_REQUEST_TIMEOUT_SECONDS="24"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 providers.analyze_images([self.image])
         self.assertLessEqual(post.call_args.kwargs["timeout"], 18.0)
+
+    def test_analysis_deadline_caps_old_high_config(self):
+        with env(ANALYZE_DEADLINE_SECONDS="45"):
+            self.assertEqual(providers._analysis_deadline_seconds(), 22.0)
 
     def test_zai_accepts_one_to_five_images(self):
         images = [self.image] * 5
