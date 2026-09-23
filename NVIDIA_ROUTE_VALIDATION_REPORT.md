@@ -2,7 +2,7 @@
 
 **Author:** Manus AI  
 **Date:** 2026-09-23  
-**Deployment:** `4f8d643` on `kraftedhaven/hhtcatalog` main branch
+**Deployment:** `f3f6c36` on `kraftedhaven/hhtcatalog` main branch
 
 ## Conclusion
 
@@ -30,7 +30,7 @@ A live NVIDIA worker job with ID `49a7e6d7-5a9c-4e2d-8c55-7f8f655cb024` was acce
 
 A later live worker job with ID `497ed73a-c505-4cb1-ae8c-81bd6ad633d2` was also accepted with HTTP `202`. In that run, NVIDIA’s Nemotron fallback returned a sanitized `503` provider error, after which OpenRouter completed the analysis successfully. This demonstrates that a transient NVIDIA capacity failure no longer breaks the user workflow or the Heroku application.
 
-The complete backend regression suite passed after the final changes: **160 tests passed**. The Svelte production build also completed successfully.
+The complete backend regression suite passed after the final changes: **161 tests passed**. The Svelte production build also completed successfully. After the final browser-safe routing deployment, a real standard Analyze request returned HTTP `200` through Groq with the proposed title `Coach Leather Bag`.
 
 ## How to Use It
 
