@@ -962,7 +962,7 @@ class MergePipelineTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "submitted")
         self.assertEqual(result["taskId"], "task-123")
-        self.assertEqual(calls[0][2]["json"], {"feedType": "FX_DRAFT", "schemaVersion": "1.0"})
+        self.assertEqual(calls[0][2]["json"], {"feedType": "FX_LISTING", "schemaVersion": "1.0"})
         self.assertEqual(calls[1][0], "POST")
         self.assertIn("/sell/feed/v1/task/task-123/upload_file", calls[1][1])
         self.assertIn("files", calls[1][2])
@@ -971,6 +971,10 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(calls[1][2]["data"]["type"], "form-data")
         uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
         self.assertEqual(next(csv.DictReader(io.StringIO(uploaded_csv)))["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"], "Draft")
+
+    def test_seller_hub_draft_feed_ignores_stale_fx_draft_setting(self):
+        with env(EBAY_SELLER_HUB_DRAFT_FEED_TYPE="FX_DRAFT"):
+            self.assertEqual(ebay_feed._draft_feed_type(), "FX_LISTING")
 
     def test_seller_hub_draft_feed_two_item_pilot_payload(self):
         calls = []
@@ -993,7 +997,7 @@ class MergePipelineTests(unittest.TestCase):
                     result = ebay_feed.upload_seller_hub_draft_csv(items)
 
         self.assertEqual(result["itemCount"], 5)
-        self.assertEqual(result["feedType"], "FX_DRAFT")
+        self.assertEqual(result["feedType"], "FX_LISTING")
         uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
         rows = list(csv.DictReader(io.StringIO(uploaded_csv)))
         self.assertEqual(len(rows), 5)

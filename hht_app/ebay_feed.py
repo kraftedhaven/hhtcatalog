@@ -14,7 +14,9 @@ from .schema import deduplicate_draft_items, export_ebay_draft_csv
 
 
 DEFAULT_TIMEOUT_SECONDS = 15.0
-DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE = "FX_DRAFT"
+# Seller Hub creates drafts through the FX_LISTING feed plus the CSV's
+# Draft action. FX_DRAFT is not a supported Sell Feed API task type.
+DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE = "FX_LISTING"
 SELLER_HUB_SCHEMA_VERSION = "1.0"
 MIN_DRAFT_UPLOAD_ITEMS = 5
 
@@ -227,7 +229,12 @@ def _marketplace_id() -> str:
 
 
 def _draft_feed_type() -> str:
-    return os.environ.get("EBAY_SELLER_HUB_DRAFT_FEED_TYPE", DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE).strip() or DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE
+    # eBay documents only FX_LISTING and FX_FULFILLMENT for Seller Hub Feed
+    # tasks. Draft creation is a CSV action under FX_LISTING, not its own task
+    # type. Ignore stale configuration values such as FX_DRAFT so a deploy
+    # cannot silently submit an unsupported task.
+    configured = os.environ.get("EBAY_SELLER_HUB_DRAFT_FEED_TYPE", "").strip().upper()
+    return configured if configured == DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE else DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE
 
 
 def _api_base_url() -> str:
