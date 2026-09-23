@@ -965,9 +965,6 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     description = str(item.get("desc") or "").strip()
     if not description or len(re.sub(r"<[^>]+>", "", description)) < 80:
         findings.append({"field": "desc", "severity": "medium", "message": "Description lacks enough buyer-facing detail and condition context."})
-    missing = [label for label, key in (("brand", "brand"), ("size", "size"), ("color", "color"), ("material", "mat"), ("condition", "cnote")) if not str(item.get(key) or "").strip() or str(item.get(key)).lower() == "not visible"]
-    if missing:
-        findings.append({"field": "item_specifics", "severity": "medium", "message": f"Review missing or uncertain specifics: {', '.join(missing)}."})
     if not str(item.get("cat") or "").strip():
         findings.append({"field": "cat", "severity": "high", "message": "Category is unavailable and requires seller review."})
     if not str(item.get("pic") or "").strip():
@@ -976,6 +973,11 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     if price <= 0:
         findings.append({"field": "price", "severity": "high", "message": "Price is missing or invalid."})
     taxonomy = validate_listing(item)
+    missing_required = taxonomy.get("missingRequiredAspects") if isinstance(taxonomy.get("missingRequiredAspects"), list) else []
+    if taxonomy.get("status") == "valid" and missing_required:
+        findings.append({"field": "item_specifics", "severity": "medium", "message": f"Review eBay-required specifics only: {', '.join(str(value) for value in missing_required[:12])}."})
+    elif taxonomy.get("status") in {"missing", "unavailable", "not_configured"}:
+        findings.append({"field": "item_specifics", "severity": "low", "message": "Required item specifics could not be confirmed from eBay Taxonomy; seller review is advisory."})
     if taxonomy.get("status") == "missing":
         findings.append({"field": "taxonomy", "severity": "high", "message": taxonomy.get("message", "Seller category review required.")})
     elif taxonomy.get("status") == "unavailable":
@@ -1022,9 +1024,26 @@ def audit_all() -> dict[str, Any]:
     return {"count": len(results), "results": results}
 
 
+def _meaningful_proposed(listing: dict[str, Any], proposed: Any) -> dict[str, Any]:
+    if not isinstance(proposed, dict):
+        return {}
+    aliases = {"material": "mat"}
+    result = {}
+    for key, value in proposed.items():
+        current = listing.get(aliases.get(key, key))
+        if key == "price":
+            if abs(_price_float(current) - _price_float(value)) < 0.01:
+                continue
+        elif str(current or "").strip().casefold() == str(value or "").strip().casefold():
+            continue
+        result[key] = value
+    return result
+
+
 def _recommendation(row: sqlite3.Row) -> dict[str, Any]:
     listing = _decode(row["current_json"], {})
-    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": _decode(row["proposed_json"], {}), "findings": _decode(row["findings_json"], []), "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+    proposed = _meaningful_proposed(listing, _decode(row["proposed_json"], {}))
+    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": proposed, "findings": _decode(row["findings_json"], []), "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
 
 
 def recommendations(status: str = "") -> list[dict[str, Any]]:

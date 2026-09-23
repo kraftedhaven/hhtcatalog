@@ -46,6 +46,29 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertIn("Coach", audit["proposed"]["title"])
         self.assertNotEqual(audit["proposed"]["title"].casefold(), "brown signature handbag")
 
+    def test_optional_material_is_not_requested_when_taxonomy_does_not_require_it(self):
+        with mock.patch.object(commerce_agent, "validate_listing", return_value={
+            "status": "valid", "categoryId": "45230", "requiredAspects": ["Brand", "Color"],
+            "missingRequiredAspects": [], "aspectReviewRequired": False,
+            "message": "Category and required item specifics accepted by eBay Taxonomy API.",
+        }):
+            audit = commerce_agent.audit_listing({
+                "title": "Nike Used Baseball Cap Blue", "price": 18, "desc": "Used blue cap with visible photos and condition details.",
+                "cat": "45230", "brand": "Nike", "color": "Blue", "type": "Hat", "mat": "Not visible",
+                "cid": "3000", "cnote": "Used with light wear.", "pic": "https://example.test/hat.jpg",
+            })
+        messages = " ".join(finding["message"] for finding in audit["findings"])
+        self.assertNotIn("specifics: material", messages.lower())
+        self.assertNotIn("condition id defaulted", messages.lower())
+
+    def test_known_used_condition_is_not_defaulted_for_review(self):
+        normalized = commerce_agent.normalize_listing({
+            "title": "Used Wool Hat", "cat": "45230", "brand": "Brand", "type": "Hat",
+            "condition": "USED", "mat": "Not visible",
+        })
+        self.assertEqual(normalized["cid"], "3000")
+        self.assertNotIn("defaulted to pre-owned", normalized["notes"])
+
     def test_audit_marks_note_only_findings_as_review_only(self):
         audit = commerce_agent.audit_listing({
             "title": "Complete Seller Reviewed Patagonia Fleece Jacket Blue Mens Medium",

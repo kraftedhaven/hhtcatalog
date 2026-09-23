@@ -142,8 +142,13 @@ def normalize_listing(raw: dict[str, Any] | None) -> dict[str, Any]:
         if re.search(r"gucci", brand, re.I) and made_in and not re.search(r"italy|italia", made_in, re.I):
             notes = _append_note(notes, "Gucci origin conflict: visible Made In text is not Italy/Italia. Authenticity must be independently verified.")
 
-    cid = _text(data.get("cid"))
-    if cid not in CONDITION_IDS:
+    raw_condition = _text(data.get("cid") or data.get("conditionId") or data.get("condition"))
+    cid = raw_condition if raw_condition in CONDITION_IDS else ""
+    if not cid and re.search(r"new|brand[ -]?new", raw_condition, re.I):
+        cid = "1000"
+    elif not cid and re.search(r"used|pre[ -]?owned|preowned", raw_condition, re.I):
+        cid = "3000"
+    if not cid:
         cid = "3000"
         notes = _append_note(notes, "Condition ID defaulted to pre-owned; seller must verify.")
     condition_note = _text(data.get("cnote")) or "Needs seller review. Review all photos for wear, stains, pilling, fading, holes, and other flaws."
@@ -153,6 +158,7 @@ def normalize_listing(raw: dict[str, Any] | None) -> dict[str, Any]:
         "titleLength": len(title),
         "price": _price(data.get("price")),
         "cid": cid,
+        "condition": raw_condition,
         "cnote": condition_note,
         "cat": category,
         "brand": brand,
