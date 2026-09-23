@@ -193,6 +193,10 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
                 source=f"vision:{selected}",
                 default_evidence="Extracted from submitted listing images; seller confirmation required.",
             )
+            hints = _analysis_hints(context)
+            if hints:
+                result["analysisHints"] = hints
+                result["analysisHintFields"] = list(hints)
             result["provider"] = selected
             if selected == "nvidia" and context.get("nvidiaModelUsed"):
                 result["providerModel"] = str(context["nvidiaModelUsed"])
@@ -577,19 +581,45 @@ def _chat_response(response: requests.Response, provider: str | None = None, mod
 def _prompt(context: dict[str, Any]) -> str:
     defaults = context.get("seller_defaults") or {}
     location = defaults.get("location") or "Kettering, Ohio"
-    return f"{PROMPT}\nSeller location for description: {location}. Keep desc under 700 characters."
+    return f"{PROMPT}\n{_hint_prompt(context)}Seller location for description: {location}. Keep desc under 700 characters."
 
 
 def _zai_prompt(context: dict[str, Any]) -> str:
     defaults = context.get("seller_defaults") or {}
     location = defaults.get("location") or "Kettering, Ohio"
-    return f"{ZAI_PROMPT}\nUse only supported eBay category IDs. Seller location: {location}. Keep desc under 700 characters."
+    return f"{ZAI_PROMPT}\n{_hint_prompt(context)}Use only supported eBay category IDs. Seller location: {location}. Keep desc under 700 characters."
 
 
 def _groq_prompt(context: dict[str, Any]) -> str:
     defaults = context.get("seller_defaults") or {}
     location = defaults.get("location") or "Kettering, Ohio"
-    return f"{ZAI_PROMPT}\nReturn valid JSON only. Use supported eBay category IDs. Seller location: {location}. Keep desc under 700 characters."
+    return f"{ZAI_PROMPT}\n{_hint_prompt(context)}Return valid JSON only. Use supported eBay category IDs. Seller location: {location}. Keep desc under 700 characters."
+
+
+def _analysis_hints(context: dict[str, Any]) -> dict[str, str]:
+    defaults = context.get("seller_defaults") or {}
+    raw = defaults.get("analysisHints") if isinstance(defaults, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    allowed = ("brand", "model", "itemType", "category", "searchTerms")
+    return {
+        key: str(raw.get(key) or "").strip()[:160]
+        for key in allowed
+        if str(raw.get(key) or "").strip()
+    }
+
+
+def _hint_prompt(context: dict[str, Any]) -> str:
+    hints = _analysis_hints(context)
+    if not hints:
+        return ""
+    labels = {"brand": "brand or maker", "model": "model/style/line", "itemType": "item type", "category": "category hint", "searchTerms": "search terms"}
+    lines = [f"- {labels[key]}: {value}" for key, value in hints.items()]
+    return (
+        "Seller-provided clues follow. Treat them as hypotheses to verify against the photos, not facts. "
+        "Use them to focus label reading and category/search matching; if photos do not support a clue, return Not visible or uncertain.\n"
+        + "\n".join(lines) + "\n"
+    )
 
 
 def _demo_listing() -> dict[str, Any]:

@@ -421,6 +421,17 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(payload["reasoning_effort"], "low")
         self.assertEqual(payload["chat_template_kwargs"], {"clear_thinking": True})
 
+    def test_seller_analysis_hints_are_explicit_hypotheses_in_prompts(self):
+        context = {"seller_defaults": {"analysisHints": {
+            "brand": "New Era", "model": "9FIFTY", "itemType": "snapback hat",
+            "category": "sports hat", "searchTerms": "Cleveland Cavaliers NBA",
+        }}}
+        prompt = providers._prompt(context)
+        self.assertIn("New Era", prompt)
+        self.assertIn("9FIFTY", prompt)
+        self.assertIn("hypotheses to verify", prompt)
+        self.assertIn("not facts", prompt)
+
     def test_nvidia_uses_fast_omni_model_after_primary_timeout(self):
         calls = []
 

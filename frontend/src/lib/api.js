@@ -34,17 +34,17 @@ async function parseResponse(res) {
 export async function analyzeImages(files, sellerDefaults = {}, options = {}) {
     const form = new FormData();
     for (const file of files.slice(0, 3)) form.append('file', file);
-    form.append('sellerDefaults', JSON.stringify(sellerDefaults));
+    form.append('sellerDefaults', JSON.stringify({ ...sellerDefaults, analysisHints: options.analysisHints || {} }));
     if (options.tryAlternate) form.append('tryAlternate', '1');
     const res = await fetch(`${baseUrl()}/analyze`, { method: 'POST', body: form });
     const body = await parseResponse(res);
     return body.result || body;
 }
 
-export async function startNvidiaAnalysis(files, sellerDefaults = {}) {
+export async function startNvidiaAnalysis(files, sellerDefaults = {}, analysisHints = {}) {
     const form = new FormData();
     for (const file of files.slice(0, 3)) form.append('file', file);
-    form.append('sellerDefaults', JSON.stringify(sellerDefaults));
+    form.append('sellerDefaults', JSON.stringify({ ...sellerDefaults, analysisHints }));
     const res = await fetch(`${baseUrl()}/api/nvidia/analyze/start`, { method: 'POST', body: form });
     const body = await parseResponse(res);
     return body.result || body;

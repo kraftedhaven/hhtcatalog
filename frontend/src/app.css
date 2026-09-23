@@ -212,6 +212,17 @@ button.primary {
     gap: 0 12px;
 }
 
+.form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 12px;
+    margin-top: 12px;
+}
+
+.analysis-guidance {
+    border-left: 4px solid var(--blue);
+}
+
 .wide {
     grid-column: 1 / -1;
 }
@@ -1000,6 +1011,10 @@ button.primary {
     }
 
     .form {
+        grid-template-columns: 1fr;
+    }
+
+    .form-grid {
         grid-template-columns: 1fr;
     }
 

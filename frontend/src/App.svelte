@@ -22,6 +22,7 @@
     let item = load("hht_current_item", emptyItem);
     let queue = load("hht_queue", []);
     let seller = load("hht_seller_defaults", defaultSeller);
+    let analysisHints = load("hht_analysis_hints", { brand: "", model: "", itemType: "", category: "", searchTerms: "" });
     let autoDraftEnabled = loadFlag("hht_auto_draft_enabled");
     let status = "";
     let error = "";
@@ -53,6 +54,7 @@
     $: queueAverage = queue.length ? queueTotal / queue.length : 0;
     $: persist("hht_queue", queue);
     $: persist("hht_seller_defaults", seller);
+    $: persist("hht_analysis_hints", analysisHints);
     $: persist("hht_auto_draft_enabled", autoDraftEnabled);
     $: persist("hht_current_item", item);
     $: reviewNotes = sellerReviewNotes(item);
@@ -117,15 +119,15 @@
             status = usesHostedUpload ? "Uploading compressed photos for secure analysis..." : status;
             let result;
             if (engine === "hosted") {
-                result = await analyzeImages(hostedFiles, seller, options);
+                result = await analyzeImages(hostedFiles, seller, { ...options, analysisHints });
             } else if (engine === "nvidia") {
-                const started = await startNvidiaAnalysis(hostedFiles, seller);
+                const started = await startNvidiaAnalysis(hostedFiles, seller, analysisHints);
                 result = await waitForNvidiaJob(started.jobId);
             } else {
                 result = await localAnalyze();
             }
             item = normalizeForForm(result);
-            status = result.demo ? "Demo result loaded. Review required." : `Analysis complete via ${result.provider || engine}. Review required.`;
+            status = result.demo ? "Demo result loaded. Review required." : `${options.isRerun ? "Re-analysis" : "Analysis"} complete via ${result.provider || engine}. Review required.`;
             tab = "edit";
         } catch (err) {
             if (engine === "hosted" && err.canTryAlternate && !options.tryAlternate) {
@@ -170,7 +172,8 @@
         }
         const images = await Promise.all(files.map(fileToDataUrl));
         const content = images.map((url) => ({ type: "image", url }));
-        content.push({ type: "text", text: "Inspect every clothing, shoe, or bag photo and return JSON keys title, price, cid, cnote, cat, brand, size, color, dept, type, style, mat, pat, slv, nk, sea, occ, st, vin, desc, notes, madeIn, serialNumber, measurements. Use Not visible rather than guessing." });
+        const hintText = Object.entries(analysisHints).filter(([, value]) => String(value || "").trim()).map(([key, value]) => `${key}: ${value}`).join("; ");
+        content.push({ type: "text", text: `Inspect every clothing, shoe, or bag photo and return JSON keys title, price, cid, cnote, cat, brand, size, color, dept, type, style, mat, pat, slv, nk, sea, occ, st, vin, desc, notes, madeIn, serialNumber, measurements. Use Not visible rather than guessing. Seller clues are hypotheses to verify, not facts: ${hintText || "none"}.` });
         const output = await localPipeline([{ role: "user", content }], { max_new_tokens: 1200 });
         return normalizeForForm(parseModelJSON(JSON.stringify(output)));
     }
@@ -620,6 +623,18 @@
         return [...new Set(notes.filter(Boolean))];
     }
 
+    function useCurrentItemAsHints() {
+        analysisHints = {
+            ...analysisHints,
+            brand: item.brand === "Not visible" ? "" : (item.brand || ""),
+            model: item.model === "Not visible" ? "" : (item.model || ""),
+            itemType: item.type === "Not visible" ? "" : (item.type || ""),
+            category: item.cat || "",
+        };
+        tab = "analyze";
+        status = "Current listing fields copied as analysis clues. Add search terms, then re-analyze.";
+    }
+
 </script>
 
 <div class="shell">
@@ -668,6 +683,17 @@
                         ? "Photos are queued to the NVIDIA worker instead of holding this page open. The result returns here when ready; eBay is never changed automatically."
                         : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
             </p>
+            <div class="wide notice info analysis-guidance">
+                <strong>Guide the analysis (optional)</strong>
+                <p>Enter a clue when the first result is wrong. These are hypotheses for the vision model to verify—not automatic facts.</p>
+                <div class="form-grid compact">
+                    <label class="field"><span>Brand or maker</span><input bind:value={analysisHints.brand} placeholder="Example: New Era" maxlength="160" /></label>
+                    <label class="field"><span>Model / style / line</span><input bind:value={analysisHints.model} placeholder="Example: 9FIFTY" maxlength="160" /></label>
+                    <label class="field"><span>Item type</span><input bind:value={analysisHints.itemType} placeholder="Example: youth snapback hat" maxlength="160" /></label>
+                    <label class="field"><span>Category hint or eBay ID</span><input bind:value={analysisHints.category} placeholder="Example: sports hat" maxlength="160" /></label>
+                    <label class="field wide"><span>Search terms</span><input bind:value={analysisHints.searchTerms} placeholder="Example: Cleveland Cavaliers, NBA, Hardwood Classics" maxlength="160" /></label>
+                </div>
+            </div>
             <label class="dropzone">
                 <input type="file" accept="image/*" multiple on:change={onFilesSelected} />
                 <strong>Choose 1-5 item photos</strong>
@@ -705,6 +731,13 @@
             <div class="wide notice info">
                 <strong>One listing form for both export methods</strong>
                 <p>Complete each fact once in this eBay-aligned form. Seller Hub Draft CSV and the legacy CSV export use the same values automatically; you do not need to re-enter a second set of fields.</p>
+                <div class="actions">
+                    <button type="button" disabled={loading || !files.length} on:click={() => analyze({ isRerun: true })}>{loading ? "Re-analyzing..." : "Re-analyze with my corrections"}</button>
+                    <button type="button" on:click={() => tab = "analyze"}>Edit analysis clues</button>
+                    <button type="button" on:click={useCurrentItemAsHints}>Use current fields as clues</button>
+                </div>
+                <p class="help">Add or correct a brand, model, category, or search term on the Analyze tab, then rerun. Your current result stays in place if the rerun fails.</p>
+                {#if item.analysisHintFields?.length}<p class="help">Seller clues used for this result: {item.analysisHintFields.join(", ")}. Confirm them against the photos before export.</p>{/if}
             </div>
             <label class="field wide"><span>Title <em>{titleLength}/80</em></span><input bind:value={item.title} maxlength="80" /></label>
             <label class="field"><span>Price</span><input bind:value={item.price} inputmode="decimal" /></label>

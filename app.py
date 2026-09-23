@@ -604,7 +604,19 @@ def _seller_defaults_from_form() -> dict[str, str]:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         return {}
-    return parsed if isinstance(parsed, dict) else {}
+    if not isinstance(parsed, dict):
+        return {}
+    hints = parsed.get("analysisHints")
+    if isinstance(hints, dict):
+        allowed = {"brand", "model", "itemType", "category", "searchTerms"}
+        parsed["analysisHints"] = {
+            key: str(hints.get(key) or "").strip()[:160]
+            for key in allowed
+            if str(hints.get(key) or "").strip()
+        }
+    else:
+        parsed.pop("analysisHints", None)
+    return parsed
 
 
 def _truthy(raw: str | None) -> bool:
