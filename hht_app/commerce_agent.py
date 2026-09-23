@@ -160,15 +160,6 @@ def init_db() -> None:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS enrichment_checkpoints_status_idx ON enrichment_checkpoints(status, updated_at);
-                -- RLS is intentionally not toggled here. The Heroku database role
-                -- is not confirmed to bypass RLS; policies must be installed and
-                -- verified for that role before enforcement is enabled.
-                ALTER TABLE listings DISABLE ROW LEVEL SECURITY;
-                ALTER TABLE recommendations DISABLE ROW LEVEL SECURITY;
-                ALTER TABLE actions DISABLE ROW LEVEL SECURITY;
-                ALTER TABLE settings DISABLE ROW LEVEL SECURITY;
-                ALTER TABLE commerce_jobs DISABLE ROW LEVEL SECURITY;
-                ALTER TABLE enrichment_checkpoints DISABLE ROW LEVEL SECURITY;
                 INSERT INTO settings(id) VALUES(1) ON CONFLICT (id) DO NOTHING
                 """
             )
