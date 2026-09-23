@@ -160,6 +160,15 @@ def init_db() -> None:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS enrichment_checkpoints_status_idx ON enrichment_checkpoints(status, updated_at);
+                -- These tables are accessed by the trusted server connection. Enable
+                -- RLS so public/anon Supabase access is denied by default; the table
+                -- owner and service_role continue to work as required by the app.
+                ALTER TABLE listings ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE recommendations ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE actions ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE commerce_jobs ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE enrichment_checkpoints ENABLE ROW LEVEL SECURITY;
                 INSERT INTO settings(id) VALUES(1) ON CONFLICT (id) DO NOTHING
                 """
             )
