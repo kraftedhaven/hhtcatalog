@@ -22,12 +22,14 @@
     let item = load("hht_current_item", emptyItem);
     let queue = load("hht_queue", []);
     let seller = load("hht_seller_defaults", defaultSeller);
+    let autoDraftEnabled = loadFlag("hht_auto_draft_enabled");
     let status = "";
     let error = "";
     let loading = false;
     let canTryAlternate = false;
     let alternateProvider = "";
     let draftLoading = false;
+    let autoDraftInFlight = false;
     let restoreInput;
     let localPipeline = null;
     let categoryQuery = "";
@@ -51,6 +53,7 @@
     $: queueAverage = queue.length ? queueTotal / queue.length : 0;
     $: persist("hht_queue", queue);
     $: persist("hht_seller_defaults", seller);
+    $: persist("hht_auto_draft_enabled", autoDraftEnabled);
     $: persist("hht_current_item", item);
     $: reviewNotes = sellerReviewNotes(item);
     $: visibleCategoryFields = categoryFields.filter((field) => !canonicalAspectKeys[aspectKey(field.name)]);
@@ -67,6 +70,14 @@
 
     function persist(key, value) {
         localStorage.setItem(key, JSON.stringify(value));
+    }
+
+    function loadFlag(key) {
+        try {
+            return JSON.parse(localStorage.getItem(key) || "false") === true;
+        } catch {
+            return false;
+        }
     }
 
     async function onFilesSelected(event) {
@@ -392,6 +403,10 @@
         return reviewed;
     }
 
+    function approvedDraftQueue() {
+        return queue.filter((entry) => entry.approved === true && !entry.ebayFeedTaskId);
+    }
+
     function firstInvalidQueuedItem(source = queue) {
         for (let index = 0; index < source.length; index += 1) {
             const reviewed = reviewedCandidate(source[index]);
@@ -424,10 +439,11 @@
             tab = "queue";
             return;
         }
-        queue = [...queue, reviewed];
+        queue = [...queue, { ...reviewed, approved: true, approvedAt: new Date().toISOString() }];
         item = { ...emptyItem };
         status = "Item added to queue.";
         tab = "queue";
+        scheduleAutoDraftUpload();
     }
 
     function validateItem(candidate) {
@@ -443,6 +459,23 @@
         item = { ...queue[index] };
         queue = queue.filter((_, i) => i !== index);
         tab = "edit";
+    }
+
+    function approveQueued(index) {
+        queue = queue.map((entry, entryIndex) => entryIndex === index
+            ? { ...entry, approved: true, approvedAt: new Date().toISOString() }
+            : entry);
+        status = "Item approved for the Seller Hub draft queue.";
+        scheduleAutoDraftUpload();
+    }
+
+    function scheduleAutoDraftUpload() {
+        if (!autoDraftEnabled || autoDraftInFlight || draftLoading || approvedDraftQueue().length < 5) return;
+        setTimeout(() => {
+            if (autoDraftEnabled && !autoDraftInFlight && !draftLoading && approvedDraftQueue().length >= 5) {
+                sendDraftQueue({ automatic: true });
+            }
+        }, 0);
     }
 
     async function exportQueue() {
@@ -483,34 +516,40 @@
         }
     }
 
-    async function sendDraftQueue() {
-        if (!queue.length) {
-            error = "Queue is empty.";
+    async function sendDraftQueue({ automatic = false } = {}) {
+        const candidates = approvedDraftQueue();
+        if (!candidates.length) {
+            error = "Approve at least five reviewed items before sending Seller Hub drafts.";
             return;
         }
-        if (queue.length < 5) {
-            error = "Seller Hub draft upload requires at least 5 unique reviewed items.";
+        if (candidates.length < 5) {
+            error = `Seller Hub draft upload requires at least 5 approved unique items; ${candidates.length} are ready.`;
             return;
         }
-        const invalid = firstInvalidQueuedItem();
+        const invalid = firstInvalidQueuedItem(candidates);
         if (invalid) {
             error = `Queue item ${invalid.index + 1}: ${invalid.message}`;
             item = { ...invalid.reviewed };
             tab = "edit";
             return;
         }
-        const confirmed = window.confirm("Send this queue to eBay as a Seller Hub draft feed? This submits drafts for processing; it does not publish live listings.");
+        const confirmed = automatic || window.confirm("Send the approved items to eBay as a Seller Hub draft feed? This submits drafts for processing; it does not publish live listings.");
         if (!confirmed) return;
         error = "";
         draftLoading = true;
+        autoDraftInFlight = automatic;
         try {
-            const result = await sendDraftFeed(queue);
-            queue = queue.map((entry) => ({ ...entry, ebayFeedTaskId: result.taskId, ebayDraftStatus: result.status }));
-            status = `Seller Hub draft feed submitted to eBay. Task ${result.taskId}; ${result.itemCount} item${result.itemCount === 1 ? "" : "s"} sent. Check Seller Hub Reports for processing results.`;
+            const result = await sendDraftFeed(candidates);
+            const submitted = new Set(candidates.map((entry) => queueIdentity(entry)));
+            queue = queue.map((entry) => submitted.has(queueIdentity(entry))
+                ? { ...entry, ebayFeedTaskId: result.taskId, ebayDraftStatus: result.status }
+                : entry);
+            status = `${automatic ? "Auto-sent" : "Submitted"} ${result.itemCount} approved item${result.itemCount === 1 ? "" : "s"} to eBay Seller Hub Drafts. Task ${result.taskId}. Live listings were not published.`;
         } catch (err) {
             error = friendlyEbayError(err);
         } finally {
             draftLoading = false;
+            autoDraftInFlight = false;
         }
     }
 
@@ -757,21 +796,22 @@
                 <div><strong>${queueAverage.toFixed(2)}</strong><span>Average</span></div>
             </div>
             <div class="notice info">
-                <strong>{Math.min(queue.length, 5)} of 5 items ready for Seller Hub Drafts</strong>
-                <p>{queue.length >= 5 ? "Your queue meets the minimum batch size. Review the rows, then send them to eBay as drafts." : `Add ${5 - queue.length} more unique reviewed item${5 - queue.length === 1 ? "" : "s"} before sending to eBay.`}</p>
+                <strong>{Math.min(approvedDraftQueue().length, 5)} of 5 approved items ready for Seller Hub Drafts</strong>
+                <p>{approvedDraftQueue().length >= 5 ? "Your approved batch is ready. It will send automatically only when Auto-send is enabled; otherwise use Send approved drafts now." : `Approve ${5 - approvedDraftQueue().length} more unique reviewed item${5 - approvedDraftQueue().length === 1 ? "" : "s"} before sending to eBay.`}</p>
             </div>
             {#if !queue.length}
                 <p class="empty">Analyze an item, review the fields, then add it here.</p>
             {:else}
                 {#each queue as queued, index}
                     <div class="queue-row">
-                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)}{queued.ebayFeedTaskId ? ` / feed task ${queued.ebayFeedTaskId}` : ""}</span></div>
+                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)} · {queued.approved ? "Approved" : "Needs approval"}{queued.ebayFeedTaskId ? ` / feed task ${queued.ebayFeedTaskId}` : ""}</span></div>
+                        {#if !queued.approved}<button type="button" on:click={() => approveQueued(index)}>Approve</button>{/if}
                         <button type="button" on:click={() => editQueued(index)}>Edit</button>
                         <button type="button" on:click={() => queue = queue.filter((_, i) => i !== index)}>Remove</button>
                     </div>
                 {/each}
                 <div class="actions">
-                    <button class="primary" disabled={draftLoading || queue.length < 5} on:click={sendDraftQueue}>{draftLoading ? "Sending..." : "Send Seller Hub Drafts to eBay (5+ items)"}</button>
+                    <button class="primary" disabled={draftLoading || approvedDraftQueue().length < 5} on:click={() => sendDraftQueue()}>{draftLoading ? "Sending..." : "Send approved drafts now (5+ items)"}</button>
                     <button on:click={exportDraftQueue}>Download Seller Hub Draft CSV</button>
                     <button on:click={exportQueue}>Download legacy File Exchange CSV</button>
                     <button on:click={backupQueue}>Download JSON backup</button>
@@ -800,6 +840,10 @@
                     <button type="button" disabled={oauthLoading} on:click={checkEbayConnection}>Check connection</button>
                 </div>
             </div>
+            <label class="field wide checkbox-field">
+                <input type="checkbox" bind:checked={autoDraftEnabled} on:change={scheduleAutoDraftUpload} />
+                <span><strong>Auto-send approved items to eBay Drafts</strong><small>Off by default. When enabled, HHT sends a batch automatically only after five unique reviewed and approved items are ready. It creates drafts only; it never publishes live listings.</small></span>
+            </label>
             <label class="field"><span>Location</span><input bind:value={seller.location} /></label>
             <label class="field"><span>Postal Code</span><input bind:value={seller.postalCode} /></label>
             <label class="field"><span>Country Code</span><input bind:value={seller.countryCode} /></label>
