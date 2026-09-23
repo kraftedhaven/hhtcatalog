@@ -1,4 +1,5 @@
 import { normalizeClientItem, normalizeClientPayloadItem } from './ebay.js';
+import { retryWithBackoff, getCachedCategorySearch, setCategorySearchCache } from './utils.js';
 
 const PUBLIC_API_URL = import.meta.env.DEV
     ? import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || ''
@@ -87,34 +88,41 @@ export async function downloadDraftCSV(items) {
     URL.revokeObjectURL(url);
 }
 
+// Retry-enabled eBay mutations
 export async function createEbayDraft(item) {
-    const res = await fetch(`${baseUrl()}/api/ebay/drafts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item: normalizeClientPayloadItem(item) })
-    });
-    const body = await parseResponse(res);
-    return body.result || body;
+    return retryWithBackoff(async () => {
+        const res = await fetch(`${baseUrl()}/api/ebay/drafts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item: normalizeClientPayloadItem(item) })
+        });
+        const body = await parseResponse(res);
+        return body.result || body;
+    }, 3);
 }
 
 export async function updateEbayOffer(offerId, item) {
-    const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item: normalizeClientPayloadItem(item) })
-    });
-    const body = await parseResponse(res);
-    return body.result || body;
+    return retryWithBackoff(async () => {
+        const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item: normalizeClientPayloadItem(item) })
+        });
+        const body = await parseResponse(res);
+        return body.result || body;
+    }, 3);
 }
 
 export async function sendDraftFeed(items) {
-    const res = await fetch(`${baseUrl()}/api/ebay/draft-feed`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)) })
-    });
-    const body = await parseResponse(res);
-    return body.result || body;
+    return retryWithBackoff(async () => {
+        const res = await fetch(`${baseUrl()}/api/ebay/draft-feed`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)) })
+        });
+        const body = await parseResponse(res);
+        return body.result || body;
+    }, 3);
 }
 
 export function ebayFeedTask(taskId) {
@@ -130,8 +138,14 @@ export async function ebayOAuthStart() {
     return parseResponse(res);
 }
 
-export function ebayCategorySuggestions(query) {
-    return commerceRequest(`/api/ebay/categories?q=${encodeURIComponent(query)}`);
+// Category search with caching
+export async function ebayCategorySuggestions(query) {
+    const cached = getCachedCategorySearch(query);
+    if (cached) return cached;
+    
+    const result = await commerceRequest(`/api/ebay/categories?q=${encodeURIComponent(query)}`);
+    setCategorySearchCache(query, result);
+    return result;
 }
 
 export function ebayCategoryAspects(categoryId) {
