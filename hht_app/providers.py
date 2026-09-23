@@ -194,6 +194,8 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
                 default_evidence="Extracted from submitted listing images; seller confirmation required.",
             )
             result["provider"] = selected
+            if selected == "nvidia" and context.get("nvidiaModelUsed"):
+                result["providerModel"] = str(context["nvidiaModelUsed"])
             result["demo"] = False
             if failures:
                 result["providerFailures"] = failures

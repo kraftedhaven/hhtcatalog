@@ -438,6 +438,18 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(calls[1]["model"], "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
         self.assertEqual(calls[1]["chat_template_kwargs"], {"enable_thinking": False})
 
+    def test_nvidia_success_surfaces_the_actual_model_used(self):
+        with env(
+            PRIMARY_VISION_PROVIDER="nvidia",
+            NVIDIA_NIM_API_KEY="nv",
+            NVIDIA_NIM_BASE_URL="https://nvidia.example/v1",
+            NVIDIA_CATEGORY_MODEL="z-ai/glm-5.3-flash",
+        ):
+            with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload("Patagonia Fleece"))):
+                result = providers.analyze_images([self.image])
+        self.assertEqual(result["provider"], "nvidia")
+        self.assertEqual(result["providerModel"], "z-ai/glm-5.3-flash")
+
     def test_zai_malformed_json_failure_is_sanitized(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload={"choices": [{"message": {"content": "not json"}}]})):
