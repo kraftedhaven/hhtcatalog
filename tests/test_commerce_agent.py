@@ -69,6 +69,13 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(normalized["cid"], "3000")
         self.assertNotIn("defaulted to pre-owned", normalized["notes"])
 
+    def test_historical_generic_material_finding_is_hidden_when_taxonomy_has_no_missing_aspects(self):
+        findings = commerce_agent._presentation_findings(
+            {"taxonomyValidation": {"status": "valid", "missingRequiredAspects": []}},
+            [{"field": "item_specifics", "severity": "medium", "message": "Review missing or uncertain specifics: material."}],
+        )
+        self.assertEqual(findings, [])
+
     def test_audit_marks_note_only_findings_as_review_only(self):
         audit = commerce_agent.audit_listing({
             "title": "Complete Seller Reviewed Patagonia Fleece Jacket Blue Mens Medium",

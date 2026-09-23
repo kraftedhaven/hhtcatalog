@@ -1045,10 +1045,35 @@ def _meaningful_proposed(listing: dict[str, Any], proposed: Any) -> dict[str, An
     return result
 
 
+def _presentation_findings(listing: dict[str, Any], findings: Any) -> list[dict[str, Any]]:
+    """Hide legacy generic warnings when stored taxonomy evidence disproves them."""
+    if not isinstance(findings, list):
+        return []
+    taxonomy = listing.get("taxonomyValidation") if isinstance(listing.get("taxonomyValidation"), dict) else {}
+    normalized: list[dict[str, Any]] = []
+    replaced_specifics = False
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        message = str(finding.get("message") or "")
+        if finding.get("field") == "item_specifics" and taxonomy.get("status") == "valid":
+            missing = taxonomy.get("missingRequiredAspects") if isinstance(taxonomy.get("missingRequiredAspects"), list) else []
+            if message.lower().startswith("review missing or uncertain specifics:"):
+                if missing and not replaced_specifics:
+                    normalized.append({"field": "item_specifics", "severity": "medium", "message": f"Review eBay-required specifics only: {', '.join(str(value) for value in missing[:12])}."})
+                    replaced_specifics = True
+                continue
+        if "condition id defaulted to pre-owned" in message.lower() and (listing.get("condition") or listing.get("conditionId")):
+            continue
+        normalized.append(finding)
+    return normalized
+
+
 def _recommendation(row: sqlite3.Row) -> dict[str, Any]:
     listing = _decode(row["current_json"], {})
     proposed = _meaningful_proposed(listing, _decode(row["proposed_json"], {}))
-    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": proposed, "findings": _decode(row["findings_json"], []), "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+    findings = _presentation_findings(listing, _decode(row["findings_json"], []))
+    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": proposed, "findings": findings, "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
 
 
 def recommendations(status: str = "") -> list[dict[str, Any]]:
