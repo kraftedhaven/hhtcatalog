@@ -320,6 +320,8 @@ class CommerceAgentTests(unittest.TestCase):
         images, context = analyze.call_args.args
         self.assertEqual(images[0].filename, "coat.jpg")
         self.assertTrue(context["try_alternate"])
+        self.assertTrue(context["background_worker"])
+        self.assertGreater(context["provider_timeout_seconds"], 8)
 
     def test_checkpointed_full_enrichment_runs_in_20_item_chunks_and_remains_read_only(self):
         for index in range(2, 23):

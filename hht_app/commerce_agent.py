@@ -652,6 +652,11 @@ def run_job(job_id: str) -> dict[str, Any] | None:
             result = analyze_images(images, {
                 "seller_defaults": payload.get("sellerDefaults") if isinstance(payload.get("sellerDefaults"), dict) else {},
                 "try_alternate": True,
+                # The dedicated worker is not behind the browser/Heroku request
+                # timeout. Give NVIDIA enough time for a genuine inference while
+                # retaining the provider chain as a safe fallback.
+                "background_worker": True,
+                "provider_timeout_seconds": _positive_int(os.environ.get("NVIDIA_WORKER_PROVIDER_TIMEOUT_SECONDS"), 35, 40),
                 "deadline": time.monotonic() + _positive_int(os.environ.get("NVIDIA_WORKER_DEADLINE_SECONDS"), 75, 120),
             })
             result["readOnly"] = True

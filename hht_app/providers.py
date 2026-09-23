@@ -45,6 +45,7 @@ TRANSIENT_STATUS_CODES = {429, 502, 503}
 DEFAULT_ANALYZE_DEADLINE_SECONDS = 22.0
 MAX_ANALYZE_DEADLINE_SECONDS = 22.0
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 8.0
+MAX_WORKER_PROVIDER_TIMEOUT_SECONDS = 40.0
 MAX_PROVIDER_RETRY_DELAY_SECONDS = 3.0
 ZAI_IMAGE_MAX_EDGE = 896
 ZAI_IMAGE_RETRY_MAX_EDGE = 640
@@ -148,7 +149,10 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
     context = context or {}
     context.setdefault("deadline", time.monotonic() + _analysis_deadline_seconds())
     compact_images = images[:MAX_PROVIDER_IMAGES]
-    failures: list[dict[str, Any]] = []
+    # Recursive fallback calls preserve prior sanitized provider failures so a
+    # successful alternate result can still explain why the first provider was
+    # bypassed. Never store raw upstream responses or credentials here.
+    failures = list(context.get("_prior_failures") or [])
     plan = _provider_plan(context)
     if not plan:
         if demo_mode():
@@ -190,6 +194,8 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
             )
             result["provider"] = selected
             result["demo"] = False
+            if failures:
+                result["providerFailures"] = failures
             return result
         except ProviderError as exc:
             failures.append(_failure(
@@ -223,6 +229,7 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
             next_context = dict(context)
             next_context["try_alternate"] = True
             next_context["fallback_index"] = fallback_index + 1
+            next_context["_prior_failures"] = failures
             return analyze_images(compact_images, next_context)
 
     if demo_mode():
@@ -634,6 +641,17 @@ def _request_timeout(context: dict[str, Any]) -> float:
     if remaining < 5:
         raise ProviderError("Provider timeout budget exhausted before request.", 504)
     configured = _env_float("PROVIDER_REQUEST_TIMEOUT_SECONDS", DEFAULT_PROVIDER_TIMEOUT_SECONDS)
+    if context.get("background_worker"):
+        requested = context.get("provider_timeout_seconds", configured)
+        try:
+            worker_timeout = float(requested)
+        except (TypeError, ValueError):
+            worker_timeout = configured
+        return min(
+            MAX_WORKER_PROVIDER_TIMEOUT_SECONDS,
+            max(3.0, worker_timeout),
+            max(3.0, remaining - 4.0),
+        )
     return min(configured, DEFAULT_PROVIDER_TIMEOUT_SECONDS, max(3.0, remaining - 4.0))
 
 

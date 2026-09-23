@@ -291,6 +291,14 @@ class MergePipelineTests(unittest.TestCase):
         with env(ANALYZE_DEADLINE_SECONDS="45"):
             self.assertEqual(providers._analysis_deadline_seconds(), 22.0)
 
+    def test_worker_provider_timeout_can_extend_without_affecting_web_requests(self):
+        context = {
+            "background_worker": True,
+            "provider_timeout_seconds": 35,
+            "deadline": providers.time.monotonic() + 80,
+        }
+        self.assertEqual(providers._request_timeout(context), 35.0)
+
     def test_zai_accepts_one_to_five_images(self):
         images = [self.image] * 5
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
@@ -564,6 +572,24 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertIn("openrouter.ai", calls[0])
         self.assertIn("api.groq.com", calls[1])
+
+    def test_successful_fallback_preserves_sanitized_prior_failure(self):
+        with env(
+            PRIMARY_VISION_PROVIDER="nvidia",
+            NVIDIA_NIM_API_KEY="nv",
+            NVIDIA_NIM_BASE_URL="https://nvidia.example/v1",
+            NVIDIA_CATEGORY_MODEL="vision-model",
+            OPENROUTER_API_KEY="or",
+        ):
+            def fake_post(url, **_kwargs):
+                if "nvidia.example" in url:
+                    return FakeResponse(status_code=503, payload={"error": {"message": "capacity"}})
+                return FakeResponse(payload=provider_payload("Patagonia Fleece"))
+            with mock.patch.object(providers.requests, "post", side_effect=fake_post):
+                result = providers.analyze_images([self.image], {"deadline": providers.time.monotonic() + 20})
+        self.assertEqual(result["provider"], "openrouter")
+        self.assertEqual(result["providerFailures"][0]["provider"], "nvidia")
+        self.assertNotIn("capacity", str(result["providerFailures"]))
 
     def test_all_hosted_providers_rate_limited_returns_clear_retry_message(self):
         with env(OPENROUTER_API_KEY="or", GROQ_API_KEY="gr", HOSTED_PROVIDER_ORDER="openrouter,groq"):
