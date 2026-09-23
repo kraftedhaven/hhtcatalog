@@ -564,9 +564,9 @@
     </header>
 
     <nav class="tabs" aria-label="Main navigation">
-        <button class:on={tab === "commerce"} on:click={() => tab = "commerce"}>Commerce Agent</button>
+        <button class:on={tab === "commerce"} on:click={() => tab = "commerce"}>Dashboard</button>
         <button class:on={tab === "analyze"} on:click={() => tab = "analyze"}>Analyze</button>
-        <button class:on={tab === "edit"} on:click={() => tab = "edit"}>Edit</button>
+        <button class:on={tab === "edit"} on:click={() => tab = "edit"}>Review</button>
         <button class:on={tab === "queue"} on:click={() => tab = "queue"}>Queue</button>
         <button class:on={tab === "settings"} on:click={() => tab = "settings"}>Settings</button>
     </nav>
@@ -723,6 +723,10 @@
                 <div><strong>{queue.length}</strong><span>Items</span></div>
                 <div><strong>${queueTotal.toFixed(2)}</strong><span>Total</span></div>
                 <div><strong>${queueAverage.toFixed(2)}</strong><span>Average</span></div>
+            </div>
+            <div class="notice info">
+                <strong>{Math.min(queue.length, 5)} of 5 items ready for Seller Hub Drafts</strong>
+                <p>{queue.length >= 5 ? "Your queue meets the minimum batch size. Review the rows, then send them to eBay as drafts." : `Add ${5 - queue.length} more unique reviewed item${5 - queue.length === 1 ? "" : "s"} before sending to eBay.`}</p>
             </div>
             {#if !queue.length}
                 <p class="empty">Analyze an item, review the fields, then add it here.</p>
