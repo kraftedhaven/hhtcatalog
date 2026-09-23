@@ -15,6 +15,7 @@
         applyClientItemRules,
         CATEGORY_OPTIONS,
         EMPTY_ITEM,
+        listingReadiness,
     } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
 
@@ -62,6 +63,7 @@
     $: persist("hht_seller_defaults", seller);
     $: persist("hht_current_item", item);
     $: reviewNotes = sellerReviewNotes(item);
+    $: readiness = listingReadiness(item);
 
     function load(key, fallback) {
         try {
@@ -790,6 +792,28 @@
                 {#each reviewNotes as note}<p>{note}</p>{/each}
             </div>
         {/if}
+        <section class="notice info listing-readiness">
+            <div>
+                <strong>Listing readiness: {readiness.score}%</strong>
+                <p>
+                    {readiness.completeCount} of {readiness.totalCount} listing-quality
+                    checks complete. This helps buyers find and evaluate the item;
+                    it does not guarantee sales.
+                </p>
+            </div>
+            {#if readiness.completeCount < readiness.totalCount}
+                <ul>
+                    {#each readiness.checks.filter((check) => !check.complete) as check}
+                        <li><strong>{check.label}:</strong> {check.hint}</li>
+                    {/each}
+                </ul>
+            {:else}
+                <p class="readiness-complete">
+                    Core listing details are complete. Review the price and
+                    photos before sending the draft.
+                </p>
+            {/if}
+        </section>
         <section class="panel form">
             <label class="field wide"
                 ><span>Title <em>{titleLength}/80</em></span><input

@@ -107,6 +107,26 @@ worker.1  up  2024-01-15 10:01:00 -0500  python worker.py  (free)
 
 ### Step 3: Deploy
 
+**Windows PowerShell:**
+```powershell
+.\deploy-heroku.ps1
+```
+
+This script adds the `heroku` Git remote when needed, pushes `main`, scales
+the web and worker dynos, and checks the canonical Heroku app URL. It retries
+the health endpoint for two minutes by default and shows the current dynos and
+most recent release when a deployment fails. It uses the Windows Heroku CLI
+launcher directly; do not run `deploy-heroku.sh` through Git Bash on Windows.
+
+**Windows troubleshooting:**
+```powershell
+# Retry the health endpoint for up to five minutes and include recent logs on failure.
+.\deploy-heroku.ps1 -HealthRetries 30 -HealthRetrySeconds 10 -ShowLogsOnFailure
+```
+
+The script verifies the Git repository and `main` branch before pushing. It
+also warns when local changes are uncommitted, because they are not deployed.
+
 **Option A: From GitHub (recommended)**
 - Connect repo to Heroku
 - Enable auto-deploy on main branch
@@ -131,8 +151,11 @@ heroku logs --tail --app hht-catalog
 
 **Check web dyno health:**
 ```bash
-curl https://hht-catalog.herokuapp.com/health
+heroku apps:info --app hht-catalog
 ```
+
+Use the displayed `Web URL` with `/health`. Heroku may assign a URL that does
+not match the app name.
 
 **Check worker is running:**
 ```bash
@@ -144,7 +167,7 @@ heroku logs --tail --dyno worker.1 --app hht-catalog
 
 **Test the API:**
 ```bash
-curl https://hht-catalog.herokuapp.com/health | jq .
+curl "$(heroku apps:info --app hht-catalog | sed -n 's/^Web URL: *//p')health" | jq .
 ```
 
 **Test worker job queue:**

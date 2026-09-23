@@ -60,6 +60,33 @@ export function normalizeClientPayloadItem(item = {}) {
     return out;
 }
 
+export function listingReadiness(item = {}) {
+    const listing = applyClientItemRules(item);
+    const titleLength = String(listing.title || '').trim().length;
+    const isApparel = /shirt|top|dress|jean|pant|skirt|sweater|jacket|coat|shoe|sneaker|boot|sandal/i.test(listing.type || '');
+    const checks = [
+        {
+            label: 'Search-ready title',
+            complete: titleLength >= 45 && titleLength <= 80,
+            hint: titleLength < 45 ? 'Add confirmed brand, item type, size, color, and key material or style.' : 'Keep titles factual and within eBay’s 80-character limit.',
+        },
+        { label: 'Verified eBay category', complete: Boolean(listing.cat), hint: 'Choose a matching eBay leaf category.' },
+        { label: 'Brand', complete: Boolean(listing.brand), hint: 'Use No Brand or Not visible only when accurate.' },
+        { label: 'Price', complete: Number.parseFloat(listing.price) > 0, hint: 'Set a positive fixed price after reviewing the market evidence.' },
+        { label: 'Condition detail', complete: Boolean(listing.cnote) || !['3000', '5000', '6000'].includes(String(listing.cid)), hint: 'Describe visible wear, flaws, or why the item is new.' },
+        { label: 'Core item specifics', complete: Boolean(listing.type) && Boolean(listing.color), hint: 'Confirm the item type and color buyers will filter for.' },
+        { label: 'Size or dimensions', complete: Boolean(listing.size) || Boolean(listing.measurements), hint: isApparel ? 'Add label size and measurements buyers can compare.' : 'Add confirmed dimensions when they affect fit or compatibility.' },
+        { label: 'Description', complete: Boolean(String(listing.desc || '').trim()), hint: 'Generate, then verify, a factual description.' },
+    ];
+    const completeCount = checks.filter((check) => check.complete).length;
+    return {
+        score: Math.round((completeCount / checks.length) * 100),
+        completeCount,
+        totalCount: checks.length,
+        checks,
+    };
+}
+
 function isBag(item) {
     return ['169291', '169284'].includes(String(item.cat || '')) || /handbag|crossbody|clutch|backpack|tote|purse/i.test(item.type || '');
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM, normalizeClientItem, normalizeClientPayloadItem } from './ebay.js';
+import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM, listingReadiness, normalizeClientItem, normalizeClientPayloadItem } from './ebay.js';
 
 test('normalizeClientItem restores ebay field defaults for outgoing payloads', () => {
     const result = normalizeClientItem({ title: 'Coach Tote', price: '49.99', cat: '169291' });
@@ -69,4 +69,21 @@ test('category options expose restored ebay category coverage in the form', () =
     assert.equal(labelsById.get('11484'), "Women's Sweaters / Cardigans / Men's Sweaters / Hoodies");
     assert.equal(labelsById.get('57988'), "Women's / Men's Jackets / Coats");
     assert.equal(labelsById.get('155183'), "Men's Sweatshirts / Hoodies");
+});
+
+test('listing readiness highlights sell-through details without inventing facts', () => {
+    const result = listingReadiness({
+        title: 'Coach Leather Crossbody Bag Brown Pebbled Leather',
+        price: '89.99',
+        cat: '169291',
+        brand: 'Coach',
+        cid: '3000',
+        cnote: 'Pre-owned with light corner wear shown in photos.',
+        type: 'Crossbody Bag',
+        color: 'Brown',
+        desc: '<p>Seller-reviewed description.</p>',
+    });
+    assert.equal(result.score, 100);
+    assert.equal(result.completeCount, result.totalCount);
+    assert.ok(result.checks.every((check) => check.complete));
 });
