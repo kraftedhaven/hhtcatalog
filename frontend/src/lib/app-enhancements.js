@@ -3,7 +3,7 @@
  * Import these into App.svelte to replace corresponding functions
  */
 
-import { debounce, validateQueuePrices, validateQueueItem, getSellerReviewWarnings, isOnline, onOnlineStatusChange } from '$lib/utils.js';
+import { debounce, validateQueuePrices, validateQueueItem, getSellerReviewWarnings } from '$lib/utils.js';
 import { ebayCategorySuggestions } from '$lib/api.js';
 
 /**
@@ -31,7 +31,12 @@ export const debouncedFindCategories = debounce(
         updateLoading,
         defaultQuery = ""
     ) {
-        const search = String(categoryQuery || item.title || item.brand + " " + item.type || defaultQuery).trim();
+        const search = String(
+            categoryQuery ||
+            item.title ||
+            [item.brand, item.type].filter(Boolean).join(" ") ||
+            defaultQuery
+        ).trim();
         if (search.length < 2) {
             updateSuggestions([]);
             updateNotice("Enter at least two words or characters to search eBay categories.");
