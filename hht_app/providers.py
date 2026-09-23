@@ -34,6 +34,7 @@ ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
 GROQ_DEFAULT_MODEL = "qwen/qwen3.6-27b"
 GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
 NVIDIA_DEFAULT_VISION_MODEL = "z-ai/glm-5.3-flash"
+NVIDIA_FAST_FALLBACK_VISION_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 MAX_PROVIDER_IMAGES = 5
 MAX_ZAI_IMAGES = 3
 MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
@@ -413,32 +414,63 @@ def _groq_once(model: str, content: list[dict[str, Any]], context: dict[str, Any
 
 
 def _nvidia(images: list[UploadedImage], context: dict[str, Any]) -> str:
-    configured_model = (os.environ.get("NVIDIA_CATEGORY_MODEL") or "").strip()
-    # The previously deployed Llama 3.2 vision identifier is no longer reliable
-    # on NVIDIA's hosted catalog. Keep the Heroku variable backward-compatible,
-    # but replace that retired value with the current multimodal model default.
-    model = NVIDIA_DEFAULT_VISION_MODEL if configured_model in {
-        "meta/llama-3.2-11b-vision-instruct",
-        "",
-    } else configured_model
+    models = _nvidia_models()
+    model = models[0] if models else ""
     base_url = (os.environ.get("NVIDIA_NIM_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
     if not model:
         raise ProviderError("NVIDIA category model is not configured.", 503, provider="nvidia", category="configuration")
     content = [{"type": "text", "text": _prompt(context)}]
     content.extend({"type": "image_url", "image_url": {"url": _compressed_data_url(image, max_edge=896, quality=72)}} for image in images[:3])
-    payload = {
+    last_error: ProviderError | None = None
+    for index, model in enumerate(models):
+        payload = _nvidia_payload(model, content)
+        try:
+            raw = _post_openai_compatible("nvidia", model, f"{base_url}/chat/completions", os.environ["NVIDIA_NIM_API_KEY"], payload, context)
+            context["nvidiaModelUsed"] = model
+            return raw
+        except ProviderError as exc:
+            last_error = exc
+            if index + 1 >= len(models) or not _can_try_nvidia_model_fallback(exc):
+                raise
+            print(f"[provider] nvidia model unavailable; trying fallback model={models[index + 1]}")
+    if last_error:
+        raise last_error
+    raise ProviderError("NVIDIA category model is not configured.", 503, provider="nvidia", category="configuration")
+
+
+def _nvidia_models() -> list[str]:
+    configured_model = (os.environ.get("NVIDIA_CATEGORY_MODEL") or "").strip()
+    # The earlier 11B alias was not reliable in NVIDIA's hosted catalog. Keep
+    # old config backward-compatible by resolving it to the current GLM model.
+    primary = NVIDIA_DEFAULT_VISION_MODEL if configured_model in {
+        "meta/llama-3.2-11b-vision-instruct", ""
+    } else configured_model
+    fallback = (os.environ.get("NVIDIA_FALLBACK_VISION_MODEL") or NVIDIA_FAST_FALLBACK_VISION_MODEL).strip()
+    return list(dict.fromkeys(model for model in (primary, fallback) if model))
+
+
+def _nvidia_payload(model: str, content: list[dict[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.1,
-        "max_completion_tokens": 1400,
-        # NVIDIA GLM-5.3 Flash defaults to a maximum reasoning budget. Listing
-        # extraction is a short structured task, so constrain reasoning and
-        # clear it from the answer to keep the request inside web latency.
-        "reasoning_effort": "low",
-        "chat_template_kwargs": {"clear_thinking": True},
+        "max_completion_tokens": 1000,
         "stream": False,
     }
-    return _post_openai_compatible("nvidia", model, f"{base_url}/chat/completions", os.environ["NVIDIA_NIM_API_KEY"], payload, context)
+    if model.startswith("z-ai/glm"):
+        # GLM-5.3 Flash defaults to maximum reasoning. Listing extraction is
+        # short structured work, so request low reasoning and hide it.
+        payload["reasoning_effort"] = "low"
+        payload["chat_template_kwargs"] = {"clear_thinking": True}
+    elif "nemotron-3-nano-omni" in model.lower():
+        # NVIDIA's documented Omni image example disables thinking for direct
+        # image descriptions; that is also the lower-latency fit here.
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    return payload
+
+
+def _can_try_nvidia_model_fallback(exc: ProviderError) -> bool:
+    return exc.category in {"timeout", "transport", "server_error", "not_found", "request_error"}
 
 
 def _post_openai_compatible(

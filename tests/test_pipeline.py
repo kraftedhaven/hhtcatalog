@@ -406,20 +406,37 @@ class MergePipelineTests(unittest.TestCase):
     def test_zai_503_failure_retries_once(self):
         self._assert_zai_failure(503, "server_error", True)
 
-    def test_nvidia_transient_failure_does_not_consume_fallback_budget_with_retry(self):
+    def test_nvidia_transient_failure_tries_each_nvidia_model_once_without_request_retry(self):
         with env(NVIDIA_NIM_API_KEY="nv", NVIDIA_NIM_BASE_URL="https://nvidia.example/v1", NVIDIA_CATEGORY_MODEL="vision-model"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(status_code=503)) as post:
                 with self.assertRaises(providers.ProviderError):
                     providers._nvidia([self.image], {"deadline": providers.time.monotonic() + 20})
-        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_count, 2)
 
     def test_nvidia_request_uses_low_reasoning_budget_for_listing_extraction(self):
-        with env(NVIDIA_NIM_API_KEY="nv", NVIDIA_NIM_BASE_URL="https://nvidia.example/v1", NVIDIA_CATEGORY_MODEL="vision-model"):
+        with env(NVIDIA_NIM_API_KEY="nv", NVIDIA_NIM_BASE_URL="https://nvidia.example/v1", NVIDIA_CATEGORY_MODEL="z-ai/glm-5.3-flash"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
                 providers._nvidia([self.image], {"deadline": providers.time.monotonic() + 20})
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["reasoning_effort"], "low")
         self.assertEqual(payload["chat_template_kwargs"], {"clear_thinking": True})
+
+    def test_nvidia_uses_fast_omni_model_after_primary_timeout(self):
+        calls = []
+
+        def fake_post(_provider, _model, _url, _key, payload, _context):
+            calls.append(payload)
+            if len(calls) == 1:
+                raise providers.ProviderError("Provider request timed out.", 504, provider="nvidia", model="z-ai/glm-5.3-flash", category="timeout", retryable=True)
+            return provider_payload("Patagonia Fleece")
+
+        with env(NVIDIA_NIM_API_KEY="nv", NVIDIA_NIM_BASE_URL="https://nvidia.example/v1", NVIDIA_CATEGORY_MODEL="z-ai/glm-5.3-flash"):
+            with mock.patch.object(providers, "_post_openai_compatible", side_effect=fake_post):
+                result = providers._nvidia([self.image], {"deadline": providers.time.monotonic() + 80, "background_worker": True, "provider_timeout_seconds": 35})
+        self.assertEqual(result, provider_payload("Patagonia Fleece"))
+        self.assertEqual(calls[0]["model"], "z-ai/glm-5.3-flash")
+        self.assertEqual(calls[1]["model"], "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
+        self.assertEqual(calls[1]["chat_template_kwargs"], {"enable_thinking": False})
 
     def test_zai_malformed_json_failure_is_sanitized(self):
         with env(PRIMARY_VISION_PROVIDER="zai", ZAI_API_KEY="zai"):
