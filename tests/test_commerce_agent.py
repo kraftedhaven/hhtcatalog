@@ -305,6 +305,22 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["kind"], "enrichment")
 
+    def test_nvidia_vision_job_runs_only_in_worker_and_keeps_ebay_read_only(self):
+        image = {"data": b"tiny-image", "mimeType": "image/jpeg", "filename": "coat.jpg"}
+        with mock.patch.object(commerce_agent.threading, "Thread") as thread:
+            started = commerce_agent.start_nvidia_vision_job([image], {"location": "Kettering, Ohio"})
+        thread.assert_not_called()
+        self.assertEqual(started["kind"], "nvidia_vision")
+        with mock.patch("hht_app.providers.analyze_images", return_value={"title": "Reviewed Coat", "provider": "nvidia"}) as analyze:
+            completed = commerce_agent.run_job(started["jobId"])
+        self.assertEqual(completed["status"], "completed")
+        result = commerce_agent._decode(completed["result_json"], {})
+        self.assertEqual(result["title"], "Reviewed Coat")
+        self.assertTrue(result["readOnly"])
+        images, context = analyze.call_args.args
+        self.assertEqual(images[0].filename, "coat.jpg")
+        self.assertTrue(context["try_alternate"])
+
     def test_checkpointed_full_enrichment_runs_in_20_item_chunks_and_remains_read_only(self):
         for index in range(2, 23):
             with commerce_agent.connect() as db:

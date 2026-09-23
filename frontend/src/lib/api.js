@@ -41,6 +41,15 @@ export async function analyzeImages(files, sellerDefaults = {}, options = {}) {
     return body.result || body;
 }
 
+export async function startNvidiaAnalysis(files, sellerDefaults = {}) {
+    const form = new FormData();
+    for (const file of files.slice(0, 3)) form.append('file', file);
+    form.append('sellerDefaults', JSON.stringify(sellerDefaults));
+    const res = await fetch(`${baseUrl()}/api/nvidia/analyze/start`, { method: 'POST', body: form });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
 export async function health() {
     const res = await fetch(`${baseUrl()}/health`);
     return parseResponse(res);

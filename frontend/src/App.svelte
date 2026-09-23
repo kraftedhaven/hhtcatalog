@@ -1,6 +1,6 @@
 <script>
     import "./app.css";
-    import { analyzeImages, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, sendDraftFeed } from "$lib/api";
+    import { analyzeImages, commerceJob, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, sendDraftFeed, startNvidiaAnalysis } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
 
@@ -100,10 +100,19 @@
         }
         loading = true;
         try {
-            status = engine === "hosted" ? "Compressing and uploading photos..." : "Starting browser-local model...";
-            const hostedFiles = engine === "hosted" ? await compactHostedFiles(files) : files;
-            status = engine === "hosted" ? "Uploading compressed photos for secure analysis..." : status;
-            const result = engine === "hosted" ? await analyzeImages(hostedFiles, seller, options) : await localAnalyze();
+            const usesHostedUpload = engine === "hosted" || engine === "nvidia";
+            status = usesHostedUpload ? "Compressing and uploading photos..." : "Starting browser-local model...";
+            const hostedFiles = usesHostedUpload ? await compactHostedFiles(files) : files;
+            status = usesHostedUpload ? "Uploading compressed photos for secure analysis..." : status;
+            let result;
+            if (engine === "hosted") {
+                result = await analyzeImages(hostedFiles, seller, options);
+            } else if (engine === "nvidia") {
+                const started = await startNvidiaAnalysis(hostedFiles, seller);
+                result = await waitForNvidiaJob(started.jobId);
+            } else {
+                result = await localAnalyze();
+            }
             item = normalizeForForm(result);
             status = result.demo ? "Demo result loaded. Review required." : `Analysis complete via ${result.provider || engine}. Review required.`;
             tab = "edit";
@@ -120,6 +129,21 @@
         } finally {
             loading = false;
         }
+    }
+
+    async function waitForNvidiaJob(jobId) {
+        if (!jobId) throw new Error("NVIDIA analysis did not return a job ID.");
+        const expiresAt = Date.now() + 150000;
+        while (Date.now() < expiresAt) {
+            const job = await commerceJob(jobId);
+            if (job.status === "completed") return job.result || {};
+            if (job.status === "failed") throw new Error(job.error || "NVIDIA analysis failed in the worker.");
+            status = job.status === "running"
+                ? "NVIDIA is analyzing the product in the background..."
+                : "NVIDIA analysis is queued. It will continue even if this page closes.";
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+        throw new Error("NVIDIA analysis is still running. Please return to Analyze shortly; the worker job remains safely queued.");
     }
 
     async function localAnalyze() {
@@ -589,13 +613,16 @@
                 <span>Analysis engine</span>
                 <select bind:value={engine}>
                     <option value="hosted">Hosted vision with automatic fallback</option>
+                    <option value="nvidia">NVIDIA vision worker (reliable background analysis)</option>
                     <option value="local">Browser-local SmolVLM experimental</option>
                 </select>
             </label>
             <p class="help">
                 {engine === "hosted"
                     ? "Photos go to this Heroku app. It uses the primary provider and automatically retries with the configured alternate provider if the primary is temporarily unavailable."
-                    : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
+                    : engine === "nvidia"
+                        ? "Photos are queued to the NVIDIA worker instead of holding this page open. The result returns here when ready; eBay is never changed automatically."
+                        : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
             </p>
             <label class="dropzone">
                 <input type="file" accept="image/*" multiple on:change={onFilesSelected} />

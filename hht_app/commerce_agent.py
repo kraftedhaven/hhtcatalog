@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import base64
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
@@ -41,6 +42,8 @@ MAX_TITLE_LENGTH = 80
 EDITABLE_FIELDS = {"title", "price", "cid", "desc", "cat", "cnote", "notes", "pic", "brand", "size", "color", "dept", "type", "model", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
 ENRICHMENT_PAGE_SIZE = 25
 ENRICHMENT_CHUNK_SIZE = 20
+MAX_VISION_JOB_IMAGES = 3
+MAX_VISION_JOB_BYTES = 6 * 1024 * 1024
 
 
 def utc_now() -> str:
@@ -521,7 +524,40 @@ def start_audit_job() -> dict[str, Any]:
     return _start_background_job("audit", {})
 
 
-def _start_background_job(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+def start_nvidia_vision_job(images: list[dict[str, Any]], seller_defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Persist NVIDIA work for the worker dyno rather than holding a web request.
+
+    Image bytes remain in the queued job only until the worker replaces the
+    payload with the result. This route never changes eBay data.
+    """
+    if not isinstance(images, list) or not images:
+        raise ValueError("Upload at least one image for NVIDIA analysis.")
+    if len(images) > MAX_VISION_JOB_IMAGES:
+        raise ValueError(f"NVIDIA analysis accepts at most {MAX_VISION_JOB_IMAGES} images per job.")
+    prepared: list[dict[str, str]] = []
+    total_bytes = 0
+    for image in images:
+        if not isinstance(image, dict):
+            raise ValueError("Invalid image payload.")
+        data = image.get("data")
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            raise ValueError("Invalid image payload.")
+        total_bytes += len(data)
+        prepared.append({
+            "data": base64.b64encode(bytes(data)).decode("ascii"),
+            "mimeType": str(image.get("mimeType") or "image/jpeg"),
+            "filename": str(image.get("filename") or "image.jpg")[:180],
+        })
+    if total_bytes > MAX_VISION_JOB_BYTES:
+        raise ValueError("NVIDIA analysis photos exceed the 6 MB worker-job limit. Choose fewer or smaller photos.")
+    return _start_background_job(
+        "nvidia_vision",
+        {"images": prepared, "sellerDefaults": seller_defaults if isinstance(seller_defaults, dict) else {}},
+        run_in_web_thread=False,
+    )
+
+
+def _start_background_job(kind: str, payload: dict[str, Any], *, run_in_web_thread: bool = True) -> dict[str, Any]:
     init_db()
     job_id = str(uuid.uuid4())
     now = utc_now()
@@ -530,9 +566,10 @@ def _start_background_job(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
             "INSERT INTO commerce_jobs(id,kind,status,progress,result_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
             (job_id, kind, "queued", 0, _json(payload), "", now, now),
         )
-    target = _run_until_terminal if kind == "full_enrichment" else run_job
-    thread = threading.Thread(target=target, args=(job_id,), daemon=True)
-    thread.start()
+    if run_in_web_thread:
+        target = _run_until_terminal if kind == "full_enrichment" else run_job
+        thread = threading.Thread(target=target, args=(job_id,), daemon=True)
+        thread.start()
     return {"jobId": job_id, "status": "queued", "kind": kind, "readOnly": True}
 
 
@@ -592,6 +629,32 @@ def run_job(job_id: str) -> dict[str, Any] | None:
         elif kind == "audit":
             audited = audit_all()
             result = {"count": audited["count"], "readOnly": True}
+        elif kind == "nvidia_vision":
+            from .providers import UploadedImage, analyze_images
+
+            payload_images = payload.get("images") if isinstance(payload, dict) else []
+            images: list[UploadedImage] = []
+            for entry in (payload_images if isinstance(payload_images, list) else []):
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    data = base64.b64decode(str(entry.get("data") or ""), validate=True)
+                except (ValueError, TypeError):
+                    continue
+                if data:
+                    images.append(UploadedImage(
+                        data=data,
+                        mime_type=str(entry.get("mimeType") or "image/jpeg"),
+                        filename=str(entry.get("filename") or "image.jpg"),
+                    ))
+            if not images:
+                raise ValueError("NVIDIA analysis job did not contain a usable image.")
+            result = analyze_images(images, {
+                "seller_defaults": payload.get("sellerDefaults") if isinstance(payload.get("sellerDefaults"), dict) else {},
+                "try_alternate": True,
+                "deadline": time.monotonic() + _positive_int(os.environ.get("NVIDIA_WORKER_DEADLINE_SECONDS"), 75, 120),
+            })
+            result["readOnly"] = True
         else:
             raise ValueError("Unsupported Commerce Agent job kind.")
         _update_job(job_id, "completed", 100, result, "")

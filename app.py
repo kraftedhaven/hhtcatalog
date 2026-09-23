@@ -71,6 +71,28 @@ def analyze():
         return jsonify({"error": "Analysis failed before a listing could be generated. Please retry or check provider configuration."}), 500
 
 
+@app.route("/api/nvidia/analyze/start", methods=["POST"])
+def nvidia_analyze_start():
+    """Queue slow NVIDIA vision work; never hold the browser connection open."""
+    files = _request_files()
+    if not files:
+        return jsonify({"error": "No image uploaded. Use multipart form field 'file' with one to three images."}), 400
+    try:
+        images = [_uploaded_image(file) for file in files[:3]]
+        result = commerce_agent.start_nvidia_vision_job(
+            [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename} for image in images],
+            _seller_defaults_from_form(),
+        )
+        result["provider"] = "nvidia_worker"
+        result["nextStep"] = "The NVIDIA worker is analyzing the photos. Poll the returned job ID for the reviewed result."
+        return jsonify({"result": result}), 202
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("NVIDIA analysis job could not start")
+        return jsonify({"error": "NVIDIA analysis could not be queued. Please retry shortly."}), 503
+
+
 @app.route("/bulk-analyze", methods=["POST"])
 def bulk_analyze():
     files = _request_files()
