@@ -19,6 +19,10 @@
     let engine = "hosted";
     let files = [];
     let previews = [];
+    let stagingPhotos = [];
+    let selectedPhotoIds = [];
+    let dragActive = false;
+    let stagingInput;
     let item = load("hht_current_item", emptyItem);
     let queue = load("hht_queue", []);
     let seller = load("hht_seller_defaults", defaultSeller);
@@ -59,6 +63,7 @@
     $: persist("hht_current_item", item);
     $: reviewNotes = sellerReviewNotes(item);
     $: visibleCategoryFields = categoryFields.filter((field) => !canonicalAspectKeys[aspectKey(field.name)]);
+    $: selectedStagingPhotos = stagingPhotos.filter((photo) => selectedPhotoIds.includes(photo.id) && !photo.processed);
 
     function load(key, fallback) {
         try {
@@ -83,8 +88,82 @@
     }
 
     async function onFilesSelected(event) {
-        const chosen = Array.from(event.target.files || []).filter((file) => file.type.startsWith("image/")).slice(0, 5);
-        await setFiles(chosen);
+        await addStagingPhotos(Array.from(event.target.files || []));
+        if (event.target) event.target.value = "";
+    }
+
+    async function onDrop(event) {
+        event.preventDefault();
+        dragActive = false;
+        await addStagingPhotos(Array.from(event.dataTransfer?.files || []));
+    }
+
+    async function addStagingPhotos(incoming) {
+        const images = incoming.filter((file) => file.type.startsWith("image/"));
+        if (!images.length) {
+            error = "Choose image files to add to the staging grid.";
+            return;
+        }
+        const existing = new Set(stagingPhotos.map((photo) => `${photo.name}:${photo.size}:${photo.lastModified}`));
+        const additions = images
+            .filter((file) => !existing.has(`${file.name}:${file.size}:${file.lastModified}`))
+            .map((file) => ({
+                id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID?.() || Date.now()}`,
+                file,
+                name: file.name,
+                size: file.size,
+                lastModified: file.lastModified,
+                url: URL.createObjectURL(file),
+                processed: false,
+            }));
+        stagingPhotos = [...stagingPhotos, ...additions];
+        error = "";
+        status = `${stagingPhotos.length} photo${stagingPhotos.length === 1 ? "" : "s"} staged. Select the front, back, tag, and detail photos for one item.`;
+    }
+
+    function toggleStagingPhoto(photo) {
+        if (photo.processed || loading) return;
+        if (selectedPhotoIds.includes(photo.id)) {
+            selectedPhotoIds = selectedPhotoIds.filter((id) => id !== photo.id);
+            return;
+        }
+        if (selectedPhotoIds.length >= 3) {
+            error = "Select up to 3 photos per item for the current Groq analysis endpoint.";
+            return;
+        }
+        selectedPhotoIds = [...selectedPhotoIds, photo.id];
+        error = "";
+    }
+
+    function removeStagingPhoto(photo) {
+        if (photo.processed) return;
+        URL.revokeObjectURL(photo.url);
+        stagingPhotos = stagingPhotos.filter((entry) => entry.id !== photo.id);
+        selectedPhotoIds = selectedPhotoIds.filter((id) => id !== photo.id);
+    }
+
+    function clearStagingPhotos() {
+        stagingPhotos.filter((photo) => !photo.processed).forEach((photo) => URL.revokeObjectURL(photo.url));
+        stagingPhotos = stagingPhotos.filter((photo) => photo.processed);
+        selectedPhotoIds = [];
+        status = stagingPhotos.length ? `${stagingPhotos.length} processed photo${stagingPhotos.length === 1 ? "" : "s"} locked in staging.` : "Staging grid cleared.";
+    }
+
+    async function processStagedItem() {
+        const group = selectedStagingPhotos.map((photo) => photo.file);
+        if (!group.length) {
+            error = "Select one to three unprocessed photos for one item first.";
+            return;
+        }
+        files = group;
+        previews = group.map((file) => ({ name: file.name, url: URL.createObjectURL(file) }));
+        await analyze({ sourceFiles: group });
+        if (!error) {
+            const processedIds = new Set(selectedStagingPhotos.map((photo) => photo.id));
+            stagingPhotos = stagingPhotos.map((photo) => processedIds.has(photo.id) ? { ...photo, processed: true } : photo);
+            selectedPhotoIds = [];
+            status = "Item processed. Its photos are locked; select the next unprocessed group.";
+        }
     }
 
     async function setFiles(nextFiles) {
@@ -107,7 +186,8 @@
         error = "";
         canTryAlternate = false;
         alternateProvider = "";
-        if (!files.length) {
+        const analysisFiles = options.sourceFiles || files;
+        if (!analysisFiles.length) {
             error = "Upload at least one item photo first.";
             return;
         }
@@ -115,7 +195,7 @@
         try {
             const usesHostedUpload = engine === "hosted" || engine === "nvidia";
             status = usesHostedUpload ? "Compressing and uploading photos..." : "Starting browser-local model...";
-            const hostedFiles = usesHostedUpload ? await compactHostedFiles(files) : files;
+            const hostedFiles = usesHostedUpload ? await compactHostedFiles(analysisFiles) : analysisFiles;
             status = usesHostedUpload ? "Uploading compressed photos for secure analysis..." : status;
             let result;
             if (engine === "hosted") {
@@ -694,12 +774,46 @@
                     <label class="field wide"><span>Search terms</span><input bind:value={analysisHints.searchTerms} placeholder="Example: Cleveland Cavaliers, NBA, Hardwood Classics" maxlength="160" /></label>
                 </div>
             </div>
-            <label class="dropzone">
-                <input type="file" accept="image/*" multiple on:change={onFilesSelected} />
-                <strong>Choose 1-5 item photos</strong>
-                <span>Camera or photo library. Review every AI result before export.</span>
-            </label>
-            {#if previews.length}
+            <div
+                class:drag-active={dragActive}
+                class="dropzone bulk-staging-dropzone"
+                role="button"
+                tabindex="0"
+                on:dragover|preventDefault={() => dragActive = true}
+                on:dragleave={() => dragActive = false}
+                on:drop={onDrop}
+                on:keydown={(event) => (event.key === "Enter" || event.key === " ") && stagingInput?.click()}
+                on:click={() => stagingInput?.click()}
+            >
+                <input bind:this={stagingInput} type="file" accept="image/*" multiple on:click|stopPropagation on:change={onFilesSelected} />
+                <strong>Drop 100+ product photos here</strong>
+                <span>Or choose a photo folder. Click thumbnails to group up to 3 views for one item.</span>
+            </div>
+            {#if stagingPhotos.length}
+                <div class="staging-toolbar">
+                    <div>
+                        <strong>{stagingPhotos.length} staged</strong>
+                        <span>{stagingPhotos.filter((photo) => !photo.processed).length} available · {stagingPhotos.filter((photo) => photo.processed).length} processed and locked</span>
+                    </div>
+                    <button type="button" on:click={clearStagingPhotos}>Clear available photos</button>
+                </div>
+                <div class="bulk-staging-grid" aria-label="Bulk photo staging grid">
+                    {#each stagingPhotos as photo}
+                        <div class:staging-selected={selectedPhotoIds.includes(photo.id)} class:staging-processed={photo.processed} class="staging-photo">
+                            <button type="button" class="staging-photo-button" disabled={photo.processed || loading} on:click={() => toggleStagingPhoto(photo)} aria-label={photo.processed ? `${photo.name} processed` : `Select ${photo.name}`}>
+                                <img src={photo.url} alt={photo.name} loading="lazy" />
+                                {#if photo.processed}<span class="staging-lock">Processed</span>{:else if selectedPhotoIds.includes(photo.id)}<span class="staging-order">{selectedPhotoIds.indexOf(photo.id) + 1}</span>{/if}
+                            </button>
+                            <div class="staging-photo-meta"><span title={photo.name}>{photo.name}</span>{#if !photo.processed}<button type="button" on:click={() => removeStagingPhoto(photo)} aria-label={`Remove ${photo.name}`}>×</button>{/if}</div>
+                        </div>
+                    {/each}
+                </div>
+                <div class="staging-actions">
+                    <span>{selectedStagingPhotos.length ? `${selectedStagingPhotos.length} photo${selectedStagingPhotos.length === 1 ? "" : "s"} selected for one item.` : "Select the photos belonging to one item."}</span>
+                    <button class="primary" type="button" disabled={loading || !selectedStagingPhotos.length} on:click={processStagedItem}>{loading ? "Processing item..." : "Process Item with Groq"}</button>
+                </div>
+            {/if}
+            {#if previews.length && !stagingPhotos.length}
                 <div class="preview-grid">
                     {#each previews as preview, index}
                         <div class="thumb">
@@ -710,7 +824,7 @@
                 </div>
             {/if}
             <div class="actions">
-                <button class="primary" disabled={loading || !files.length} on:click={analyze}>{loading ? "Analyzing..." : "Analyze photos"}</button>
+                <button class="primary" disabled={loading || !files.length || stagingPhotos.length > 0} on:click={analyze}>{loading ? "Analyzing..." : "Analyze photos"}</button>
                 <button type="button" on:click={() => setFiles([])}>Clear photos</button>
             </div>
         </section>
@@ -888,3 +1002,144 @@
         </section>
     {/if}
 </div>
+
+<style>
+    .bulk-staging-dropzone {
+        display: flex;
+        min-height: 112px;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        transition: border-color .15s ease, background .15s ease;
+    }
+
+    .bulk-staging-dropzone.drag-active {
+        border-color: var(--blue);
+        background: #eff6ff;
+    }
+
+    .bulk-staging-dropzone input {
+        display: none;
+    }
+
+    .staging-toolbar,
+    .staging-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 12px;
+    }
+
+    .staging-toolbar div {
+        display: grid;
+        gap: 2px;
+    }
+
+    .staging-toolbar span,
+    .staging-actions span {
+        color: var(--muted);
+        font-size: 13px;
+    }
+
+    .bulk-staging-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+        gap: 10px;
+        max-height: 560px;
+        margin-top: 12px;
+        overflow: auto;
+        padding: 2px;
+    }
+
+    .staging-photo {
+        min-width: 0;
+        border: 2px solid transparent;
+        border-radius: 10px;
+        background: #f8fafc;
+        overflow: hidden;
+    }
+
+    .staging-photo.staging-selected {
+        border-color: var(--blue);
+        box-shadow: 0 0 0 2px #bfdbfe;
+    }
+
+    .staging-photo.staging-processed {
+        border-color: #cbd5e1;
+        opacity: .58;
+    }
+
+    .staging-photo-button {
+        position: relative;
+        display: block;
+        width: 100%;
+        min-height: 112px;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        background: #e2e8f0;
+        overflow: hidden;
+    }
+
+    .staging-photo-button img {
+        display: block;
+        width: 100%;
+        height: 112px;
+        object-fit: cover;
+    }
+
+    .staging-order,
+    .staging-lock {
+        position: absolute;
+        right: 6px;
+        top: 6px;
+        border-radius: 999px;
+        background: var(--blue);
+        color: #fff;
+        padding: 3px 7px;
+        font-size: 11px;
+        font-weight: 800;
+    }
+
+    .staging-lock {
+        background: #475569;
+    }
+
+    .staging-photo-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 4px;
+        padding: 5px 6px;
+        font-size: 11px;
+    }
+
+    .staging-photo-meta span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .staging-photo-meta button {
+        min-height: 24px;
+        padding: 0 5px;
+        border: 0;
+        background: transparent;
+        color: var(--red);
+    }
+
+    @media (max-width: 640px) {
+        .staging-toolbar,
+        .staging-actions {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .staging-toolbar button,
+        .staging-actions button {
+            width: 100%;
+        }
+    }
+</style>
