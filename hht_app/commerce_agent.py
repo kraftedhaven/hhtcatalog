@@ -163,6 +163,7 @@ def init_db() -> None:
                 INSERT INTO settings(id) VALUES(1) ON CONFLICT (id) DO NOTHING
                 """
             )
+            _ensure_phase4_schema(db)
         else:
             db.executescript(
                 """
@@ -208,6 +209,79 @@ def init_db() -> None:
             INSERT OR IGNORE INTO settings(id) VALUES (1);
             """
             )
+            _ensure_phase4_schema(db)
+
+
+def _ensure_phase4_schema(db: _Database) -> None:
+    """Add performance/version tables without disturbing existing deployments."""
+    if db.postgres:
+        for statement in (
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS listing_start_time TEXT",
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS quantity_sold INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS watch_count INTEGER NOT NULL DEFAULT 0",
+        ):
+            db.execute(statement)
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS listing_performance_daily (
+                id TEXT PRIMARY KEY, listing_row_id BIGINT REFERENCES listings(id), ebay_listing_id TEXT NOT NULL,
+                metric_date TEXT NOT NULL, impressions INTEGER NOT NULL DEFAULT 0, search_impressions INTEGER NOT NULL DEFAULT 0,
+                views INTEGER NOT NULL DEFAULT 0, ctr DOUBLE PRECISION NOT NULL DEFAULT 0,
+                conversion_rate DOUBLE PRECISION NOT NULL DEFAULT 0, transactions INTEGER NOT NULL DEFAULT 0,
+                watch_count INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'ebay_analytics', raw_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(ebay_listing_id, metric_date)
+            );
+            CREATE TABLE IF NOT EXISTS listing_versions (
+                id TEXT PRIMARY KEY, listing_row_id BIGINT NOT NULL REFERENCES listings(id), version_number INTEGER NOT NULL,
+                source TEXT NOT NULL, state_json TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fulfillment_orders (
+                order_id TEXT PRIMARY KEY, created_at TEXT, total_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+                line_items_json TEXT NOT NULL DEFAULT '[]', raw_json TEXT NOT NULL DEFAULT '{}', synced_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS rotation_actions (
+                id TEXT PRIMARY KEY, ebay_listing_id TEXT NOT NULL, action TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Pending', created_at TEXT NOT NULL, approved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS listing_performance_daily_date_idx ON listing_performance_daily(metric_date, ebay_listing_id);
+            """
+        )
+    else:
+        columns = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(listings)").fetchall()}
+        for name, definition in (
+            ("lifecycle_status", "TEXT NOT NULL DEFAULT 'active'"),
+            ("listing_start_time", "TEXT"),
+            ("quantity_sold", "INTEGER NOT NULL DEFAULT 0"),
+            ("watch_count", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in columns:
+                db.execute(f"ALTER TABLE listings ADD COLUMN {name} {definition}")
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS listing_performance_daily (
+                id TEXT PRIMARY KEY, listing_row_id INTEGER REFERENCES listings(id), ebay_listing_id TEXT NOT NULL,
+                metric_date TEXT NOT NULL, impressions INTEGER NOT NULL DEFAULT 0, search_impressions INTEGER NOT NULL DEFAULT 0,
+                views INTEGER NOT NULL DEFAULT 0, ctr REAL NOT NULL DEFAULT 0, conversion_rate REAL NOT NULL DEFAULT 0,
+                transactions INTEGER NOT NULL DEFAULT 0, watch_count INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'ebay_analytics', raw_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(ebay_listing_id, metric_date)
+            );
+            CREATE TABLE IF NOT EXISTS listing_versions (
+                id TEXT PRIMARY KEY, listing_row_id INTEGER NOT NULL REFERENCES listings(id), version_number INTEGER NOT NULL,
+                source TEXT NOT NULL, state_json TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fulfillment_orders (
+                order_id TEXT PRIMARY KEY, created_at TEXT, total_value REAL NOT NULL DEFAULT 0,
+                line_items_json TEXT NOT NULL DEFAULT '[]', raw_json TEXT NOT NULL DEFAULT '{}', synced_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS rotation_actions (
+                id TEXT PRIMARY KEY, ebay_listing_id TEXT NOT NULL, action TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Pending', created_at TEXT NOT NULL, approved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS listing_performance_daily_date_idx ON listing_performance_daily(metric_date, ebay_listing_id);
+            """
+        )
 
 
 def settings() -> dict[str, Any]:
@@ -330,6 +404,7 @@ def import_listings() -> dict[str, Any]:
                     continue
                 now = utc_now()
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, offer_id=excluded.offer_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), str(listing.get("offerId", "")), sku, _marketplace(), _json(listing), str(listing.get("sourceUpdatedAt", "")), now))
+                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=? WHERE sku=? AND marketplace=?", (str(listing.get("status") or "draft"), listing.get("listingStartTime"), int(_metric_number(listing.get("quantitySold"))), int(_metric_number(listing.get("watchCount"))), sku, _marketplace()))
                 imported += 1
         if len(items) < limit:
             break
@@ -358,6 +433,7 @@ def import_active_listings() -> dict[str, Any]:
                 existing = _row_listing(previous) if previous else {}
                 normalized = _merge_active_listing(existing, listing, sku)
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now))
+                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=? WHERE sku=? AND marketplace=?", (str(normalized.get("status") or "active"), normalized.get("listingStartTime"), int(_metric_number(normalized.get("quantitySold"))), int(_metric_number(normalized.get("watchCount"))), sku, _marketplace()))
                 active_skus.add(sku)
                 imported += 1
         if page >= int(result.get("totalPages") or 1) or not items:
@@ -417,8 +493,210 @@ def _mark_inactive_active_import_records(active_skus: set[str]) -> int:
     return marked
 
 
+PERFORMANCE_METRICS = ",".join((
+    "CLICK_THROUGH_RATE", "LISTING_IMPRESSION_SEARCH_RESULTS_PAGE", "LISTING_IMPRESSION_TOTAL",
+    "LISTING_VIEWS_TOTAL", "SALES_CONVERSION_RATE", "TRANSACTION",
+))
+
+
+def _date_window(days: int = 30) -> tuple[str, str]:
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=max(1, min(int(days), 90)) - 1)
+    return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
+
+def _metric_number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _analytics_get(params: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _ebay_get("/sell/analytics/v1/traffic_report", params)
+    except EbayDraftError as exc:
+        if exc.status_code in {401, 403}:
+            raise ValueError("eBay Analytics access requires reauthorization with sell.analytics.readonly.") from exc
+        raise
+
+
+def _report_records(body: dict[str, Any], fallback_date: str) -> list[dict[str, Any]]:
+    header = body.get("header") if isinstance(body.get("header"), dict) else {}
+    metrics = [str(entry.get("key") or "").upper() for entry in (header.get("metrics") or []) if isinstance(entry, dict)]
+    dimension_keys = [str(entry.get("key") or "").upper() for entry in (header.get("dimensionKeys") or []) if isinstance(entry, dict)]
+    rows: list[dict[str, Any]] = []
+    for record in body.get("records") if isinstance(body.get("records"), list) else []:
+        if not isinstance(record, dict):
+            continue
+        dimensions = record.get("dimensionValues") if isinstance(record.get("dimensionValues"), list) else []
+        values = record.get("metricValues") if isinstance(record.get("metricValues"), list) else []
+        dimensions = [entry.get("value") if isinstance(entry, dict) else entry for entry in dimensions]
+        values = [entry.get("value") if isinstance(entry, dict) else entry for entry in values]
+        mapped = {metric: value for metric, value in zip(metrics, values)}
+        listing_id = str(record.get("listingId") or "")
+        metric_date = fallback_date
+        for key, value in zip(dimension_keys, dimensions):
+            if key in {"LISTING", "LISTING_ID"} and not listing_id:
+                listing_id = str(value or "")
+            if key in {"DAY", "DATE"} and value:
+                metric_date = str(value)[:10]
+        rows.append({"listingId": listing_id, "metricDate": metric_date, "metrics": mapped, "raw": record})
+    return rows
+
+
+def _store_performance_rows(rows: list[dict[str, Any]], fallback_date: str) -> int:
+    init_db()
+    listing_map: dict[str, Any] = {}
+    with connect() as db:
+        for listing in db.execute("SELECT id, listing_id FROM listings WHERE marketplace=?", (_marketplace(),)).fetchall():
+            listing_map[str(listing["listing_id"])] = listing["id"]
+        stored = 0
+        now = utc_now()
+        for row in rows:
+            listing_id = str(row.get("listingId") or "").strip()
+            if not listing_id:
+                continue
+            metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            values = {
+                "impressions": int(_metric_number(metrics.get("LISTING_IMPRESSION_TOTAL"))),
+                "search_impressions": int(_metric_number(metrics.get("LISTING_IMPRESSION_SEARCH_RESULTS_PAGE"))),
+                "views": int(_metric_number(metrics.get("LISTING_VIEWS_TOTAL"))),
+                "ctr": _metric_number(metrics.get("CLICK_THROUGH_RATE")),
+                "conversion_rate": _metric_number(metrics.get("SALES_CONVERSION_RATE")),
+                "transactions": int(_metric_number(metrics.get("TRANSACTION"))),
+                "watch_count": 0,
+            }
+            metric_date = str(row.get("metricDate") or fallback_date)[:32]
+            existing = db.execute("SELECT id FROM listing_performance_daily WHERE ebay_listing_id=? AND metric_date=?", (listing_id, metric_date)).fetchone()
+            params = (listing_map.get(listing_id), listing_id, metric_date, values["impressions"], values["search_impressions"], values["views"], values["ctr"], values["conversion_rate"], values["transactions"], values["watch_count"], "ebay_analytics", _json(row.get("raw") or {}), now)
+            if existing:
+                db.execute("UPDATE listing_performance_daily SET listing_row_id=?, impressions=?, search_impressions=?, views=?, ctr=?, conversion_rate=?, transactions=?, watch_count=?, source=?, raw_json=?, updated_at=? WHERE id=?", params[:-1] + (existing["id"],))
+            else:
+                db.execute("INSERT INTO listing_performance_daily(id,listing_row_id,ebay_listing_id,metric_date,impressions,search_impressions,views,ctr,conversion_rate,transactions,watch_count,source,raw_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()),) + params)
+            stored += 1
+        return stored
+
+
+def sync_performance(days: int = 30, listing_ids: list[str] | None = None) -> dict[str, Any]:
+    """Read official eBay traffic metrics in the documented 200-listing batches."""
+    init_db()
+    if listing_ids is None:
+        listing_ids = [str(row["listing_id"]) for row in connect_listing_ids()]
+    listing_ids = list(dict.fromkeys(value.strip() for value in listing_ids if value.strip()))
+    start, end = _date_window(days)
+    all_rows: list[dict[str, Any]] = []
+    for offset in range(0, len(listing_ids), 200):
+        chunk = listing_ids[offset:offset + 200]
+        filters = f"marketplace_ids:{{{_marketplace()}}},date_range:[{start}..{end}],listing_ids:{{{'|'.join(chunk)}}}"
+        body = _analytics_get({"dimension": "LISTING", "filter": filters, "metric": PERFORMANCE_METRICS})
+        all_rows.extend(_report_records(body, end[:4] + "-" + end[4:6] + "-" + end[6:]))
+    stored = _store_performance_rows(all_rows, end[:4] + "-" + end[4:6] + "-" + end[6:]) if all_rows else 0
+    return {"requested": len(listing_ids), "batches": (len(listing_ids) + 199) // 200, "records": len(all_rows), "stored": stored, "days": days, "source": "ebay_analytics"}
+
+
+def connect_listing_ids() -> list[dict[str, Any]]:
+    with connect() as db:
+        return [dict(row) for row in db.execute("SELECT listing_id FROM listings WHERE marketplace=? AND listing_id<>''", (_marketplace(),)).fetchall()]
+
+
+def sync_fulfillment_orders(days: int = 90) -> dict[str, Any]:
+    start = datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days), 730)))
+    filter_value = f"creationdate:[{start.strftime('%Y-%m-%dT%H:%M:%S.000Z')}..]"
+    offset = 0
+    total = 0
+    while True:
+        body = _ebay_get("/sell/fulfillment/v1/order", {"filter": filter_value, "limit": 200, "offset": offset})
+        orders = body.get("orders") if isinstance(body.get("orders"), list) else []
+        if not orders:
+            break
+        now = utc_now()
+        with connect() as db:
+            for order in orders:
+                if not isinstance(order, dict) or not order.get("orderId"):
+                    continue
+                pricing = order.get("pricingSummary") if isinstance(order.get("pricingSummary"), dict) else {}
+                total_value = _metric_number((pricing.get("total") or {}).get("value") if isinstance(pricing.get("total"), dict) else 0)
+                values = (str(order.get("orderId")), str(order.get("creationDate") or ""), total_value, _json(order.get("lineItems") or []), _json(order), now)
+                db.execute("INSERT INTO fulfillment_orders(order_id,created_at,total_value,line_items_json,raw_json,synced_at) VALUES(?,?,?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET created_at=excluded.created_at,total_value=excluded.total_value,line_items_json=excluded.line_items_json,raw_json=excluded.raw_json,synced_at=excluded.synced_at", values)
+                total += 1
+        if len(orders) < 200:
+            break
+        offset += len(orders)
+    return {"orders": total, "days": days, "source": "ebay_fulfillment"}
+
+
+def performance_dashboard() -> dict[str, Any]:
+    init_db()
+    with connect() as db:
+        rows = db.execute("SELECT p.*, l.data_json FROM listing_performance_daily p LEFT JOIN listings l ON l.id=p.listing_row_id ORDER BY p.metric_date DESC, p.updated_at DESC").fetchall()
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        listing_id = str(row["ebay_listing_id"])
+        if listing_id not in latest:
+            entry = dict(row)
+            entry["listing"] = _decode(entry.pop("data_json", "{}"), {})
+            entry.pop("raw_json", None)
+            latest[listing_id] = entry
+    return {"lastSync": max((str(row["metric_date"]) for row in rows), default=""), "records": list(latest.values()), "rotation": rotation_queue(list(latest.values())), "capacity": listing_capacity()}
+
+
+def listing_capacity() -> dict[str, Any]:
+    active = sum(1 for item in list_listings() if str(item.get("status") or "active").lower() == "active")
+    raw_max = os.environ.get("EBAY_LISTING_CAPACITY", "").strip()
+    try:
+        maximum = int(raw_max) if raw_max else None
+    except ValueError:
+        maximum = None
+    return {"active": active, "maximum": maximum, "remaining": max(0, maximum - active) if maximum is not None else None, "source": "configured_limit" if maximum is not None else "local_active_count_only", "note": "eBay does not expose a universal listing-capacity endpoint here; configure EBAY_LISTING_CAPACITY from Seller Hub when available."}
+
+
+def rotation_queue(performance: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    performance = performance or []
+    queue: list[dict[str, Any]] = []
+    for row in performance:
+        listing = row.get("listing") if isinstance(row.get("listing"), dict) else {}
+        active = str(listing.get("status") or "active").lower() == "active"
+        ctr = _metric_number(row.get("ctr")); views = int(_metric_number(row.get("views"))); impressions = int(_metric_number(row.get("impressions")))
+        if active and impressions >= 25 and ctr < 1:
+            action, reason = "Optimize", "Low click-through rate despite listing impressions. Review title, category, and price evidence."
+        elif active and impressions == 0 and views == 0:
+            action, reason = "Keep", "No official traffic signal was returned for this listing; do not deactivate without more evidence."
+        elif not active and listing.get("season"):
+            action, reason = "Reactivate", "Inactive listing contains a seller-provided season signal; review manually before reactivation."
+        else:
+            action, reason = "Keep", "Official traffic evidence does not justify a status change."
+        queue.append({"id": f"rotation-{row.get('ebay_listing_id')}-{row.get('metric_date')}", "listingId": row.get("ebay_listing_id"), "title": listing.get("title") or row.get("ebay_listing_id"), "action": action, "current": "Active" if active else "Inactive", "proposed": action, "evidence": {"impressions": impressions, "views": views, "ctr": ctr, "conversionRate": _metric_number(row.get("conversion_rate")), "transactions": row.get("transactions", 0), "metricDate": row.get("metric_date")}, "confidence": "medium" if action != "Keep" else "low", "risk": "high" if action in {"Deactivate", "Reactivate"} else "low", "reason": reason, "approvalOnly": True})
+    return queue
+
+
+def approve_rotation_actions(action_ids: list[str]) -> dict[str, Any]:
+    requested = list(dict.fromkeys(str(value).strip() for value in action_ids if str(value).strip()))
+    if not requested or len(requested) > 50:
+        raise ValueError("Select between 1 and 50 rotation actions.")
+    now = utc_now(); approved = 0
+    with connect() as db:
+        for action_id in requested:
+            row = db.execute("SELECT id FROM rotation_actions WHERE id=?", (action_id,)).fetchone()
+            if row:
+                db.execute("UPDATE rotation_actions SET status='Approved', approved_at=? WHERE id=?", (now, action_id)); approved += 1
+            else:
+                # Store the seller decision only; no Trading API status mutation is sent here.
+                db.execute("INSERT INTO rotation_actions(id,ebay_listing_id,action,evidence_json,status,created_at,approved_at) VALUES(?,?,?,?,?,?,?)", (action_id, action_id.split("-")[1] if "-" in action_id else action_id, "reviewed", "{}", "Approved", now, now)); approved += 1
+    return {"requested": len(requested), "approved": approved, "applied": 0, "approvalOnly": True, "message": "Rotation decisions were approved for review. No eBay listing status was changed."}
+
+
 def start_active_import_job() -> dict[str, Any]:
     return _start_background_job("active_import", {})
+
+
+def start_performance_sync_job(days: int = 30, listing_ids: list[str] | None = None) -> dict[str, Any]:
+    payload = {"days": max(1, min(int(days), 90)), "listingIds": list(listing_ids or [])}
+    return _start_background_job("performance_sync", payload)
+
+
+def start_fulfillment_sync_job(days: int = 90) -> dict[str, Any]:
+    return _start_background_job("fulfillment_sync", {"days": max(1, min(int(days), 730))})
 
 
 def start_enrichment_job(listing_ids: list[str]) -> dict[str, Any]:
@@ -617,6 +895,10 @@ def run_job(job_id: str) -> dict[str, Any] | None:
     try:
         if kind == "active_import":
             result = import_active_listings()
+        elif kind == "performance_sync":
+            result = sync_performance(payload.get("days", 30), payload.get("listingIds") or None)
+        elif kind == "fulfillment_sync":
+            result = sync_fulfillment_orders(payload.get("days", 90))
         elif kind == "enrichment":
             result = enrich_listings(payload.get("listingIds", []))
         elif kind == "full_enrichment":
@@ -1145,6 +1427,11 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
     with connect() as db:
         db.execute("INSERT INTO actions(id,recommendation_id,listing_row_id,approved_json,old_json,created_at) SELECT ?,id,listing_row_id,?,?,? FROM recommendations WHERE id=?", (action_id, _json(changes), _json({key: current.get(key) for key in changes}), now, recommendation_id))
         db.execute("UPDATE recommendations SET status='Approved', updated_at=? WHERE id=?", (now, recommendation_id))
+        listing_row = db.execute("SELECT listing_row_id FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
+        if listing_row:
+            version_row = db.execute("SELECT COALESCE(MAX(version_number), 0) AS version FROM listing_versions WHERE listing_row_id=?", (listing_row["listing_row_id"],)).fetchone()
+            version_number = int(version_row["version"] if version_row else 0) + 1
+            db.execute("INSERT INTO listing_versions(id,listing_row_id,version_number,source,state_json,evidence_json,created_at) VALUES(?,?,?,?,?,?,?)", (str(uuid.uuid4()), listing_row["listing_row_id"], version_number, "seller_approved", _json({**current, **changes}), _json({"recommendationId": recommendation_id, "findings": recommendation.get("findings", [])}), now))
     return {"actionId": action_id, "recommendationId": recommendation_id, "status": "Approved", "approved": changes}
 
 

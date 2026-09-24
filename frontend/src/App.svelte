@@ -1,6 +1,6 @@
 <script>
     import "./app.css";
-    import { analyzeImages, commerceJob, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, sendDraftFeed, startNvidiaAnalysis } from "$lib/api";
+    import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, sendDraftFeed, startNvidiaAnalysis } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
 
@@ -44,6 +44,10 @@
     let categoryNotice = "";
     let oauthLoading = false;
     let oauthStatus = "";
+    let performanceData = { capacity: {}, rotation: [], records: [] };
+    let performanceLoading = false;
+    let performanceSyncing = false;
+    let rotationSelected = [];
 
     const canonicalAspectKeys = {
         brand: "brand", model: "model", size: "size", color: "color", department: "dept",
@@ -650,6 +654,48 @@
         }
     }
 
+    async function loadPerformance() {
+        performanceLoading = true;
+        try {
+            performanceData = await commercePerformance();
+            rotationSelected = rotationSelected.filter((id) => (performanceData.rotation || []).some((entry) => entry.id === id));
+        } catch (err) { error = err.message || "Performance data is unavailable."; }
+        finally { performanceLoading = false; }
+    }
+
+    async function waitForCommerceJob(jobId, label) {
+        if (!jobId) throw new Error(`${label} did not return a job ID.`);
+        const until = Date.now() + 150000;
+        while (Date.now() < until) {
+            const job = await commerceJob(jobId);
+            if (job.status === "completed") return job.result || {};
+            if (job.status === "failed") throw new Error(job.error || `${label} failed.`);
+            status = `${label} is ${job.status || "queued"}...`;
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+        throw new Error(`${label} is still running. Check back shortly.`);
+    }
+
+    async function syncPerformance() {
+        performanceSyncing = true; error = "";
+        try { const job = await commerceStartPerformanceSync(30); await waitForCommerceJob(job.jobId, "Performance sync"); await loadPerformance(); status = "Official eBay traffic metrics refreshed."; }
+        catch (err) { error = err.message || "Performance sync failed."; }
+        finally { performanceSyncing = false; }
+    }
+
+    async function syncFulfillment() {
+        try { const job = await commerceStartFulfillmentSync(90); await waitForCommerceJob(job.jobId, "Fulfillment sync"); status = "Seller order history refreshed."; }
+        catch (err) { error = err.message || "Fulfillment sync failed."; }
+    }
+
+    function toggleRotation(id) { rotationSelected = rotationSelected.includes(id) ? rotationSelected.filter((value) => value !== id) : [...rotationSelected, id]; }
+
+    async function approveRotation() {
+        if (!rotationSelected.length) return;
+        try { const result = await commerceApproveRotation(rotationSelected); rotationSelected = []; status = `${result.approved} rotation decision${result.approved === 1 ? "" : "s"} approved. No eBay listing status was changed.`; await loadPerformance(); }
+        catch (err) { error = err.message || "Rotation approvals failed."; }
+    }
+
     async function reconnectEbay() {
         error = "";
         oauthLoading = true;
@@ -731,6 +777,7 @@
         <button class:on={tab === "analyze"} on:click={() => tab = "analyze"}>Analyze</button>
         <button class:on={tab === "edit"} on:click={() => tab = "edit"}>Review</button>
         <button class:on={tab === "queue"} on:click={() => tab = "queue"}>Queue</button>
+        <button class:on={tab === "capacity"} on:click={() => { tab = "capacity"; loadPerformance(); }}>Capacity</button>
         <button class:on={tab === "settings"} on:click={() => tab = "settings"}>Settings</button>
     </nav>
 
@@ -826,6 +873,27 @@
             <div class="actions">
                 <button class="primary" disabled={loading || !files.length || stagingPhotos.length > 0} on:click={analyze}>{loading ? "Analyzing..." : "Analyze photos"}</button>
                 <button type="button" on:click={() => setFiles([])}>Clear photos</button>
+            </div>
+        </section>
+    {/if}
+
+    {#if tab === "capacity"}
+        <section class="panel">
+            <div class="section-heading"><div><p class="eyebrow">LISTING CAP MANAGER</p><h2>Capacity &amp; rotation</h2><p>Use official eBay traffic evidence to decide what to optimize, keep, or review. HHT never changes listing status automatically.</p></div><div class="actions"><button on:click={syncPerformance} disabled={performanceSyncing}>{performanceSyncing ? "Syncing..." : "Sync eBay traffic"}</button><button on:click={syncFulfillment}>Sync orders</button></div></div>
+            <div class="metric-grid">
+                <div class="metric-card"><span>Active listings</span><strong>{performanceData.capacity?.active ?? "—"}</strong></div>
+                <div class="metric-card"><span>Configured maximum</span><strong>{performanceData.capacity?.maximum ?? "Not configured"}</strong></div>
+                <div class="metric-card"><span>Remaining</span><strong>{performanceData.capacity?.remaining ?? "—"}</strong></div>
+                <div class="metric-card"><span>Evidence date</span><strong>{performanceData.lastSync || "Not synced"}</strong></div>
+            </div>
+            <div class="notice info"><strong>Source and safety</strong><p>{performanceData.capacity?.note || "Sync traffic to populate official metrics."} Rotation decisions are approval-only. Approving below records your decision; it does not deactivate, reactivate, or publish a listing.</p></div>
+            <div class="rotation-list">
+                {#if performanceLoading}<p>Loading performance evidence...</p>{:else if !(performanceData.rotation || []).length}<p>No performance snapshots yet. Import active listings, then sync eBay traffic.</p>{:else}
+                    {#each performanceData.rotation as entry}
+                        <label class="rotation-row"><input type="checkbox" checked={rotationSelected.includes(entry.id)} on:change={() => toggleRotation(entry.id)} /><span><strong>{entry.title}</strong><small>{entry.action} · {entry.reason}</small><small>Impressions {entry.evidence.impressions} · Views {entry.evidence.views} · CTR {Number(entry.evidence.ctr || 0).toFixed(2)}% · Transactions {entry.evidence.transactions}</small></span><b>{entry.risk}</b></label>
+                    {/each}
+                    <button class="primary" disabled={!rotationSelected.length} on:click={approveRotation}>Approve Actions ({rotationSelected.length})</button>
+                {/if}
             </div>
         </section>
     {/if}

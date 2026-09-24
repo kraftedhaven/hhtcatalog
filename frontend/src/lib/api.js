@@ -187,6 +187,34 @@ export function commerceStartActiveImport() {
     return commerceRequest('/api/commerce/import-active/start', { method: 'POST' });
 }
 
+export function commerceStartPerformanceSync(days = 30, listingIds = []) {
+    return commerceRequest('/api/commerce/performance/sync/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days, listingIds }),
+    });
+}
+
+export function commercePerformance() {
+    return commerceRequest('/api/commerce/performance');
+}
+
+export function commerceStartFulfillmentSync(days = 90) {
+    return commerceRequest('/api/commerce/performance/orders/sync/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days }),
+    });
+}
+
+export function commerceApproveRotation(actionIds) {
+    return commerceRequest('/api/commerce/rotation/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actionIds }),
+    });
+}
+
 export function commerceJob(jobId) {
     return commerceRequest(`/api/commerce/jobs/${encodeURIComponent(jobId)}`);
 }

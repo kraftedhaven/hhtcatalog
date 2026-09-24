@@ -11,6 +11,8 @@ DEFAULT_EBAY_USER_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
     "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
+    "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
+    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
 ]
 TOKEN_CACHE_SKEW_SECONDS = 60
 DEFAULT_TIMEOUT_SECONDS = 8.0
@@ -180,7 +182,23 @@ def _basic_credentials() -> str:
 
 def _user_scopes() -> list[str]:
     configured = os.environ.get("EBAY_USER_SCOPES", "").strip()
-    return configured.split() if configured else DEFAULT_EBAY_USER_SCOPES
+    scopes = configured.split() if configured else list(DEFAULT_EBAY_USER_SCOPES)
+    analytics = "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly"
+    if analytics not in scopes:
+        scopes.append(analytics)
+    if not any(scope.endswith("/sell.fulfillment") or scope.endswith("/sell.fulfillment.readonly") for scope in scopes):
+        scopes.append("https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly")
+    return list(dict.fromkeys(scopes))
+
+
+def required_user_scopes() -> list[str]:
+    """Expose the non-secret scopes needed by the current seller workflows."""
+    return list(_user_scopes())
+
+
+def reauthorization_required() -> bool:
+    """Existing refresh tokens cannot gain newly requested scopes."""
+    return os.environ.get("EBAY_REAUTH_REQUIRED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _environment() -> str:
