@@ -41,6 +41,10 @@ DB_PATH = os.environ.get("COMMERCE_AGENT_DB", "commerce_agent.sqlite3")
 MAX_TITLE_LENGTH = 80
 EDITABLE_FIELDS = {"title", "price", "cid", "desc", "cat", "cnote", "notes", "pic", "brand", "size", "color", "dept", "type", "model", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
 ENRICHMENT_PAGE_SIZE = 25
+NVIDIA_HEAVY_ITEM_THRESHOLD = 30
+NVIDIA_HEAVY_PHOTO_THRESHOLD = 300
+NVIDIA_BATCH_MAX_PHOTOS = 500
+NVIDIA_BATCH_MAX_BYTES = 100 * 1024 * 1024
 ENRICHMENT_CHUNK_SIZE = 20
 MAX_VISION_JOB_IMAGES = 3
 MAX_VISION_JOB_BYTES = 6 * 1024 * 1024
@@ -132,7 +136,8 @@ def init_db() -> None:
                     current_json TEXT NOT NULL, proposed_json TEXT NOT NULL, findings_json TEXT NOT NULL,
                     score INTEGER NOT NULL, classification TEXT NOT NULL, reason TEXT NOT NULL,
                     confidence TEXT NOT NULL, risk TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Pending',
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    version_number INTEGER NOT NULL DEFAULT 1, is_current BOOLEAN NOT NULL DEFAULT TRUE
                 );
                 CREATE TABLE IF NOT EXISTS actions (
                     id TEXT PRIMARY KEY, recommendation_id TEXT NOT NULL REFERENCES recommendations(id),
@@ -160,18 +165,11 @@ def init_db() -> None:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS enrichment_checkpoints_status_idx ON enrichment_checkpoints(status, updated_at);
-                -- These tables are accessed by the trusted server connection. Enable
-                -- RLS so public/anon Supabase access is denied by default; the table
-                -- owner and service_role continue to work as required by the app.
-                ALTER TABLE listings ENABLE ROW LEVEL SECURITY;
-                ALTER TABLE recommendations ENABLE ROW LEVEL SECURITY;
-                ALTER TABLE actions ENABLE ROW LEVEL SECURITY;
-                ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
-                ALTER TABLE commerce_jobs ENABLE ROW LEVEL SECURITY;
-                ALTER TABLE enrichment_checkpoints ENABLE ROW LEVEL SECURITY;
                 INSERT INTO settings(id) VALUES(1) ON CONFLICT (id) DO NOTHING
                 """
             )
+            _ensure_phase4_schema(db)
+            _ensure_recommendation_versioning(db)
         else:
             db.executescript(
                 """
@@ -186,7 +184,8 @@ def init_db() -> None:
                 current_json TEXT NOT NULL, proposed_json TEXT NOT NULL, findings_json TEXT NOT NULL,
                 score INTEGER NOT NULL, classification TEXT NOT NULL, reason TEXT NOT NULL,
                 confidence TEXT NOT NULL, risk TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Pending',
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                version_number INTEGER NOT NULL DEFAULT 1, is_current INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS actions (
                 id TEXT PRIMARY KEY, recommendation_id TEXT NOT NULL REFERENCES recommendations(id),
@@ -217,6 +216,111 @@ def init_db() -> None:
             INSERT OR IGNORE INTO settings(id) VALUES (1);
             """
             )
+            _ensure_phase4_schema(db)
+            _ensure_recommendation_versioning(db)
+
+
+def _ensure_phase4_schema(db: _Database) -> None:
+    """Add performance/version tables without disturbing existing deployments."""
+    if db.postgres:
+        for statement in (
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS listing_start_time TEXT",
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS quantity_sold INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS watch_count INTEGER",
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS ownership_classification TEXT NOT NULL DEFAULT 'unknown'",
+        ):
+            db.execute(statement)
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS listing_performance_daily (
+                id TEXT PRIMARY KEY, listing_row_id BIGINT REFERENCES listings(id), ebay_listing_id TEXT NOT NULL,
+                metric_date TEXT NOT NULL, snapshot_kind TEXT NOT NULL DEFAULT 'rolling_listing_snapshot',
+                impressions INTEGER, search_impressions INTEGER, views INTEGER, ctr DOUBLE PRECISION,
+                conversion_rate DOUBLE PRECISION, transactions INTEGER, watch_count INTEGER,
+                source TEXT NOT NULL DEFAULT 'ebay_analytics', metric_provenance TEXT NOT NULL DEFAULT 'official_ebay_metric', raw_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(ebay_listing_id, metric_date)
+            );
+            CREATE TABLE IF NOT EXISTS listing_versions (
+                id TEXT PRIMARY KEY, listing_row_id BIGINT NOT NULL REFERENCES listings(id), version_number INTEGER NOT NULL,
+                source TEXT NOT NULL, state_json TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fulfillment_orders (
+                order_id TEXT PRIMARY KEY, created_at TEXT, total_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+                line_items_json TEXT NOT NULL DEFAULT '[]', raw_json TEXT NOT NULL DEFAULT '{}', synced_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS rotation_actions (
+                id TEXT PRIMARY KEY, ebay_listing_id TEXT NOT NULL, action TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Pending', created_at TEXT NOT NULL, approved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS listing_performance_daily_date_idx ON listing_performance_daily(metric_date, ebay_listing_id);
+            """
+        )
+        db.execute("ALTER TABLE listing_performance_daily ADD COLUMN IF NOT EXISTS snapshot_kind TEXT NOT NULL DEFAULT 'rolling_listing_snapshot'")
+        db.execute("ALTER TABLE listing_performance_daily ADD COLUMN IF NOT EXISTS metric_provenance TEXT NOT NULL DEFAULT 'official_ebay_metric'")
+    else:
+        columns = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(listings)").fetchall()}
+        for name, definition in (
+            ("lifecycle_status", "TEXT NOT NULL DEFAULT 'active'"),
+            ("listing_start_time", "TEXT"),
+            ("quantity_sold", "INTEGER NOT NULL DEFAULT 0"),
+            ("watch_count", "INTEGER"),
+            ("ownership_classification", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ):
+            if name not in columns:
+                db.execute(f"ALTER TABLE listings ADD COLUMN {name} {definition}")
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS listing_performance_daily (
+                id TEXT PRIMARY KEY, listing_row_id INTEGER REFERENCES listings(id), ebay_listing_id TEXT NOT NULL,
+                metric_date TEXT NOT NULL, snapshot_kind TEXT NOT NULL DEFAULT 'rolling_listing_snapshot',
+                impressions INTEGER, search_impressions INTEGER, views INTEGER, ctr REAL,
+                conversion_rate REAL, transactions INTEGER, watch_count INTEGER,
+                source TEXT NOT NULL DEFAULT 'ebay_analytics', metric_provenance TEXT NOT NULL DEFAULT 'official_ebay_metric', raw_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(ebay_listing_id, metric_date)
+            );
+            CREATE TABLE IF NOT EXISTS listing_versions (
+                id TEXT PRIMARY KEY, listing_row_id INTEGER NOT NULL REFERENCES listings(id), version_number INTEGER NOT NULL,
+                source TEXT NOT NULL, state_json TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fulfillment_orders (
+                order_id TEXT PRIMARY KEY, created_at TEXT, total_value REAL NOT NULL DEFAULT 0,
+                line_items_json TEXT NOT NULL DEFAULT '[]', raw_json TEXT NOT NULL DEFAULT '{}', synced_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS rotation_actions (
+                id TEXT PRIMARY KEY, ebay_listing_id TEXT NOT NULL, action TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Pending', created_at TEXT NOT NULL, approved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS listing_performance_daily_date_idx ON listing_performance_daily(metric_date, ebay_listing_id);
+            """
+        )
+
+
+def _ensure_recommendation_versioning(db: _Database) -> None:
+    """Keep recommendation history while exposing exactly one current row per listing."""
+    if db.postgres:
+        db.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS version_number INTEGER NOT NULL DEFAULT 1")
+        db.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT TRUE")
+    else:
+        columns = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(recommendations)").fetchall()}
+        if "version_number" not in columns:
+            db.execute("ALTER TABLE recommendations ADD COLUMN version_number INTEGER NOT NULL DEFAULT 1")
+        if "is_current" not in columns:
+            db.execute("ALTER TABLE recommendations ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1")
+    rows = db.execute("SELECT id, listing_row_id, status, updated_at, created_at FROM recommendations ORDER BY listing_row_id, updated_at DESC, created_at DESC, id DESC").fetchall()
+    seen: set[Any] = set()
+    for row in rows:
+        listing_row_id = row["listing_row_id"]
+        if listing_row_id in seen:
+            db.execute("UPDATE recommendations SET is_current=?, status=? WHERE id=?", (False if db.postgres else 0, "Superseded" if str(row["status"]) == "Pending" else row["status"], row["id"]))
+        else:
+            seen.add(listing_row_id)
+    for listing_row_id in seen:
+        version_rows = db.execute("SELECT id FROM recommendations WHERE listing_row_id=? ORDER BY updated_at ASC, created_at ASC, id ASC", (listing_row_id,)).fetchall()
+        for number, version_row in enumerate(version_rows, 1):
+            db.execute("UPDATE recommendations SET version_number=? WHERE id=?", (number, version_row["id"]))
+    predicate = "is_current = TRUE" if db.postgres else "is_current = 1"
+    db.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS recommendations_one_current_per_listing ON recommendations(listing_row_id) WHERE {predicate}")
 
 
 def settings() -> dict[str, Any]:
@@ -249,6 +353,22 @@ def _api_base_url() -> str:
 
 def _marketplace() -> str:
     return os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US")
+
+
+def choose_vision_route(item_count: int = 1, photo_count: int = 0) -> dict[str, Any]:
+    """Choose the economical default for normal work and the heavy-batch path."""
+    try:
+        items = max(1, int(item_count))
+    except (TypeError, ValueError):
+        items = 1
+    try:
+        photos = max(0, int(photo_count))
+    except (TypeError, ValueError):
+        photos = 0
+    item_threshold = _positive_int(os.environ.get("NVIDIA_HEAVY_ITEM_THRESHOLD"), NVIDIA_HEAVY_ITEM_THRESHOLD, 5000)
+    photo_threshold = _positive_int(os.environ.get("NVIDIA_HEAVY_PHOTO_THRESHOLD"), NVIDIA_HEAVY_PHOTO_THRESHOLD, 10000)
+    heavy = items >= item_threshold or photos >= photo_threshold
+    return {"route": "nvidia_worker" if heavy else "groq", "workload": "heavy_batch" if heavy else "normal", "itemCount": items, "photoCount": photos, "thresholds": {"items": item_threshold, "photos": photo_threshold}, "reason": "NVIDIA/Brev worker is reserved for large batches; normal listing analysis stays on Groq." if heavy else "Normal listing analysis uses Groq; NVIDIA is reserved for large batches."}
 
 
 def _seller_token() -> str:
@@ -339,6 +459,7 @@ def import_listings() -> dict[str, Any]:
                     continue
                 now = utc_now()
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, offer_id=excluded.offer_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), str(listing.get("offerId", "")), sku, _marketplace(), _json(listing), str(listing.get("sourceUpdatedAt", "")), now))
+                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=? WHERE sku=? AND marketplace=?", (str(listing.get("status") or "draft"), listing.get("listingStartTime"), int(_metric_number(listing.get("quantitySold"))), int(_metric_number(listing.get("watchCount"))), sku, _marketplace()))
                 imported += 1
         if len(items) < limit:
             break
@@ -366,7 +487,10 @@ def import_active_listings() -> dict[str, Any]:
                 previous = db.execute("SELECT * FROM listings WHERE sku=? AND marketplace=?", (sku, _marketplace())).fetchone()
                 existing = _row_listing(previous) if previous else {}
                 normalized = _merge_active_listing(existing, listing, sku)
+                ownership = classify_listing_ownership(normalized)
+                normalized["ownershipClassification"] = ownership
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now))
+                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=?, ownership_classification=? WHERE sku=? AND marketplace=?", (str(normalized.get("status") or "active"), normalized.get("listingStartTime"), int(_metric_number(normalized.get("quantitySold"))), _metric_optional_number(normalized.get("watchCount")), ownership, sku, _marketplace()))
                 active_skus.add(sku)
                 imported += 1
         if page >= int(result.get("totalPages") or 1) or not items:
@@ -415,19 +539,231 @@ def _mark_inactive_active_import_records(active_skus: set[str]) -> int:
             if str(item.get("status") or "active").lower() != "active":
                 continue
             item["status"] = "inactive"
+            item["lifecycleStatus"] = "inactive_unknown"
             if active_origin in {"trading_active", "trading_get_item"}:
                 item["lifecycle"] = "Not returned by latest active eBay import"
                 item["inactiveReason"] = "Not returned by latest completed active listing refresh."
             else:
                 item["lifecycle"] = "Legacy local record"
                 item["inactiveReason"] = "No active eBay listing was returned for this locally stored record."
-            db.execute("UPDATE listings SET data_json=?, imported_at=? WHERE id=?", (_json(item), utc_now(), row["id"]))
+            db.execute("UPDATE listings SET data_json=?, lifecycle_status=?, imported_at=? WHERE id=?", (_json(item), "inactive_unknown", utc_now(), row["id"]))
             marked += 1
     return marked
 
 
+PERFORMANCE_METRICS = ",".join((
+    "CLICK_THROUGH_RATE", "LISTING_IMPRESSION_SEARCH_RESULTS_PAGE", "LISTING_IMPRESSION_TOTAL",
+    "LISTING_VIEWS_TOTAL", "SALES_CONVERSION_RATE", "TRANSACTION",
+))
+
+
+def _date_window(days: int = 30) -> tuple[str, str]:
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=max(1, min(int(days), 90)) - 1)
+    return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
+
+def _metric_number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _metric_optional_number(value: Any) -> float | None:
+    """Parse an official metric without manufacturing zero for an absent value."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _analytics_get(params: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _ebay_get("/sell/analytics/v1/traffic_report", params)
+    except EbayDraftError as exc:
+        if exc.status_code in {401, 403}:
+            raise ValueError("eBay Analytics access requires reauthorization with sell.analytics.readonly.") from exc
+        raise
+
+
+def _report_records(body: dict[str, Any], fallback_date: str) -> list[dict[str, Any]]:
+    header = body.get("header") if isinstance(body.get("header"), dict) else {}
+    metrics = [str(entry.get("key") or "").upper() for entry in (header.get("metrics") or []) if isinstance(entry, dict)]
+    dimension_keys = [str(entry.get("key") or "").upper() for entry in (header.get("dimensionKeys") or []) if isinstance(entry, dict)]
+    rows: list[dict[str, Any]] = []
+    for record in body.get("records") if isinstance(body.get("records"), list) else []:
+        if not isinstance(record, dict):
+            continue
+        dimensions = record.get("dimensionValues") if isinstance(record.get("dimensionValues"), list) else []
+        values = record.get("metricValues") if isinstance(record.get("metricValues"), list) else []
+        dimensions = [entry.get("value") if isinstance(entry, dict) else entry for entry in dimensions]
+        values = [entry.get("value") if isinstance(entry, dict) else entry for entry in values]
+        mapped = {metric: value for metric, value in zip(metrics, values)}
+        listing_id = str(record.get("listingId") or "")
+        metric_date = fallback_date
+        for key, value in zip(dimension_keys, dimensions):
+            if key in {"LISTING", "LISTING_ID"} and not listing_id:
+                listing_id = str(value or "")
+            if key in {"DAY", "DATE"} and value:
+                metric_date = str(value)[:10]
+        rows.append({"listingId": listing_id, "metricDate": metric_date, "metrics": mapped, "raw": record})
+    return rows
+
+
+def _store_performance_rows(rows: list[dict[str, Any]], fallback_date: str) -> int:
+    init_db()
+    listing_map: dict[str, Any] = {}
+    with connect() as db:
+        for listing in db.execute("SELECT id, listing_id FROM listings WHERE marketplace=?", (_marketplace(),)).fetchall():
+            listing_map[str(listing["listing_id"])] = listing["id"]
+        stored = 0
+        now = utc_now()
+        for row in rows:
+            listing_id = str(row.get("listingId") or "").strip()
+            if not listing_id:
+                continue
+            metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            values = {
+                "impressions": _metric_optional_number(metrics.get("LISTING_IMPRESSION_TOTAL")),
+                "search_impressions": _metric_optional_number(metrics.get("LISTING_IMPRESSION_SEARCH_RESULTS_PAGE")),
+                "views": _metric_optional_number(metrics.get("LISTING_VIEWS_TOTAL")),
+                "ctr": _metric_optional_number(metrics.get("CLICK_THROUGH_RATE")),
+                "conversion_rate": _metric_optional_number(metrics.get("SALES_CONVERSION_RATE")),
+                "transactions": _metric_optional_number(metrics.get("TRANSACTION")),
+                "watch_count": None,
+            }
+            metric_date = str(row.get("metricDate") or fallback_date)[:32]
+            existing = db.execute("SELECT id FROM listing_performance_daily WHERE ebay_listing_id=? AND metric_date=?", (listing_id, metric_date)).fetchone()
+            params = (listing_map.get(listing_id), listing_id, metric_date, "rolling_listing_snapshot", values["impressions"], values["search_impressions"], values["views"], values["ctr"], values["conversion_rate"], values["transactions"], values["watch_count"], "ebay_analytics", "official_ebay_metric", _json(row.get("raw") or {}), now)
+            if existing:
+                db.execute("UPDATE listing_performance_daily SET listing_row_id=?, snapshot_kind=?, impressions=?, search_impressions=?, views=?, ctr=?, conversion_rate=?, transactions=?, watch_count=?, source=?, metric_provenance=?, raw_json=?, updated_at=? WHERE id=?", (params[0], params[3], params[4], params[5], params[6], params[7], params[8], params[9], params[10], params[11], params[12], params[13], params[14], existing["id"]))
+            else:
+                db.execute("INSERT INTO listing_performance_daily(id,listing_row_id,ebay_listing_id,metric_date,snapshot_kind,impressions,search_impressions,views,ctr,conversion_rate,transactions,watch_count,source,metric_provenance,raw_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()),) + params[:-1] + (now, now))
+            stored += 1
+        return stored
+
+
+def sync_performance(days: int = 30, listing_ids: list[str] | None = None) -> dict[str, Any]:
+    """Read official eBay traffic metrics in the documented 200-listing batches."""
+    init_db()
+    if listing_ids is None:
+        listing_ids = [str(row["listing_id"]) for row in connect_listing_ids()]
+    listing_ids = list(dict.fromkeys(value.strip() for value in listing_ids if value.strip()))
+    start, end = _date_window(days)
+    all_rows: list[dict[str, Any]] = []
+    for offset in range(0, len(listing_ids), 200):
+        chunk = listing_ids[offset:offset + 200]
+        filters = f"marketplace_ids:{{{_marketplace()}}},date_range:[{start}..{end}],listing_ids:{{{'|'.join(chunk)}}}"
+        body = _analytics_get({"dimension": "LISTING", "filter": filters, "metric": PERFORMANCE_METRICS})
+        all_rows.extend(_report_records(body, end[:4] + "-" + end[4:6] + "-" + end[6:]))
+    stored = _store_performance_rows(all_rows, end[:4] + "-" + end[4:6] + "-" + end[6:]) if all_rows else 0
+    return {"requested": len(listing_ids), "batches": (len(listing_ids) + 199) // 200, "records": len(all_rows), "stored": stored, "days": days, "source": "ebay_analytics"}
+
+
+def connect_listing_ids() -> list[dict[str, Any]]:
+    with connect() as db:
+        return [dict(row) for row in db.execute("SELECT listing_id FROM listings WHERE marketplace=? AND listing_id<>''", (_marketplace(),)).fetchall()]
+
+
+def sync_fulfillment_orders(days: int = 90) -> dict[str, Any]:
+    start = datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days), 730)))
+    filter_value = f"creationdate:[{start.strftime('%Y-%m-%dT%H:%M:%S.000Z')}..]"
+    offset = 0
+    total = 0
+    while True:
+        body = _ebay_get("/sell/fulfillment/v1/order", {"filter": filter_value, "limit": 200, "offset": offset})
+        orders = body.get("orders") if isinstance(body.get("orders"), list) else []
+        if not orders:
+            break
+        now = utc_now()
+        with connect() as db:
+            for order in orders:
+                if not isinstance(order, dict) or not order.get("orderId"):
+                    continue
+                pricing = order.get("pricingSummary") if isinstance(order.get("pricingSummary"), dict) else {}
+                total_value = _metric_number((pricing.get("total") or {}).get("value") if isinstance(pricing.get("total"), dict) else 0)
+                values = (str(order.get("orderId")), str(order.get("creationDate") or ""), total_value, _json(order.get("lineItems") or []), _json(order), now)
+                db.execute("INSERT INTO fulfillment_orders(order_id,created_at,total_value,line_items_json,raw_json,synced_at) VALUES(?,?,?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET created_at=excluded.created_at,total_value=excluded.total_value,line_items_json=excluded.line_items_json,raw_json=excluded.raw_json,synced_at=excluded.synced_at", values)
+                total += 1
+        if len(orders) < 200:
+            break
+        offset += len(orders)
+    return {"orders": total, "days": days, "source": "ebay_fulfillment"}
+
+
+def performance_dashboard() -> dict[str, Any]:
+    init_db()
+    with connect() as db:
+        rows = db.execute("SELECT p.*, l.data_json FROM listing_performance_daily p LEFT JOIN listings l ON l.id=p.listing_row_id ORDER BY p.metric_date DESC, p.updated_at DESC").fetchall()
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        listing_id = str(row["ebay_listing_id"])
+        if listing_id not in latest:
+            entry = dict(row)
+            entry["listing"] = _decode(entry.pop("data_json", "{}"), {})
+            entry.pop("raw_json", None)
+            latest[listing_id] = entry
+    return {"lastSync": max((str(row["metric_date"]) for row in rows), default=""), "records": list(latest.values()), "rotation": rotation_queue(list(latest.values())), "capacity": listing_capacity()}
+
+
+def listing_capacity() -> dict[str, Any]:
+    active = sum(1 for item in list_listings() if str(item.get("status") or "active").lower() == "active")
+    raw_max = os.environ.get("EBAY_LISTING_CAPACITY", "").strip()
+    try:
+        maximum = int(raw_max) if raw_max else None
+    except ValueError:
+        maximum = None
+    state = "configured" if maximum is not None else "unknown"
+    return {
+        "activeListingCount": active,
+        "configuredCapacity": maximum,
+        "verifiedEbayAllowance": None,
+        "capacityState": state,
+        "remainingConfigured": max(0, maximum - active) if maximum is not None else None,
+        "source": "hht_configured_value" if maximum is not None else "unknown",
+        "note": "The active count is local inventory reconciliation. A configured value is not verified as an official eBay allowance.",
+    }
+
+
+def rotation_queue(performance: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    performance = performance or []
+    queue: list[dict[str, Any]] = []
+    for row in performance:
+        listing = row.get("listing") if isinstance(row.get("listing"), dict) else {}
+        active = str(listing.get("status") or "active").lower() == "active"
+        ctr = _metric_optional_number(row.get("ctr")); views = _metric_optional_number(row.get("views")); impressions = _metric_optional_number(row.get("impressions"))
+        if active and impressions is not None and ctr is not None and impressions >= 25 and ctr < 1:
+            action, reason = "Optimize", "Low click-through rate despite listing impressions. Review title, category, and price evidence."
+        elif active and (impressions is None or views is None):
+            action, reason = "Keep", "Official traffic data is unavailable for one or more metrics; no lifecycle action is supported."
+        elif active and impressions == 0 and views == 0:
+            action, reason = "Keep", "No official traffic signal was returned for this listing; do not deactivate without more evidence."
+        elif not active:
+            action, reason = "Keep", "The listing was not returned by the latest active refresh; its final eBay lifecycle state is unknown."
+        else:
+            action, reason = "Keep", "Official traffic evidence does not justify a status change."
+        queue.append({"id": f"rotation-{row.get('ebay_listing_id')}-{row.get('metric_date')}", "listingId": row.get("ebay_listing_id"), "title": listing.get("title") or row.get("ebay_listing_id"), "action": action, "current": "Active" if active else "Inactive/unknown", "proposed": action, "evidence": {"impressions": impressions, "views": views, "ctr": ctr, "conversionRate": _metric_optional_number(row.get("conversion_rate")), "transactions": _metric_optional_number(row.get("transactions")), "metricDate": row.get("metric_date"), "snapshotKind": row.get("snapshot_kind") or "rolling_listing_snapshot", "seasonalitySource": "seller_provided_only" if listing.get("sea") else "none"}, "confidence": "medium" if action != "Keep" else "low", "risk": "high" if action in {"Deactivate", "Reactivate"} else "low", "reason": reason, "approvalOnly": True})
+    return queue
+
+
+def approve_rotation_actions(action_ids: list[str]) -> dict[str, Any]:
+    raise ValueError("Rotation approvals are paused until rotation recommendations use the existing actions approval and rollback model.")
+
+
 def start_active_import_job() -> dict[str, Any]:
     return _start_background_job("active_import", {})
+
+
+def start_performance_sync_job(days: int = 30, listing_ids: list[str] | None = None) -> dict[str, Any]:
+    payload = {"days": max(1, min(int(days), 90)), "listingIds": list(listing_ids or [])}
+    return _start_background_job("performance_sync", payload)
+
+
+def start_fulfillment_sync_job(days: int = 90) -> dict[str, Any]:
+    return _start_background_job("fulfillment_sync", {"days": max(1, min(int(days), 730))})
 
 
 def start_enrichment_job(listing_ids: list[str]) -> dict[str, Any]:
@@ -566,6 +902,28 @@ def start_nvidia_vision_job(images: list[dict[str, Any]], seller_defaults: dict[
     )
 
 
+def start_routed_vision_job(images: list[dict[str, Any]], item_count: int = 1, seller_defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Route normal work to Groq and heavy batches to the NVIDIA worker."""
+    if not isinstance(images, list) or not images:
+        raise ValueError("Upload at least one image.")
+    route = choose_vision_route(item_count, len(images))
+    if route["route"] == "groq":
+        return {"route": route, "status": "use_synchronous_groq", "readOnly": True}
+    if len(images) > NVIDIA_BATCH_MAX_PHOTOS:
+        raise ValueError(f"Heavy batch is limited to {NVIDIA_BATCH_MAX_PHOTOS} photos per job.")
+    prepared: list[dict[str, str]] = []
+    total_bytes = 0
+    for image in images:
+        if not isinstance(image, dict) or not isinstance(image.get("data"), (bytes, bytearray)) or not image.get("data"):
+            raise ValueError("Invalid image payload.")
+        data = bytes(image["data"])
+        total_bytes += len(data)
+        prepared.append({"data": base64.b64encode(data).decode("ascii"), "mimeType": str(image.get("mimeType") or "image/jpeg"), "filename": str(image.get("filename") or "image.jpg")[:180]})
+    if total_bytes > NVIDIA_BATCH_MAX_BYTES:
+        raise ValueError("NVIDIA heavy-batch photos exceed the 100 MB worker-job limit.")
+    return _start_background_job("nvidia_vision_batch", {"images": prepared, "itemCount": route["itemCount"], "sellerDefaults": seller_defaults if isinstance(seller_defaults, dict) else {}, "route": route}, run_in_web_thread=False) | {"route": route}
+
+
 def _start_background_job(kind: str, payload: dict[str, Any], *, run_in_web_thread: bool = True) -> dict[str, Any]:
     init_db()
     job_id = str(uuid.uuid4())
@@ -626,6 +984,10 @@ def run_job(job_id: str) -> dict[str, Any] | None:
     try:
         if kind == "active_import":
             result = import_active_listings()
+        elif kind == "performance_sync":
+            result = sync_performance(payload.get("days", 30), payload.get("listingIds") or None)
+        elif kind == "fulfillment_sync":
+            result = sync_fulfillment_orders(payload.get("days", 90))
         elif kind == "enrichment":
             result = enrich_listings(payload.get("listingIds", []))
         elif kind == "full_enrichment":
@@ -669,6 +1031,33 @@ def run_job(job_id: str) -> dict[str, Any] | None:
                 "deadline": time.monotonic() + _positive_int(os.environ.get("NVIDIA_WORKER_DEADLINE_SECONDS"), 75, 120),
             })
             result["readOnly"] = True
+        elif kind == "nvidia_vision_batch":
+            from .providers import UploadedImage, analyze_images
+
+            payload_images = payload.get("images") if isinstance(payload, dict) else []
+            decoded: list[UploadedImage] = []
+            for entry in payload_images if isinstance(payload_images, list) else []:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    data = base64.b64decode(str(entry.get("data") or ""), validate=True)
+                except (ValueError, TypeError):
+                    continue
+                if data:
+                    decoded.append(UploadedImage(data=data, mime_type=str(entry.get("mimeType") or "image/jpeg"), filename=str(entry.get("filename") or "image.jpg")))
+            if not decoded:
+                raise ValueError("NVIDIA heavy-batch job did not contain usable images.")
+            results: list[dict[str, Any]] = []
+            for offset in range(0, len(decoded), 5):
+                result = analyze_images(decoded[offset:offset + 5], {
+                    "seller_defaults": payload.get("sellerDefaults") if isinstance(payload.get("sellerDefaults"), dict) else {},
+                    "try_alternate": True,
+                    "background_worker": True,
+                    "provider_timeout_seconds": _positive_int(os.environ.get("NVIDIA_WORKER_PROVIDER_TIMEOUT_SECONDS"), 35, 40),
+                    "deadline": time.monotonic() + _positive_int(os.environ.get("NVIDIA_WORKER_DEADLINE_SECONDS"), 75, 120),
+                })
+                results.append({"group": (offset // 5) + 1, "startPhoto": offset + 1, "photoCount": min(5, len(decoded) - offset), "result": result})
+            result = {"route": payload.get("route", {}), "groups": results, "processedPhotos": len(decoded), "readOnly": True}
         else:
             raise ValueError("Unsupported Commerce Agent job kind.")
         _update_job(job_id, "completed", 100, result, "")
@@ -784,9 +1173,22 @@ def count_listings() -> int:
     return int(row["count"] if isinstance(row, dict) else row[0])
 
 
+def classify_listing_ownership(listing: dict[str, Any]) -> str:
+    """Classify management origin without guessing a lifecycle mutation path."""
+    source = str(listing.get("source") or listing.get("activeSource") or "").lower()
+    if listing.get("offerId") or "inventory" in source:
+        return "inventory_api_managed"
+    if "trading" in source or listing.get("listingId") and not listing.get("offerId"):
+        return "trading_legacy_managed"
+    if "feed" in source or listing.get("ebayFeedTaskId"):
+        return "seller_hub_feed_managed"
+    return "unknown"
+
+
 def _row_listing(row: sqlite3.Row) -> dict[str, Any]:
     item = _decode(row["data_json"], {})
     item.update({"id": row["id"], "listingId": row["listing_id"], "offerId": row["offer_id"], "sku": row["sku"], "marketplace": row["marketplace"]})
+    item.setdefault("ownershipClassification", row["ownership_classification"] if "ownership_classification" in row.keys() else classify_listing_ownership(item))
     return item
 
 
@@ -1020,16 +1422,18 @@ def audit_all() -> dict[str, Any]:
             if str(item.get("status") or "active").lower() != "active":
                 # A completed active-list refresh may retain historical local
                 # records. They must not remain in the live approval queue.
-                db.execute("DELETE FROM recommendations WHERE listing_row_id=? AND status='Pending'", (row["id"],))
+                db.execute("UPDATE recommendations SET is_current=? WHERE listing_row_id=? AND is_current=?", (False if db.postgres else 0, row["id"], True if db.postgres else 1))
                 continue
             audit = audit_listing(item)
-            # Re-auditing is idempotent for pending work. Preserve approved and
-            # applied history, but never create a second pending card for a row.
-            db.execute("DELETE FROM recommendations WHERE listing_row_id=? AND status='Pending'", (row["id"],))
+            # Preserve every audit as history, but make the new audit the only
+            # current review card for this listing.
+            db.execute("UPDATE recommendations SET is_current=? WHERE listing_row_id=? AND is_current=?", (False if db.postgres else 0, row["id"], True if db.postgres else 1))
+            version_row = db.execute("SELECT COALESCE(MAX(version_number), 0) AS version FROM recommendations WHERE listing_row_id=?", (row["id"],)).fetchone()
+            version_number = int(version_row["version"] if version_row else 0) + 1
             recommendation_id = str(uuid.uuid4())
             stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "soldComparableSummary": audit["soldComparableSummary"], "demandMetrics": audit["demand"]}
-            db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now))
-            results.append({"recommendationId": recommendation_id, "listing": stored_current, **audit, "status": "Pending"})
+            db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at,version_number,is_current) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now, version_number, True if db.postgres else 1))
+            results.append({"recommendationId": recommendation_id, "listing": stored_current, **audit, "status": "Pending", "version": version_number, "isCurrent": True})
     return {"count": len(results), "results": results}
 
 
@@ -1082,16 +1486,17 @@ def _recommendation(row: sqlite3.Row) -> dict[str, Any]:
     listing = _decode(row["current_json"], {})
     proposed = _meaningful_proposed(listing, _decode(row["proposed_json"], {}))
     findings = _presentation_findings(listing, _decode(row["findings_json"], []))
-    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": proposed, "findings": findings, "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": proposed, "findings": findings, "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "version": row["version_number"] if "version_number" in row.keys() else 1, "isCurrent": bool(row["is_current"]) if "is_current" in row.keys() else True, "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
 
 
 def recommendations(status: str = "") -> list[dict[str, Any]]:
     init_db()
-    query = "SELECT r.*, (SELECT a.id FROM actions a WHERE a.recommendation_id=r.id ORDER BY a.created_at DESC LIMIT 1) AS action_id FROM recommendations r"
-    params: tuple[Any, ...] = ()
+    query = "SELECT r.*, (SELECT a.id FROM actions a WHERE a.recommendation_id=r.id ORDER BY a.created_at DESC LIMIT 1) AS action_id FROM recommendations r WHERE r.is_current=?"
+    current_value = True
+    params: tuple[Any, ...] = (current_value,)
     if status:
-        query += " WHERE status=?"
-        params = (status,)
+        query += " AND r.status=?"
+        params = (current_value, status)
     query += " ORDER BY score ASC, created_at DESC"
     with connect() as db:
         return [_recommendation(row) for row in db.execute(query, params).fetchall()]
@@ -1105,8 +1510,11 @@ def recommendations_page(status: str = "", page: int = 1, page_size: int = ENRIC
     where = ""
     params: tuple[Any, ...] = ()
     if status:
-        where = " WHERE r.status=?"
-        params = (status,)
+        where = " WHERE r.is_current=? AND r.status=?"
+        params = (True, status)
+    else:
+        where = " WHERE r.is_current=?"
+        params = (True,)
     with connect() as db:
         total_row = db.execute(f"SELECT COUNT(*) AS count FROM recommendations r{where}", params).fetchone()
         total = int(total_row["count"])
@@ -1127,6 +1535,8 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
     recommendation = get_recommendation(recommendation_id)
     if not recommendation:
         raise ValueError("Recommendation not found.")
+    if not recommendation.get("isCurrent", True):
+        raise ValueError("This recommendation version has been superseded; review the current listing recommendation.")
     changes = approved if approved is not None else recommendation["proposed"]
     if not isinstance(changes, dict) or not changes:
         raise ValueError("At least one approved field is required.")
@@ -1154,6 +1564,11 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
     with connect() as db:
         db.execute("INSERT INTO actions(id,recommendation_id,listing_row_id,approved_json,old_json,created_at) SELECT ?,id,listing_row_id,?,?,? FROM recommendations WHERE id=?", (action_id, _json(changes), _json({key: current.get(key) for key in changes}), now, recommendation_id))
         db.execute("UPDATE recommendations SET status='Approved', updated_at=? WHERE id=?", (now, recommendation_id))
+        listing_row = db.execute("SELECT listing_row_id FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
+        if listing_row:
+            version_row = db.execute("SELECT COALESCE(MAX(version_number), 0) AS version FROM listing_versions WHERE listing_row_id=?", (listing_row["listing_row_id"],)).fetchone()
+            version_number = int(version_row["version"] if version_row else 0) + 1
+            db.execute("INSERT INTO listing_versions(id,listing_row_id,version_number,source,state_json,evidence_json,created_at) VALUES(?,?,?,?,?,?,?)", (str(uuid.uuid4()), listing_row["listing_row_id"], version_number, "seller_approved", _json({**current, **changes}), _json({"recommendationId": recommendation_id, "findings": recommendation.get("findings", [])}), now))
     return {"actionId": action_id, "recommendationId": recommendation_id, "status": "Approved", "approved": changes}
 
 

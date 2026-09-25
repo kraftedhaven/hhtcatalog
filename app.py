@@ -6,7 +6,7 @@ from typing import Any
 from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
-from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, seller_access_token
+from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, reauthorization_required, required_user_scopes, seller_access_token
 from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft, update_ebay_offer
 from hht_app.ebay_feed import EbayFeedError, get_feed_result_file, get_feed_task, seller_hub_feed_type, upload_seller_hub_draft_csv
 from hht_app.ebay_taxonomy import category_aspects, suggest_category
@@ -99,6 +99,22 @@ def bulk_analyze():
     files = _request_files()
     if not files:
         return jsonify({"error": "No image uploaded. Use multipart form field 'file' or 'files'."}), 400
+    item_count = request.form.get("itemCount") or len(files)
+    route = commerce_agent.choose_vision_route(item_count, len(files))
+    if route["route"] == "nvidia_worker":
+        try:
+            images = [_uploaded_image(file) for file in files]
+            queued = commerce_agent.start_routed_vision_job(
+                [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename} for image in images],
+                route["itemCount"],
+                _seller_defaults_from_form(),
+            )
+            return jsonify({"route": route, "result": queued, "nextStep": "Poll the returned job ID; heavy analysis is running on the NVIDIA worker."}), 202
+        except ValueError as exc:
+            return jsonify({"error": str(exc), "route": route}), 400
+        except Exception:
+            app.logger.exception("Heavy NVIDIA batch could not be queued")
+            return jsonify({"error": "Heavy NVIDIA batch could not be queued. Please retry shortly.", "route": route}), 503
     results = []
     for file in files:
         try:
@@ -106,7 +122,7 @@ def bulk_analyze():
             results.append({"filename": file.filename, "status": "ok", "result": result})
         except Exception as exc:
             results.append({"filename": file.filename, "status": "error", "error": str(exc)})
-    return jsonify({"count": len(results), "results": results})
+    return jsonify({"count": len(results), "route": route, "results": results})
 
 
 @app.route("/api/photo-quality", methods=["POST"])
@@ -171,6 +187,8 @@ def ebay_oauth_start():
         return jsonify({
             "authorizationUrl": ebay_authorization_url(state),
             "stateRequired": bool(state),
+            "requiredScopes": required_user_scopes(),
+            "reauthorization": True,
             "nextStep": "Open authorizationUrl, approve eBay access, then Copy the returned EBAY_REFRESH_TOKEN into your host config.",
         })
     except EbayAuthError as exc:
@@ -232,7 +250,7 @@ def ebay_oauth_status():
         seller_access_token()
     except EbayAuthError as exc:
         return jsonify({"configured": False, "provider_errors": [exc.to_public()]}), exc.status_code
-    return jsonify({"configured": True, "provider": "ebay_oauth"})
+    return jsonify({"configured": True, "provider": "ebay_oauth", "requiredScopes": required_user_scopes(), "grantedScopesStatus": "unknown", "requiresReauthorization": reauthorization_required(), "reauthorizationMessage": "Reconnect eBay after enabling Analytics/Fulfillment scopes; an existing refresh token cannot gain new scopes." if reauthorization_required() else "The token is configured, but eBay does not expose its granted scope list through this status check. Reauthorize if an Analytics or Fulfillment call returns 401/403."})
 
 
 @app.route("/api/ebay/categories", methods=["GET"])
@@ -407,6 +425,54 @@ def commerce_import_active_start():
     except Exception:
         app.logger.exception("Commerce Agent active listing job could not start")
         return jsonify({"error": "Active listing import could not start."}), 503
+
+
+@app.route("/api/commerce/performance/sync/start", methods=["POST"])
+def commerce_performance_sync_start():
+    body = request.get_json(silent=True) or {}
+    listing_ids = body.get("listingIds") or body.get("listing_ids")
+    if listing_ids is not None and not isinstance(listing_ids, list):
+        return jsonify({"error": "listingIds must be an array when supplied."}), 400
+    try:
+        return jsonify({"result": commerce_agent.start_performance_sync_job(body.get("days", 30), listing_ids)})
+    except (ValueError, TypeError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Commerce performance sync could not start")
+        return jsonify({"error": "Performance sync could not start."}), 503
+
+
+@app.route("/api/commerce/performance", methods=["GET"])
+def commerce_performance():
+    try:
+        return jsonify({"result": commerce_agent.performance_dashboard()})
+    except Exception:
+        app.logger.exception("Commerce performance dashboard failed")
+        return jsonify({"error": "Performance data is unavailable."}), 503
+
+
+@app.route("/api/commerce/performance/orders/sync/start", methods=["POST"])
+def commerce_fulfillment_sync_start():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify({"result": commerce_agent.start_fulfillment_sync_job(body.get("days", 90))})
+    except (ValueError, TypeError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Commerce fulfillment sync could not start")
+        return jsonify({"error": "Fulfillment sync could not start."}), 503
+
+
+@app.route("/api/commerce/rotation/approve", methods=["POST"])
+def commerce_rotation_approve():
+    body = request.get_json(silent=True) or {}
+    action_ids = body.get("actionIds") or body.get("action_ids") or []
+    if not isinstance(action_ids, list):
+        return jsonify({"error": "actionIds must be an array."}), 400
+    try:
+        return jsonify({"result": commerce_agent.approve_rotation_actions(action_ids)})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/api/commerce/jobs/<job_id>", methods=["GET"])
