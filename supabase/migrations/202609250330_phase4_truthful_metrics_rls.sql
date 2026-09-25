@@ -42,11 +42,12 @@ ALTER TABLE public.enrichment_checkpoints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.listing_performance_daily ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.listing_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.fulfillment_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.rotation_actions ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE public.listings, public.recommendations, public.actions,
     public.settings, public.commerce_jobs, public.enrichment_checkpoints,
     public.listing_performance_daily, public.listing_versions,
-    public.fulfillment_orders FROM anon;
+    public.fulfillment_orders, public.rotation_actions FROM anon;
 
 -- The application connects with the trusted database role. Supabase's service
 -- role bypasses RLS; no broad authenticated policy is created until the schema
@@ -54,6 +55,6 @@ REVOKE ALL ON TABLE public.listings, public.recommendations, public.actions,
 GRANT ALL ON TABLE public.listings, public.recommendations, public.actions,
     public.settings, public.commerce_jobs, public.enrichment_checkpoints,
     public.listing_performance_daily, public.listing_versions,
-    public.fulfillment_orders TO service_role;
+    public.fulfillment_orders, public.rotation_actions TO service_role;
 
 COMMIT;

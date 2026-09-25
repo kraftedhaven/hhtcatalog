@@ -23,6 +23,9 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("recommendations_one_current_per_listing", versioning)
         self.assertIn("WHERE is_current = true", versioning)
         self.assertIn("listing_state_hash", versioning)
+        rls = (self.migration_dir / names[1]).read_text()
+        self.assertIn("public.rotation_actions ENABLE ROW LEVEL SECURITY", rls)
+        self.assertIn("public.rotation_actions FROM anon", rls)
 
     def test_postgres_init_db_is_read_only_schema_check(self):
         required_tables = [
