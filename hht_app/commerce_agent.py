@@ -41,6 +41,10 @@ DB_PATH = os.environ.get("COMMERCE_AGENT_DB", "commerce_agent.sqlite3")
 MAX_TITLE_LENGTH = 80
 EDITABLE_FIELDS = {"title", "price", "cid", "desc", "cat", "cnote", "notes", "pic", "brand", "size", "color", "dept", "type", "model", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
 ENRICHMENT_PAGE_SIZE = 25
+NVIDIA_HEAVY_ITEM_THRESHOLD = 30
+NVIDIA_HEAVY_PHOTO_THRESHOLD = 300
+NVIDIA_BATCH_MAX_PHOTOS = 500
+NVIDIA_BATCH_MAX_BYTES = 100 * 1024 * 1024
 ENRICHMENT_CHUNK_SIZE = 20
 MAX_VISION_JOB_IMAGES = 3
 MAX_VISION_JOB_BYTES = 6 * 1024 * 1024
@@ -132,7 +136,8 @@ def init_db() -> None:
                     current_json TEXT NOT NULL, proposed_json TEXT NOT NULL, findings_json TEXT NOT NULL,
                     score INTEGER NOT NULL, classification TEXT NOT NULL, reason TEXT NOT NULL,
                     confidence TEXT NOT NULL, risk TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Pending',
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    version_number INTEGER NOT NULL DEFAULT 1, is_current BOOLEAN NOT NULL DEFAULT TRUE
                 );
                 CREATE TABLE IF NOT EXISTS actions (
                     id TEXT PRIMARY KEY, recommendation_id TEXT NOT NULL REFERENCES recommendations(id),
@@ -164,6 +169,7 @@ def init_db() -> None:
                 """
             )
             _ensure_phase4_schema(db)
+            _ensure_recommendation_versioning(db)
         else:
             db.executescript(
                 """
@@ -178,7 +184,8 @@ def init_db() -> None:
                 current_json TEXT NOT NULL, proposed_json TEXT NOT NULL, findings_json TEXT NOT NULL,
                 score INTEGER NOT NULL, classification TEXT NOT NULL, reason TEXT NOT NULL,
                 confidence TEXT NOT NULL, risk TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Pending',
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                version_number INTEGER NOT NULL DEFAULT 1, is_current INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS actions (
                 id TEXT PRIMARY KEY, recommendation_id TEXT NOT NULL REFERENCES recommendations(id),
@@ -210,6 +217,7 @@ def init_db() -> None:
             """
             )
             _ensure_phase4_schema(db)
+            _ensure_recommendation_versioning(db)
 
 
 def _ensure_phase4_schema(db: _Database) -> None:
@@ -288,6 +296,33 @@ def _ensure_phase4_schema(db: _Database) -> None:
         )
 
 
+def _ensure_recommendation_versioning(db: _Database) -> None:
+    """Keep recommendation history while exposing exactly one current row per listing."""
+    if db.postgres:
+        db.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS version_number INTEGER NOT NULL DEFAULT 1")
+        db.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT TRUE")
+    else:
+        columns = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(recommendations)").fetchall()}
+        if "version_number" not in columns:
+            db.execute("ALTER TABLE recommendations ADD COLUMN version_number INTEGER NOT NULL DEFAULT 1")
+        if "is_current" not in columns:
+            db.execute("ALTER TABLE recommendations ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1")
+    rows = db.execute("SELECT id, listing_row_id, status, updated_at, created_at FROM recommendations ORDER BY listing_row_id, updated_at DESC, created_at DESC, id DESC").fetchall()
+    seen: set[Any] = set()
+    for row in rows:
+        listing_row_id = row["listing_row_id"]
+        if listing_row_id in seen:
+            db.execute("UPDATE recommendations SET is_current=?, status=? WHERE id=?", (False if db.postgres else 0, "Superseded" if str(row["status"]) == "Pending" else row["status"], row["id"]))
+        else:
+            seen.add(listing_row_id)
+    for listing_row_id in seen:
+        version_rows = db.execute("SELECT id FROM recommendations WHERE listing_row_id=? ORDER BY updated_at ASC, created_at ASC, id ASC", (listing_row_id,)).fetchall()
+        for number, version_row in enumerate(version_rows, 1):
+            db.execute("UPDATE recommendations SET version_number=? WHERE id=?", (number, version_row["id"]))
+    predicate = "is_current = TRUE" if db.postgres else "is_current = 1"
+    db.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS recommendations_one_current_per_listing ON recommendations(listing_row_id) WHERE {predicate}")
+
+
 def settings() -> dict[str, Any]:
     init_db()
     with connect() as db:
@@ -318,6 +353,22 @@ def _api_base_url() -> str:
 
 def _marketplace() -> str:
     return os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US")
+
+
+def choose_vision_route(item_count: int = 1, photo_count: int = 0) -> dict[str, Any]:
+    """Choose the economical default for normal work and the heavy-batch path."""
+    try:
+        items = max(1, int(item_count))
+    except (TypeError, ValueError):
+        items = 1
+    try:
+        photos = max(0, int(photo_count))
+    except (TypeError, ValueError):
+        photos = 0
+    item_threshold = _positive_int(os.environ.get("NVIDIA_HEAVY_ITEM_THRESHOLD"), NVIDIA_HEAVY_ITEM_THRESHOLD, 5000)
+    photo_threshold = _positive_int(os.environ.get("NVIDIA_HEAVY_PHOTO_THRESHOLD"), NVIDIA_HEAVY_PHOTO_THRESHOLD, 10000)
+    heavy = items >= item_threshold or photos >= photo_threshold
+    return {"route": "nvidia_worker" if heavy else "groq", "workload": "heavy_batch" if heavy else "normal", "itemCount": items, "photoCount": photos, "thresholds": {"items": item_threshold, "photos": photo_threshold}, "reason": "NVIDIA/Brev worker is reserved for large batches; normal listing analysis stays on Groq." if heavy else "Normal listing analysis uses Groq; NVIDIA is reserved for large batches."}
 
 
 def _seller_token() -> str:
@@ -851,6 +902,28 @@ def start_nvidia_vision_job(images: list[dict[str, Any]], seller_defaults: dict[
     )
 
 
+def start_routed_vision_job(images: list[dict[str, Any]], item_count: int = 1, seller_defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Route normal work to Groq and heavy batches to the NVIDIA worker."""
+    if not isinstance(images, list) or not images:
+        raise ValueError("Upload at least one image.")
+    route = choose_vision_route(item_count, len(images))
+    if route["route"] == "groq":
+        return {"route": route, "status": "use_synchronous_groq", "readOnly": True}
+    if len(images) > NVIDIA_BATCH_MAX_PHOTOS:
+        raise ValueError(f"Heavy batch is limited to {NVIDIA_BATCH_MAX_PHOTOS} photos per job.")
+    prepared: list[dict[str, str]] = []
+    total_bytes = 0
+    for image in images:
+        if not isinstance(image, dict) or not isinstance(image.get("data"), (bytes, bytearray)) or not image.get("data"):
+            raise ValueError("Invalid image payload.")
+        data = bytes(image["data"])
+        total_bytes += len(data)
+        prepared.append({"data": base64.b64encode(data).decode("ascii"), "mimeType": str(image.get("mimeType") or "image/jpeg"), "filename": str(image.get("filename") or "image.jpg")[:180]})
+    if total_bytes > NVIDIA_BATCH_MAX_BYTES:
+        raise ValueError("NVIDIA heavy-batch photos exceed the 100 MB worker-job limit.")
+    return _start_background_job("nvidia_vision_batch", {"images": prepared, "itemCount": route["itemCount"], "sellerDefaults": seller_defaults if isinstance(seller_defaults, dict) else {}, "route": route}, run_in_web_thread=False) | {"route": route}
+
+
 def _start_background_job(kind: str, payload: dict[str, Any], *, run_in_web_thread: bool = True) -> dict[str, Any]:
     init_db()
     job_id = str(uuid.uuid4())
@@ -958,6 +1031,33 @@ def run_job(job_id: str) -> dict[str, Any] | None:
                 "deadline": time.monotonic() + _positive_int(os.environ.get("NVIDIA_WORKER_DEADLINE_SECONDS"), 75, 120),
             })
             result["readOnly"] = True
+        elif kind == "nvidia_vision_batch":
+            from .providers import UploadedImage, analyze_images
+
+            payload_images = payload.get("images") if isinstance(payload, dict) else []
+            decoded: list[UploadedImage] = []
+            for entry in payload_images if isinstance(payload_images, list) else []:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    data = base64.b64decode(str(entry.get("data") or ""), validate=True)
+                except (ValueError, TypeError):
+                    continue
+                if data:
+                    decoded.append(UploadedImage(data=data, mime_type=str(entry.get("mimeType") or "image/jpeg"), filename=str(entry.get("filename") or "image.jpg")))
+            if not decoded:
+                raise ValueError("NVIDIA heavy-batch job did not contain usable images.")
+            results: list[dict[str, Any]] = []
+            for offset in range(0, len(decoded), 5):
+                result = analyze_images(decoded[offset:offset + 5], {
+                    "seller_defaults": payload.get("sellerDefaults") if isinstance(payload.get("sellerDefaults"), dict) else {},
+                    "try_alternate": True,
+                    "background_worker": True,
+                    "provider_timeout_seconds": _positive_int(os.environ.get("NVIDIA_WORKER_PROVIDER_TIMEOUT_SECONDS"), 35, 40),
+                    "deadline": time.monotonic() + _positive_int(os.environ.get("NVIDIA_WORKER_DEADLINE_SECONDS"), 75, 120),
+                })
+                results.append({"group": (offset // 5) + 1, "startPhoto": offset + 1, "photoCount": min(5, len(decoded) - offset), "result": result})
+            result = {"route": payload.get("route", {}), "groups": results, "processedPhotos": len(decoded), "readOnly": True}
         else:
             raise ValueError("Unsupported Commerce Agent job kind.")
         _update_job(job_id, "completed", 100, result, "")
@@ -1322,16 +1422,18 @@ def audit_all() -> dict[str, Any]:
             if str(item.get("status") or "active").lower() != "active":
                 # A completed active-list refresh may retain historical local
                 # records. They must not remain in the live approval queue.
-                db.execute("DELETE FROM recommendations WHERE listing_row_id=? AND status='Pending'", (row["id"],))
+                db.execute("UPDATE recommendations SET is_current=? WHERE listing_row_id=? AND is_current=?", (False if db.postgres else 0, row["id"], True if db.postgres else 1))
                 continue
             audit = audit_listing(item)
-            # Re-auditing is idempotent for pending work. Preserve approved and
-            # applied history, but never create a second pending card for a row.
-            db.execute("DELETE FROM recommendations WHERE listing_row_id=? AND status='Pending'", (row["id"],))
+            # Preserve every audit as history, but make the new audit the only
+            # current review card for this listing.
+            db.execute("UPDATE recommendations SET is_current=? WHERE listing_row_id=? AND is_current=?", (False if db.postgres else 0, row["id"], True if db.postgres else 1))
+            version_row = db.execute("SELECT COALESCE(MAX(version_number), 0) AS version FROM recommendations WHERE listing_row_id=?", (row["id"],)).fetchone()
+            version_number = int(version_row["version"] if version_row else 0) + 1
             recommendation_id = str(uuid.uuid4())
             stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "soldComparableSummary": audit["soldComparableSummary"], "demandMetrics": audit["demand"]}
-            db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now))
-            results.append({"recommendationId": recommendation_id, "listing": stored_current, **audit, "status": "Pending"})
+            db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at,version_number,is_current) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now, version_number, True if db.postgres else 1))
+            results.append({"recommendationId": recommendation_id, "listing": stored_current, **audit, "status": "Pending", "version": version_number, "isCurrent": True})
     return {"count": len(results), "results": results}
 
 
@@ -1384,16 +1486,17 @@ def _recommendation(row: sqlite3.Row) -> dict[str, Any]:
     listing = _decode(row["current_json"], {})
     proposed = _meaningful_proposed(listing, _decode(row["proposed_json"], {}))
     findings = _presentation_findings(listing, _decode(row["findings_json"], []))
-    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": proposed, "findings": findings, "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+    return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": proposed, "findings": findings, "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "version": row["version_number"] if "version_number" in row.keys() else 1, "isCurrent": bool(row["is_current"]) if "is_current" in row.keys() else True, "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
 
 
 def recommendations(status: str = "") -> list[dict[str, Any]]:
     init_db()
-    query = "SELECT r.*, (SELECT a.id FROM actions a WHERE a.recommendation_id=r.id ORDER BY a.created_at DESC LIMIT 1) AS action_id FROM recommendations r"
-    params: tuple[Any, ...] = ()
+    query = "SELECT r.*, (SELECT a.id FROM actions a WHERE a.recommendation_id=r.id ORDER BY a.created_at DESC LIMIT 1) AS action_id FROM recommendations r WHERE r.is_current=?"
+    current_value = True
+    params: tuple[Any, ...] = (current_value,)
     if status:
-        query += " WHERE status=?"
-        params = (status,)
+        query += " AND r.status=?"
+        params = (current_value, status)
     query += " ORDER BY score ASC, created_at DESC"
     with connect() as db:
         return [_recommendation(row) for row in db.execute(query, params).fetchall()]
@@ -1407,8 +1510,11 @@ def recommendations_page(status: str = "", page: int = 1, page_size: int = ENRIC
     where = ""
     params: tuple[Any, ...] = ()
     if status:
-        where = " WHERE r.status=?"
-        params = (status,)
+        where = " WHERE r.is_current=? AND r.status=?"
+        params = (True, status)
+    else:
+        where = " WHERE r.is_current=?"
+        params = (True,)
     with connect() as db:
         total_row = db.execute(f"SELECT COUNT(*) AS count FROM recommendations r{where}", params).fetchone()
         total = int(total_row["count"])
@@ -1429,6 +1535,8 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
     recommendation = get_recommendation(recommendation_id)
     if not recommendation:
         raise ValueError("Recommendation not found.")
+    if not recommendation.get("isCurrent", True):
+        raise ValueError("This recommendation version has been superseded; review the current listing recommendation.")
     changes = approved if approved is not None else recommendation["proposed"]
     if not isinstance(changes, dict) or not changes:
         raise ValueError("At least one approved field is required.")

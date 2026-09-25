@@ -99,6 +99,22 @@ def bulk_analyze():
     files = _request_files()
     if not files:
         return jsonify({"error": "No image uploaded. Use multipart form field 'file' or 'files'."}), 400
+    item_count = request.form.get("itemCount") or len(files)
+    route = commerce_agent.choose_vision_route(item_count, len(files))
+    if route["route"] == "nvidia_worker":
+        try:
+            images = [_uploaded_image(file) for file in files]
+            queued = commerce_agent.start_routed_vision_job(
+                [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename} for image in images],
+                route["itemCount"],
+                _seller_defaults_from_form(),
+            )
+            return jsonify({"route": route, "result": queued, "nextStep": "Poll the returned job ID; heavy analysis is running on the NVIDIA worker."}), 202
+        except ValueError as exc:
+            return jsonify({"error": str(exc), "route": route}), 400
+        except Exception:
+            app.logger.exception("Heavy NVIDIA batch could not be queued")
+            return jsonify({"error": "Heavy NVIDIA batch could not be queued. Please retry shortly.", "route": route}), 503
     results = []
     for file in files:
         try:
@@ -106,7 +122,7 @@ def bulk_analyze():
             results.append({"filename": file.filename, "status": "ok", "result": result})
         except Exception as exc:
             results.append({"filename": file.filename, "status": "error", "error": str(exc)})
-    return jsonify({"count": len(results), "results": results})
+    return jsonify({"count": len(results), "route": route, "results": results})
 
 
 @app.route("/api/photo-quality", methods=["POST"])

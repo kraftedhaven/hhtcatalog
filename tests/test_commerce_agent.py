@@ -41,6 +41,28 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertIsInstance(recommendation["findings"], list)
         self.assertEqual(recommendation["status"], "Pending")
 
+    def test_vision_routing_keeps_normal_work_on_groq(self):
+        normal = commerce_agent.choose_vision_route(item_count=5, photo_count=20)
+        heavy = commerce_agent.choose_vision_route(item_count=30, photo_count=30)
+        photo_heavy = commerce_agent.choose_vision_route(item_count=2, photo_count=300)
+        self.assertEqual(normal["route"], "groq")
+        self.assertEqual(heavy["route"], "nvidia_worker")
+        self.assertEqual(photo_heavy["route"], "nvidia_worker")
+
+    def test_reaudit_preserves_history_but_returns_one_current_card(self):
+        first = commerce_agent.audit_all()
+        second = commerce_agent.audit_all()
+        self.assertEqual(first["count"], 1)
+        self.assertEqual(second["count"], 1)
+        page = commerce_agent.recommendations_page(page=1, page_size=50)
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["items"][0]["version"], 2)
+        with commerce_agent.connect() as db:
+            rows = db.execute("SELECT version_number, is_current, status FROM recommendations ORDER BY version_number").fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(int(rows[0]["is_current"]), 0)
+        self.assertEqual(int(rows[1]["is_current"]), 1)
+
     def test_short_title_gets_non_noop_candidate(self):
         audit = commerce_agent.audit_listing({"title": "Brown Signature Handbag", "brand": "Coach", "type": "Handbag"})
         self.assertIn("Coach", audit["proposed"]["title"])
