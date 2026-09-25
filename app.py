@@ -234,7 +234,7 @@ def ebay_oauth_status():
         seller_access_token()
     except EbayAuthError as exc:
         return jsonify({"configured": False, "provider_errors": [exc.to_public()]}), exc.status_code
-    return jsonify({"configured": True, "provider": "ebay_oauth", "requiredScopes": required_user_scopes(), "requiresReauthorization": reauthorization_required(), "reauthorizationMessage": "Reconnect eBay after enabling Analytics/Fulfillment read-only scopes; existing refresh tokens cannot gain new scopes." if reauthorization_required() else ""})
+    return jsonify({"configured": True, "provider": "ebay_oauth", "requiredScopes": required_user_scopes(), "grantedScopesStatus": "unknown", "requiresReauthorization": reauthorization_required(), "reauthorizationMessage": "Reconnect eBay after enabling Analytics/Fulfillment scopes; an existing refresh token cannot gain new scopes." if reauthorization_required() else "The token is configured, but eBay does not expose its granted scope list through this status check. Reauthorize if an Analytics or Fulfillment call returns 401/403."})
 
 
 @app.route("/api/ebay/categories", methods=["GET"])

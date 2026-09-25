@@ -12,7 +12,6 @@ DEFAULT_EBAY_USER_SCOPES = [
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
     "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
     "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
-    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
 ]
 TOKEN_CACHE_SKEW_SECONDS = 60
 DEFAULT_TIMEOUT_SECONDS = 8.0
@@ -186,8 +185,8 @@ def _user_scopes() -> list[str]:
     analytics = "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly"
     if analytics not in scopes:
         scopes.append(analytics)
-    if not any(scope.endswith("/sell.fulfillment") or scope.endswith("/sell.fulfillment.readonly") for scope in scopes):
-        scopes.append("https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly")
+    if not any(scope.endswith("/sell.fulfillment") for scope in scopes):
+        scopes.append("https://api.ebay.com/oauth/api_scope/sell.fulfillment")
     return list(dict.fromkeys(scopes))
 
 

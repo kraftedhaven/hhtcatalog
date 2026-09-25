@@ -253,6 +253,40 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(result["staleMarkedInactive"], 1)
         stale = [item for item in commerce_agent.list_listings({"status": "inactive"}) if item["sku"] == "STALE-SKU"][0]
         self.assertEqual(stale["lifecycle"], "Not returned by latest active eBay import")
+        self.assertEqual(stale["lifecycleStatus"], "inactive_unknown")
+
+    def test_listing_capacity_distinguishes_configured_from_verified(self):
+        old = os.environ.get("EBAY_LISTING_CAPACITY")
+        os.environ["EBAY_LISTING_CAPACITY"] = "1000"
+        try:
+            capacity = commerce_agent.listing_capacity()
+        finally:
+            if old is None:
+                os.environ.pop("EBAY_LISTING_CAPACITY", None)
+            else:
+                os.environ["EBAY_LISTING_CAPACITY"] = old
+        self.assertEqual(capacity["activeListingCount"], 1)
+        self.assertEqual(capacity["configuredCapacity"], 1000)
+        self.assertIsNone(capacity["verifiedEbayAllowance"])
+        self.assertEqual(capacity["capacityState"], "configured")
+
+    def test_missing_analytics_metric_is_stored_as_unknown(self):
+        stored = commerce_agent._store_performance_rows([{
+            "listingId": "L1", "metricDate": "2026-09-25",
+            "metrics": {"LISTING_IMPRESSION_TOTAL": "12"}, "raw": {},
+        }], "2026-09-25")
+        self.assertEqual(stored, 1)
+        with commerce_agent.connect() as db:
+            row = db.execute("SELECT impressions, views, watch_count, snapshot_kind, metric_provenance FROM listing_performance_daily WHERE ebay_listing_id=?", ("L1",)).fetchone()
+        self.assertEqual(row["impressions"], 12)
+        self.assertIsNone(row["views"])
+        self.assertIsNone(row["watch_count"])
+        self.assertEqual(row["snapshot_kind"], "rolling_listing_snapshot")
+        self.assertEqual(row["metric_provenance"], "official_ebay_metric")
+
+    def test_rotation_approval_is_paused_until_unified_action_model(self):
+        with self.assertRaisesRegex(ValueError, "existing actions"):
+            commerce_agent.approve_rotation_actions(["rotation-L1-2026-09-25"])
 
     def test_active_import_preserves_previous_get_item_details_when_summary_omits_them(self):
         with commerce_agent.connect() as db:

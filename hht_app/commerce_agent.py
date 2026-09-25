@@ -219,17 +219,18 @@ def _ensure_phase4_schema(db: _Database) -> None:
             "ALTER TABLE listings ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE listings ADD COLUMN IF NOT EXISTS listing_start_time TEXT",
             "ALTER TABLE listings ADD COLUMN IF NOT EXISTS quantity_sold INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS watch_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS watch_count INTEGER",
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS ownership_classification TEXT NOT NULL DEFAULT 'unknown'",
         ):
             db.execute(statement)
         db.executescript(
             """
             CREATE TABLE IF NOT EXISTS listing_performance_daily (
                 id TEXT PRIMARY KEY, listing_row_id BIGINT REFERENCES listings(id), ebay_listing_id TEXT NOT NULL,
-                metric_date TEXT NOT NULL, impressions INTEGER NOT NULL DEFAULT 0, search_impressions INTEGER NOT NULL DEFAULT 0,
-                views INTEGER NOT NULL DEFAULT 0, ctr DOUBLE PRECISION NOT NULL DEFAULT 0,
-                conversion_rate DOUBLE PRECISION NOT NULL DEFAULT 0, transactions INTEGER NOT NULL DEFAULT 0,
-                watch_count INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'ebay_analytics', raw_json TEXT NOT NULL DEFAULT '{}',
+                metric_date TEXT NOT NULL, snapshot_kind TEXT NOT NULL DEFAULT 'rolling_listing_snapshot',
+                impressions INTEGER, search_impressions INTEGER, views INTEGER, ctr DOUBLE PRECISION,
+                conversion_rate DOUBLE PRECISION, transactions INTEGER, watch_count INTEGER,
+                source TEXT NOT NULL DEFAULT 'ebay_analytics', metric_provenance TEXT NOT NULL DEFAULT 'official_ebay_metric', raw_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(ebay_listing_id, metric_date)
             );
             CREATE TABLE IF NOT EXISTS listing_versions (
@@ -247,13 +248,16 @@ def _ensure_phase4_schema(db: _Database) -> None:
             CREATE INDEX IF NOT EXISTS listing_performance_daily_date_idx ON listing_performance_daily(metric_date, ebay_listing_id);
             """
         )
+        db.execute("ALTER TABLE listing_performance_daily ADD COLUMN IF NOT EXISTS snapshot_kind TEXT NOT NULL DEFAULT 'rolling_listing_snapshot'")
+        db.execute("ALTER TABLE listing_performance_daily ADD COLUMN IF NOT EXISTS metric_provenance TEXT NOT NULL DEFAULT 'official_ebay_metric'")
     else:
         columns = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(listings)").fetchall()}
         for name, definition in (
             ("lifecycle_status", "TEXT NOT NULL DEFAULT 'active'"),
             ("listing_start_time", "TEXT"),
             ("quantity_sold", "INTEGER NOT NULL DEFAULT 0"),
-            ("watch_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("watch_count", "INTEGER"),
+            ("ownership_classification", "TEXT NOT NULL DEFAULT 'unknown'"),
         ):
             if name not in columns:
                 db.execute(f"ALTER TABLE listings ADD COLUMN {name} {definition}")
@@ -261,10 +265,10 @@ def _ensure_phase4_schema(db: _Database) -> None:
             """
             CREATE TABLE IF NOT EXISTS listing_performance_daily (
                 id TEXT PRIMARY KEY, listing_row_id INTEGER REFERENCES listings(id), ebay_listing_id TEXT NOT NULL,
-                metric_date TEXT NOT NULL, impressions INTEGER NOT NULL DEFAULT 0, search_impressions INTEGER NOT NULL DEFAULT 0,
-                views INTEGER NOT NULL DEFAULT 0, ctr REAL NOT NULL DEFAULT 0, conversion_rate REAL NOT NULL DEFAULT 0,
-                transactions INTEGER NOT NULL DEFAULT 0, watch_count INTEGER NOT NULL DEFAULT 0,
-                source TEXT NOT NULL DEFAULT 'ebay_analytics', raw_json TEXT NOT NULL DEFAULT '{}',
+                metric_date TEXT NOT NULL, snapshot_kind TEXT NOT NULL DEFAULT 'rolling_listing_snapshot',
+                impressions INTEGER, search_impressions INTEGER, views INTEGER, ctr REAL,
+                conversion_rate REAL, transactions INTEGER, watch_count INTEGER,
+                source TEXT NOT NULL DEFAULT 'ebay_analytics', metric_provenance TEXT NOT NULL DEFAULT 'official_ebay_metric', raw_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(ebay_listing_id, metric_date)
             );
             CREATE TABLE IF NOT EXISTS listing_versions (
@@ -432,8 +436,10 @@ def import_active_listings() -> dict[str, Any]:
                 previous = db.execute("SELECT * FROM listings WHERE sku=? AND marketplace=?", (sku, _marketplace())).fetchone()
                 existing = _row_listing(previous) if previous else {}
                 normalized = _merge_active_listing(existing, listing, sku)
+                ownership = classify_listing_ownership(normalized)
+                normalized["ownershipClassification"] = ownership
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now))
-                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=? WHERE sku=? AND marketplace=?", (str(normalized.get("status") or "active"), normalized.get("listingStartTime"), int(_metric_number(normalized.get("quantitySold"))), int(_metric_number(normalized.get("watchCount"))), sku, _marketplace()))
+                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=?, ownership_classification=? WHERE sku=? AND marketplace=?", (str(normalized.get("status") or "active"), normalized.get("listingStartTime"), int(_metric_number(normalized.get("quantitySold"))), _metric_optional_number(normalized.get("watchCount")), ownership, sku, _marketplace()))
                 active_skus.add(sku)
                 imported += 1
         if page >= int(result.get("totalPages") or 1) or not items:
@@ -482,13 +488,14 @@ def _mark_inactive_active_import_records(active_skus: set[str]) -> int:
             if str(item.get("status") or "active").lower() != "active":
                 continue
             item["status"] = "inactive"
+            item["lifecycleStatus"] = "inactive_unknown"
             if active_origin in {"trading_active", "trading_get_item"}:
                 item["lifecycle"] = "Not returned by latest active eBay import"
                 item["inactiveReason"] = "Not returned by latest completed active listing refresh."
             else:
                 item["lifecycle"] = "Legacy local record"
                 item["inactiveReason"] = "No active eBay listing was returned for this locally stored record."
-            db.execute("UPDATE listings SET data_json=?, imported_at=? WHERE id=?", (_json(item), utc_now(), row["id"]))
+            db.execute("UPDATE listings SET data_json=?, lifecycle_status=?, imported_at=? WHERE id=?", (_json(item), "inactive_unknown", utc_now(), row["id"]))
             marked += 1
     return marked
 
@@ -510,6 +517,16 @@ def _metric_number(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _metric_optional_number(value: Any) -> float | None:
+    """Parse an official metric without manufacturing zero for an absent value."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _analytics_get(params: dict[str, Any]) -> dict[str, Any]:
@@ -559,21 +576,21 @@ def _store_performance_rows(rows: list[dict[str, Any]], fallback_date: str) -> i
                 continue
             metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
             values = {
-                "impressions": int(_metric_number(metrics.get("LISTING_IMPRESSION_TOTAL"))),
-                "search_impressions": int(_metric_number(metrics.get("LISTING_IMPRESSION_SEARCH_RESULTS_PAGE"))),
-                "views": int(_metric_number(metrics.get("LISTING_VIEWS_TOTAL"))),
-                "ctr": _metric_number(metrics.get("CLICK_THROUGH_RATE")),
-                "conversion_rate": _metric_number(metrics.get("SALES_CONVERSION_RATE")),
-                "transactions": int(_metric_number(metrics.get("TRANSACTION"))),
-                "watch_count": 0,
+                "impressions": _metric_optional_number(metrics.get("LISTING_IMPRESSION_TOTAL")),
+                "search_impressions": _metric_optional_number(metrics.get("LISTING_IMPRESSION_SEARCH_RESULTS_PAGE")),
+                "views": _metric_optional_number(metrics.get("LISTING_VIEWS_TOTAL")),
+                "ctr": _metric_optional_number(metrics.get("CLICK_THROUGH_RATE")),
+                "conversion_rate": _metric_optional_number(metrics.get("SALES_CONVERSION_RATE")),
+                "transactions": _metric_optional_number(metrics.get("TRANSACTION")),
+                "watch_count": None,
             }
             metric_date = str(row.get("metricDate") or fallback_date)[:32]
             existing = db.execute("SELECT id FROM listing_performance_daily WHERE ebay_listing_id=? AND metric_date=?", (listing_id, metric_date)).fetchone()
-            params = (listing_map.get(listing_id), listing_id, metric_date, values["impressions"], values["search_impressions"], values["views"], values["ctr"], values["conversion_rate"], values["transactions"], values["watch_count"], "ebay_analytics", _json(row.get("raw") or {}), now)
+            params = (listing_map.get(listing_id), listing_id, metric_date, "rolling_listing_snapshot", values["impressions"], values["search_impressions"], values["views"], values["ctr"], values["conversion_rate"], values["transactions"], values["watch_count"], "ebay_analytics", "official_ebay_metric", _json(row.get("raw") or {}), now)
             if existing:
-                db.execute("UPDATE listing_performance_daily SET listing_row_id=?, impressions=?, search_impressions=?, views=?, ctr=?, conversion_rate=?, transactions=?, watch_count=?, source=?, raw_json=?, updated_at=? WHERE id=?", params[:-1] + (existing["id"],))
+                db.execute("UPDATE listing_performance_daily SET listing_row_id=?, snapshot_kind=?, impressions=?, search_impressions=?, views=?, ctr=?, conversion_rate=?, transactions=?, watch_count=?, source=?, metric_provenance=?, raw_json=?, updated_at=? WHERE id=?", (params[0], params[3], params[4], params[5], params[6], params[7], params[8], params[9], params[10], params[11], params[12], params[13], params[14], existing["id"]))
             else:
-                db.execute("INSERT INTO listing_performance_daily(id,listing_row_id,ebay_listing_id,metric_date,impressions,search_impressions,views,ctr,conversion_rate,transactions,watch_count,source,raw_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()),) + params)
+                db.execute("INSERT INTO listing_performance_daily(id,listing_row_id,ebay_listing_id,metric_date,snapshot_kind,impressions,search_impressions,views,ctr,conversion_rate,transactions,watch_count,source,metric_provenance,raw_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()),) + params[:-1] + (now, now))
             stored += 1
         return stored
 
@@ -648,7 +665,16 @@ def listing_capacity() -> dict[str, Any]:
         maximum = int(raw_max) if raw_max else None
     except ValueError:
         maximum = None
-    return {"active": active, "maximum": maximum, "remaining": max(0, maximum - active) if maximum is not None else None, "source": "configured_limit" if maximum is not None else "local_active_count_only", "note": "eBay does not expose a universal listing-capacity endpoint here; configure EBAY_LISTING_CAPACITY from Seller Hub when available."}
+    state = "configured" if maximum is not None else "unknown"
+    return {
+        "activeListingCount": active,
+        "configuredCapacity": maximum,
+        "verifiedEbayAllowance": None,
+        "capacityState": state,
+        "remainingConfigured": max(0, maximum - active) if maximum is not None else None,
+        "source": "hht_configured_value" if maximum is not None else "unknown",
+        "note": "The active count is local inventory reconciliation. A configured value is not verified as an official eBay allowance.",
+    }
 
 
 def rotation_queue(performance: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -657,33 +683,23 @@ def rotation_queue(performance: list[dict[str, Any]] | None = None) -> list[dict
     for row in performance:
         listing = row.get("listing") if isinstance(row.get("listing"), dict) else {}
         active = str(listing.get("status") or "active").lower() == "active"
-        ctr = _metric_number(row.get("ctr")); views = int(_metric_number(row.get("views"))); impressions = int(_metric_number(row.get("impressions")))
-        if active and impressions >= 25 and ctr < 1:
+        ctr = _metric_optional_number(row.get("ctr")); views = _metric_optional_number(row.get("views")); impressions = _metric_optional_number(row.get("impressions"))
+        if active and impressions is not None and ctr is not None and impressions >= 25 and ctr < 1:
             action, reason = "Optimize", "Low click-through rate despite listing impressions. Review title, category, and price evidence."
+        elif active and (impressions is None or views is None):
+            action, reason = "Keep", "Official traffic data is unavailable for one or more metrics; no lifecycle action is supported."
         elif active and impressions == 0 and views == 0:
             action, reason = "Keep", "No official traffic signal was returned for this listing; do not deactivate without more evidence."
-        elif not active and listing.get("season"):
-            action, reason = "Reactivate", "Inactive listing contains a seller-provided season signal; review manually before reactivation."
+        elif not active:
+            action, reason = "Keep", "The listing was not returned by the latest active refresh; its final eBay lifecycle state is unknown."
         else:
             action, reason = "Keep", "Official traffic evidence does not justify a status change."
-        queue.append({"id": f"rotation-{row.get('ebay_listing_id')}-{row.get('metric_date')}", "listingId": row.get("ebay_listing_id"), "title": listing.get("title") or row.get("ebay_listing_id"), "action": action, "current": "Active" if active else "Inactive", "proposed": action, "evidence": {"impressions": impressions, "views": views, "ctr": ctr, "conversionRate": _metric_number(row.get("conversion_rate")), "transactions": row.get("transactions", 0), "metricDate": row.get("metric_date")}, "confidence": "medium" if action != "Keep" else "low", "risk": "high" if action in {"Deactivate", "Reactivate"} else "low", "reason": reason, "approvalOnly": True})
+        queue.append({"id": f"rotation-{row.get('ebay_listing_id')}-{row.get('metric_date')}", "listingId": row.get("ebay_listing_id"), "title": listing.get("title") or row.get("ebay_listing_id"), "action": action, "current": "Active" if active else "Inactive/unknown", "proposed": action, "evidence": {"impressions": impressions, "views": views, "ctr": ctr, "conversionRate": _metric_optional_number(row.get("conversion_rate")), "transactions": _metric_optional_number(row.get("transactions")), "metricDate": row.get("metric_date"), "snapshotKind": row.get("snapshot_kind") or "rolling_listing_snapshot", "seasonalitySource": "seller_provided_only" if listing.get("sea") else "none"}, "confidence": "medium" if action != "Keep" else "low", "risk": "high" if action in {"Deactivate", "Reactivate"} else "low", "reason": reason, "approvalOnly": True})
     return queue
 
 
 def approve_rotation_actions(action_ids: list[str]) -> dict[str, Any]:
-    requested = list(dict.fromkeys(str(value).strip() for value in action_ids if str(value).strip()))
-    if not requested or len(requested) > 50:
-        raise ValueError("Select between 1 and 50 rotation actions.")
-    now = utc_now(); approved = 0
-    with connect() as db:
-        for action_id in requested:
-            row = db.execute("SELECT id FROM rotation_actions WHERE id=?", (action_id,)).fetchone()
-            if row:
-                db.execute("UPDATE rotation_actions SET status='Approved', approved_at=? WHERE id=?", (now, action_id)); approved += 1
-            else:
-                # Store the seller decision only; no Trading API status mutation is sent here.
-                db.execute("INSERT INTO rotation_actions(id,ebay_listing_id,action,evidence_json,status,created_at,approved_at) VALUES(?,?,?,?,?,?,?)", (action_id, action_id.split("-")[1] if "-" in action_id else action_id, "reviewed", "{}", "Approved", now, now)); approved += 1
-    return {"requested": len(requested), "approved": approved, "applied": 0, "approvalOnly": True, "message": "Rotation decisions were approved for review. No eBay listing status was changed."}
+    raise ValueError("Rotation approvals are paused until rotation recommendations use the existing actions approval and rollback model.")
 
 
 def start_active_import_job() -> dict[str, Any]:
@@ -1057,9 +1073,22 @@ def count_listings() -> int:
     return int(row["count"] if isinstance(row, dict) else row[0])
 
 
+def classify_listing_ownership(listing: dict[str, Any]) -> str:
+    """Classify management origin without guessing a lifecycle mutation path."""
+    source = str(listing.get("source") or listing.get("activeSource") or "").lower()
+    if listing.get("offerId") or "inventory" in source:
+        return "inventory_api_managed"
+    if "trading" in source or listing.get("listingId") and not listing.get("offerId"):
+        return "trading_legacy_managed"
+    if "feed" in source or listing.get("ebayFeedTaskId"):
+        return "seller_hub_feed_managed"
+    return "unknown"
+
+
 def _row_listing(row: sqlite3.Row) -> dict[str, Any]:
     item = _decode(row["data_json"], {})
     item.update({"id": row["id"], "listingId": row["listing_id"], "offerId": row["offer_id"], "sku": row["sku"], "marketplace": row["marketplace"]})
+    item.setdefault("ownershipClassification", row["ownership_classification"] if "ownership_classification" in row.keys() else classify_listing_ownership(item))
     return item
 
 
