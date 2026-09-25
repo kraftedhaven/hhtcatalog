@@ -5,6 +5,7 @@ an explicit approval route, and are delegated to the existing offer update flow.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -65,6 +66,10 @@ def _decode(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def _listing_state_hash(value: dict[str, Any]) -> str:
+    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
 def _database_url() -> str:
     url = (os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DATABASE_URL") or os.environ.get("POSTGRES_URL") or "").strip()
     if url.startswith("postgres://"):
@@ -123,53 +128,18 @@ def connect() -> _Database:
 def init_db() -> None:
     with connect() as db:
         if db.postgres:
-            db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS listings (
-                    id BIGSERIAL PRIMARY KEY,
-                    listing_id TEXT NOT NULL DEFAULT '', offer_id TEXT NOT NULL DEFAULT '', sku TEXT NOT NULL,
-                    marketplace TEXT NOT NULL DEFAULT 'EBAY_US', data_json TEXT NOT NULL,
-                    source_updated_at TEXT, imported_at TEXT NOT NULL, UNIQUE(sku, marketplace)
-                );
-                CREATE TABLE IF NOT EXISTS recommendations (
-                    id TEXT PRIMARY KEY, listing_row_id BIGINT NOT NULL REFERENCES listings(id),
-                    current_json TEXT NOT NULL, proposed_json TEXT NOT NULL, findings_json TEXT NOT NULL,
-                    score INTEGER NOT NULL, classification TEXT NOT NULL, reason TEXT NOT NULL,
-                    confidence TEXT NOT NULL, risk TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Pending',
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    version_number INTEGER NOT NULL DEFAULT 1, is_current BOOLEAN NOT NULL DEFAULT TRUE
-                );
-                CREATE TABLE IF NOT EXISTS actions (
-                    id TEXT PRIMARY KEY, recommendation_id TEXT NOT NULL REFERENCES recommendations(id),
-                    listing_row_id BIGINT NOT NULL REFERENCES listings(id), approved_json TEXT NOT NULL,
-                    old_json TEXT NOT NULL, new_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'Approved',
-                    ebay_result_json TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL, applied_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS settings (
-                    id INTEGER PRIMARY KEY CHECK(id = 1), mode TEXT NOT NULL DEFAULT 'recommend',
-                    max_price_reduction_pct DOUBLE PRECISION NOT NULL DEFAULT 10, minimum_price DOUBLE PRECISION NOT NULL DEFAULT 0,
-                    minimum_profit DOUBLE PRECISION NOT NULL DEFAULT 0, high_value_threshold DOUBLE PRECISION NOT NULL DEFAULT 250,
-                    require_vintage INTEGER NOT NULL DEFAULT 1, require_designer INTEGER NOT NULL DEFAULT 1,
-                    require_collectible INTEGER NOT NULL DEFAULT 1
-                );
-                CREATE TABLE IF NOT EXISTS commerce_jobs (
-                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
-                    progress INTEGER NOT NULL DEFAULT 0, result_json TEXT NOT NULL DEFAULT '{}',
-                    error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS enrichment_checkpoints (
-                    id BIGSERIAL PRIMARY KEY, listing_row_id BIGINT NOT NULL UNIQUE REFERENCES listings(id),
-                    listing_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
-                    enriched_at TEXT, last_error TEXT NOT NULL DEFAULT '', details_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS enrichment_checkpoints_status_idx ON enrichment_checkpoints(status, updated_at);
-                INSERT INTO settings(id) VALUES(1) ON CONFLICT (id) DO NOTHING
-                """
-            )
-            _ensure_phase4_schema(db)
-            _ensure_recommendation_versioning(db)
+            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions"}
+            rows = db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(?)", (list(required),)).fetchall()
+            present = {str(row["table_name"]) for row in rows}
+            missing = sorted(required - present)
+            if missing:
+                raise RuntimeError("Commerce Agent database schema is incomplete. Apply the ordered Supabase migrations before starting the app: " + ", ".join(missing))
+            columns = db.execute("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('recommendations','actions','listings')").fetchall()
+            required_columns = {"recommendations": {"version_number", "is_current"}, "actions": {"recommendation_version", "listing_snapshot_json", "listing_state_hash"}, "listings": {"lifecycle_status", "listing_start_time", "quantity_sold", "watch_count", "ownership_classification"}}
+            present_columns = {(str(row["table_name"]), str(row["column_name"])) for row in columns}
+            missing_columns = sorted(f"{table}.{column}" for table, names in required_columns.items() for column in names if (table, column) not in present_columns)
+            if missing_columns:
+                raise RuntimeError("Commerce Agent database columns are incomplete. Apply the ordered Supabase migrations before starting the app: " + ", ".join(missing_columns))
         else:
             db.executescript(
                 """
@@ -192,7 +162,9 @@ def init_db() -> None:
                 listing_row_id INTEGER NOT NULL REFERENCES listings(id), approved_json TEXT NOT NULL,
                 old_json TEXT NOT NULL, new_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'Approved',
                 ebay_result_json TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL, applied_at TEXT
+                created_at TEXT NOT NULL, applied_at TEXT,
+                recommendation_version INTEGER NOT NULL DEFAULT 1,
+                listing_snapshot_json TEXT NOT NULL DEFAULT '{}', listing_state_hash TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY CHECK(id = 1), mode TEXT NOT NULL DEFAULT 'recommend',
@@ -307,6 +279,10 @@ def _ensure_recommendation_versioning(db: _Database) -> None:
             db.execute("ALTER TABLE recommendations ADD COLUMN version_number INTEGER NOT NULL DEFAULT 1")
         if "is_current" not in columns:
             db.execute("ALTER TABLE recommendations ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1")
+        action_columns = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(actions)").fetchall()}
+        for name, definition in (("recommendation_version", "INTEGER NOT NULL DEFAULT 1"), ("listing_snapshot_json", "TEXT NOT NULL DEFAULT '{}'"), ("listing_state_hash", "TEXT NOT NULL DEFAULT ''")):
+            if name not in action_columns:
+                db.execute(f"ALTER TABLE actions ADD COLUMN {name} {definition}")
     rows = db.execute("SELECT id, listing_row_id, status, updated_at, created_at FROM recommendations ORDER BY listing_row_id, updated_at DESC, created_at DESC, id DESC").fetchall()
     seen: set[Any] = set()
     for row in rows:
@@ -1561,8 +1537,17 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
             raise ValueError("High-value listing price changes require manual review and cannot be applied by this MVP.")
     action_id = str(uuid.uuid4())
     now = utc_now()
+    recommendation_version = int(recommendation.get("version") or 1)
+    listing_snapshot = dict(current)
+    listing_state_hash = _listing_state_hash(listing_snapshot)
     with connect() as db:
-        db.execute("INSERT INTO actions(id,recommendation_id,listing_row_id,approved_json,old_json,created_at) SELECT ?,id,listing_row_id,?,?,? FROM recommendations WHERE id=?", (action_id, _json(changes), _json({key: current.get(key) for key in changes}), now, recommendation_id))
+        rec_row = db.execute("SELECT r.listing_row_id, r.version_number, r.is_current, l.data_json FROM recommendations r JOIN listings l ON l.id=r.listing_row_id WHERE r.id=?", (recommendation_id,)).fetchone()
+        if not rec_row or not bool(rec_row["is_current"]):
+            raise ValueError("This recommendation version has been superseded; review the current listing recommendation.")
+        recommendation_version = int(rec_row["version_number"])
+        listing_snapshot = _decode(rec_row["data_json"], current)
+        listing_state_hash = _listing_state_hash(listing_snapshot)
+        db.execute("INSERT INTO actions(id,recommendation_id,listing_row_id,approved_json,old_json,created_at,recommendation_version,listing_snapshot_json,listing_state_hash) VALUES(?,?,?,?,?,?,?,?,?)", (action_id, recommendation_id, rec_row["listing_row_id"], _json(changes), _json({key: current.get(key) for key in changes}), now, recommendation_version, _json(listing_snapshot), listing_state_hash))
         db.execute("UPDATE recommendations SET status='Approved', updated_at=? WHERE id=?", (now, recommendation_id))
         listing_row = db.execute("SELECT listing_row_id FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
         if listing_row:
@@ -1575,26 +1560,44 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
 def apply_action(action_id: str) -> dict[str, Any]:
     init_db()
     with connect() as db:
-        row = db.execute("SELECT a.*, r.current_json FROM actions a JOIN recommendations r ON r.id=a.recommendation_id WHERE a.id=?", (action_id,)).fetchone()
-    if not row:
-        raise ValueError("Approved action not found.")
-    if row["status"] not in {"Approved", "Failed"}:
-        raise ValueError("Only an approved action can be applied.")
-    offer_id = str(_decode(row["current_json"], {}).get("offerId") or "")
-    if not offer_id:
-        raise ValueError("This listing has no eBay offer ID; it cannot be updated through the Inventory API.")
-    current = _decode(row["current_json"], {})
-    changes = _decode(row["approved_json"], {})
-    merged = {**current, **changes, "sku": current.get("sku")}
-    try:
-        result = update_ebay_offer(offer_id, merged)
-    except EbayDraftError as exc:
-        with connect() as db:
+        if db.postgres:
+            row = db.execute("SELECT a.*, r.current_json, r.version_number, r.is_current, r.listing_row_id AS recommendation_listing_row_id, l.data_json AS listing_data_json, l.sku AS listing_sku, l.listing_id AS listing_listing_id FROM actions a JOIN recommendations r ON r.id=a.recommendation_id JOIN listings l ON l.id=r.listing_row_id WHERE a.id=? FOR UPDATE", (action_id,)).fetchone()
+        else:
+            db.connection.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT a.*, r.current_json, r.version_number, r.is_current, r.listing_row_id AS recommendation_listing_row_id, l.data_json AS listing_data_json, l.sku AS listing_sku, l.listing_id AS listing_listing_id FROM actions a JOIN recommendations r ON r.id=a.recommendation_id JOIN listings l ON l.id=r.listing_row_id WHERE a.id=?", (action_id,)).fetchone()
+        if not row:
+            raise ValueError("Approved action not found.")
+        if row["status"] not in {"Approved", "Failed"}:
+            raise ValueError("Only an approved action can be applied.")
+        current = _decode(row["current_json"], {})
+        listing_state = _decode(row["listing_data_json"], {})
+        stale_reason = ""
+        if not bool(row["is_current"]):
+            stale_reason = "The linked recommendation is superseded and requires reapproval."
+        elif int(row["recommendation_version"] or 0) != int(row["version_number"] or 0):
+            stale_reason = "The approved recommendation version no longer matches the current version."
+        elif int(row["listing_row_id"]) != int(row["recommendation_listing_row_id"]):
+            stale_reason = "The approved listing identity no longer matches the recommendation."
+        elif str(current.get("sku") or "") != str(row["listing_sku"] or "") or str(current.get("listingId") or "") != str(row["listing_listing_id"] or ""):
+            stale_reason = "The approved SKU or listing identity no longer matches the stored listing."
+        elif not row["listing_state_hash"] or row["listing_state_hash"] != _listing_state_hash(listing_state):
+            stale_reason = "The listing state changed after approval and requires reapproval."
+        if stale_reason:
+            db.execute("UPDATE actions SET status='Stale', error=? WHERE id=?", (stale_reason, action_id))
+            db.connection.commit()
+            raise ValueError(stale_reason)
+        offer_id = str(current.get("offerId") or "")
+        if not offer_id:
+            raise ValueError("This listing has no eBay offer ID; it cannot be updated through the Inventory API.")
+        changes = _decode(row["approved_json"], {})
+        merged = {**current, **changes, "sku": current.get("sku")}
+        try:
+            result = update_ebay_offer(offer_id, merged)
+        except EbayDraftError as exc:
             db.execute("UPDATE actions SET status='Failed', error=? WHERE id=?", (exc.safe_message, action_id))
             db.execute("UPDATE recommendations SET status='Failed', updated_at=? WHERE id=?", (utc_now(), row["recommendation_id"]))
-        raise
-    now = utc_now()
-    with connect() as db:
+            raise
+        now = utc_now()
         db.execute("UPDATE actions SET status='Applied', new_json=?, ebay_result_json=?, applied_at=? WHERE id=?", (_json(changes), _json(result), now, action_id))
         db.execute("UPDATE recommendations SET status='Applied', updated_at=? WHERE id=?", (now, row["recommendation_id"]))
     return {"actionId": action_id, "recommendationId": row["recommendation_id"], "status": "Applied", "result": result}

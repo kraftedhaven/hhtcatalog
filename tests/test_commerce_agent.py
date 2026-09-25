@@ -183,6 +183,44 @@ class CommerceAgentTests(unittest.TestCase):
         entry = commerce_agent.history()[0]
         self.assertTrue(entry["rollbackEligible"])
 
+    def test_superseded_approved_action_is_rejected_without_ebay_call(self):
+        commerce_agent.audit_all()
+        recommendation = commerce_agent.recommendations()[0]
+        approved = commerce_agent.approve_recommendation(recommendation["recommendationId"], {"title": "Brand Short Coat"})
+        commerce_agent.audit_all()
+        with mock.patch.object(commerce_agent, "update_ebay_offer") as update:
+            with self.assertRaisesRegex(ValueError, "superseded"):
+                commerce_agent.apply_action(approved["actionId"])
+        update.assert_not_called()
+        with commerce_agent.connect() as db:
+            action = db.execute("SELECT status FROM actions WHERE id=?", (approved["actionId"],)).fetchone()
+        self.assertEqual(action["status"], "Stale")
+
+    def test_listing_change_after_approval_is_rejected_without_ebay_call(self):
+        commerce_agent.audit_all()
+        recommendation = commerce_agent.recommendations()[0]
+        approved = commerce_agent.approve_recommendation(recommendation["recommendationId"], {"title": "Brand Short Coat"})
+        with commerce_agent.connect() as db:
+            db.execute("UPDATE listings SET data_json=? WHERE sku=?", (commerce_agent._json({"listingId": "L1", "offerId": "O1", "sku": "SKU1", "title": "Changed after approval"}), "SKU1"))
+        with mock.patch.object(commerce_agent, "update_ebay_offer") as update:
+            with self.assertRaisesRegex(ValueError, "state changed"):
+                commerce_agent.apply_action(approved["actionId"])
+        update.assert_not_called()
+
+    def test_new_current_recommendation_can_still_apply_after_old_action_is_stale(self):
+        commerce_agent.audit_all()
+        old = commerce_agent.recommendations()[0]
+        old_action = commerce_agent.approve_recommendation(old["recommendationId"], {"title": "Brand Short Coat"})
+        commerce_agent.audit_all()
+        current = commerce_agent.recommendations()[0]
+        new_action = commerce_agent.approve_recommendation(current["recommendationId"], {"title": "Brand Updated Coat"})
+        with mock.patch.object(commerce_agent, "update_ebay_offer", return_value={"status": "offer_updated"}) as update:
+            result = commerce_agent.apply_action(new_action["actionId"])
+        self.assertEqual(result["status"], "Applied")
+        self.assertEqual(update.call_count, 1)
+        with self.assertRaisesRegex(ValueError, "superseded"):
+            commerce_agent.apply_action(old_action["actionId"])
+
     def test_approval_accepts_condition_and_notes_fields(self):
         commerce_agent.audit_all()
         recommendation = commerce_agent.recommendations()[0]

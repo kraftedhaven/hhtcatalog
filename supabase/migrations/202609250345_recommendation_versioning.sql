@@ -5,6 +5,11 @@ ALTER TABLE public.recommendations
     ADD COLUMN IF NOT EXISTS version_number integer NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS is_current boolean NOT NULL DEFAULT true;
 
+ALTER TABLE public.actions
+    ADD COLUMN IF NOT EXISTS recommendation_version integer NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS listing_snapshot_json text NOT NULL DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS listing_state_hash text NOT NULL DEFAULT '';
+
 WITH ranked AS (
     SELECT id,
            row_number() OVER (
