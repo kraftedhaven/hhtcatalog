@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import os
 
-import requests
+import jwt
+from jwt import PyJWKClient
 from flask import current_app, g, jsonify, request
 
 
 def authenticate_request():
-    """Validate the caller's bearer token with Supabase before API access."""
+    """Validate a Supabase access token against the project's issuer and JWKS."""
     supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
-    publishable_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
-    if not supabase_url or not publishable_key:
+    if not supabase_url:
         current_app.logger.error("Supabase Auth is not configured")
         return jsonify({"error": "Authentication is not configured on this server."}), 503
 
@@ -25,26 +25,21 @@ def authenticate_request():
         return jsonify({"error": "Authentication is required."}), 401
 
     try:
-        response = requests.get(
-            f"{supabase_url}/auth/v1/user",
-            headers={
-                "apikey": publishable_key,
-                "Authorization": f"Bearer {access_token}",
-            },
-            timeout=5,
+        signing_key = PyJWKClient(f"{supabase_url}/auth/v1/.well-known/jwks.json").get_signing_key_from_jwt(access_token)
+        user = jwt.decode(
+            access_token,
+            signing_key.key,
+            algorithms=["ES256", "RS256"],
+            audience="authenticated",
+            issuer=f"{supabase_url}/auth/v1",
         )
-    except requests.RequestException:
-        current_app.logger.exception("Supabase Auth verification failed")
+    except jwt.PyJWTError:
+        return jsonify({"error": "Your session is invalid or has expired."}), 401
+    except Exception:
+        current_app.logger.exception("Supabase JWKS verification failed")
         return jsonify({"error": "Authentication is temporarily unavailable."}), 503
 
-    if response.status_code != 200:
-        return jsonify({"error": "Your session is invalid or has expired."}), 401
-
-    try:
-        user = response.json()
-    except ValueError:
-        return jsonify({"error": "Your session is invalid or has expired."}), 401
-    if not user.get("id"):
+    if not user.get("sub"):
         return jsonify({"error": "Your session is invalid or has expired."}), 401
 
     g.supabase_user = user

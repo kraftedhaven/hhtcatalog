@@ -3,7 +3,7 @@ import os
 import html
 from typing import Any
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, g, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, reauthorization_required, required_user_scopes, seller_access_token
@@ -29,11 +29,11 @@ app = Flask(__name__, static_folder="frontend/dist", static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 CORS(
     app,
-    resources={r"/*": {"origins": os.environ.get("CORS_ORIGINS", "*")}},
+    resources={r"/*": {"origins": os.environ.get("CORS_ORIGINS", "https://hht.ebbiehq.me")}},
     allow_headers=["Content-Type", "Authorization"],
 )
 
-PUBLIC_AUTH_PATHS = {"/", "/health", "/api/ebay/oauth/callback"}
+PUBLIC_AUTH_PATHS = {"/", "/health", "/api/ebay/oauth/start", "/api/ebay/oauth/callback"}
 
 
 @app.before_request
@@ -42,7 +42,22 @@ def require_supabase_auth():
         return None
     if request.path in PUBLIC_AUTH_PATHS:
         return None
-    return authenticate_request()
+    response = authenticate_request()
+    if response is not None:
+        return response
+    if request.path.startswith(("/api/commerce/", "/api/catalog/", "/api/ebay/")):
+        try:
+            seller = commerce_agent.ensure_seller_identity(str(g.supabase_user["sub"]))
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        g.seller_id = seller["id"]
+        g.auth_user_id = str(g.supabase_user["sub"])
+    return None
+
+
+@app.errorhandler(PermissionError)
+def forbidden(error):
+    return jsonify({"error": str(error) or "You do not have access to this seller account."}), 403
 
 
 @app.route("/health", methods=["GET"])
@@ -297,15 +312,9 @@ def ebay_drafts():
 
 @app.route("/api/ebay/offers/<offer_id>", methods=["PUT"])
 def ebay_offer_update(offer_id):
-    body = request.get_json(silent=True) or {}
-    item = body.get("item") or body.get("listing") or body
-    if not isinstance(item, dict):
-        return jsonify({"error": "Request body must include an item object."}), 400
-    try:
-        result = update_ebay_offer(offer_id, item)
-    except EbayDraftError as exc:
-        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
-    return jsonify({"result": result})
+    return jsonify({
+        "error": "Direct offer updates are disabled. Use the seller-owned approved-action route so ownership and stale-state checks run before eBay is called."
+    }), 403
 
 
 @app.route("/api/ebay/offers/<path:_removed>/publish", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -486,7 +495,7 @@ def commerce_rotation_approve():
     if not isinstance(action_ids, list):
         return jsonify({"error": "actionIds must be an array."}), 400
     try:
-        return jsonify({"result": commerce_agent.approve_rotation_actions(action_ids)})
+        return jsonify({"result": commerce_agent.approve_rotation_actions(action_ids, g.seller_id, g.auth_user_id)})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -511,7 +520,7 @@ def commerce_job(job_id):
 @app.route("/api/commerce/audit", methods=["POST"])
 def commerce_audit():
     try:
-        return jsonify({"result": commerce_agent.audit_all()})
+        return jsonify({"result": commerce_agent.audit_all(g.seller_id)})
     except Exception as exc:
         app.logger.exception("Commerce Agent audit failed")
         return jsonify({"error": "Commerce Agent audit failed. Check the Heroku logs for the diagnostic."}), 502
@@ -540,7 +549,7 @@ def commerce_recommendations_page():
 
 @app.route("/api/commerce/recommendations/<recommendation_id>", methods=["GET"])
 def commerce_recommendation(recommendation_id):
-    result = commerce_agent.get_recommendation(recommendation_id)
+    result = commerce_agent.get_recommendation(recommendation_id, g.seller_id)
     if not result:
         return jsonify({"error": "Recommendation not found."}), 404
     return jsonify({"result": result})
@@ -558,7 +567,9 @@ def commerce_recommendation_explain(recommendation_id):
 def commerce_approve(recommendation_id):
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify({"result": commerce_agent.approve_recommendation(recommendation_id, body.get("approved"))})
+        return jsonify({"result": commerce_agent.approve_recommendation(
+            recommendation_id, body.get("approved"), g.seller_id, g.auth_user_id
+        )})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -570,7 +581,7 @@ def commerce_bulk_approve():
     if not isinstance(recommendation_ids, list):
         return jsonify({"error": "recommendationIds must be an array."}), 400
     try:
-        return jsonify({"result": commerce_agent.bulk_approve(recommendation_ids)})
+        return jsonify({"result": commerce_agent.bulk_approve(recommendation_ids, g.seller_id, g.auth_user_id)})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -589,7 +600,7 @@ def commerce_recommendation_decision(recommendation_id, decision):
 @app.route("/api/commerce/actions/<action_id>/apply", methods=["POST"])
 def commerce_apply(action_id):
     try:
-        return jsonify({"result": commerce_agent.apply_action(action_id)})
+        return jsonify({"result": commerce_agent.apply_action(action_id, g.seller_id, g.auth_user_id)})
     except (EbayDraftError, ValueError) as exc:
         body = {"error": getattr(exc, "safe_message", str(exc))}
         if hasattr(exc, "to_public"):
@@ -600,7 +611,7 @@ def commerce_apply(action_id):
 @app.route("/api/commerce/actions/<action_id>/rollback", methods=["POST"])
 def commerce_rollback(action_id):
     try:
-        return jsonify({"result": commerce_agent.rollback_action(action_id)})
+        return jsonify({"result": commerce_agent.rollback_action(action_id, g.seller_id, g.auth_user_id)})
     except (EbayDraftError, ValueError) as exc:
         body = {"error": getattr(exc, "safe_message", str(exc))}
         if hasattr(exc, "to_public"):

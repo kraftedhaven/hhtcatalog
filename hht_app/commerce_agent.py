@@ -128,14 +128,18 @@ def connect() -> _Database:
 def init_db() -> None:
     with connect() as db:
         if db.postgres:
-            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions"}
+            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts"}
             rows = db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(?)", (list(required),)).fetchall()
             present = {str(row["table_name"]) for row in rows}
             missing = sorted(required - present)
             if missing:
                 raise RuntimeError("Commerce Agent database schema is incomplete. Apply the ordered Supabase migrations before starting the app: " + ", ".join(missing))
             columns = db.execute("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('recommendations','actions','listings')").fetchall()
-            required_columns = {"recommendations": {"version_number", "is_current"}, "actions": {"recommendation_version", "listing_snapshot_json", "listing_state_hash"}, "listings": {"lifecycle_status", "listing_start_time", "quantity_sold", "watch_count", "ownership_classification"}}
+            required_columns = {
+                "recommendations": {"version_number", "is_current", "seller_id"},
+                "actions": {"recommendation_version", "listing_snapshot_json", "listing_state_hash", "seller_id", "approved_by", "applied_by", "rolled_back_by"},
+                "listings": {"lifecycle_status", "listing_start_time", "quantity_sold", "watch_count", "ownership_classification", "seller_id", "ebay_account_id"},
+            }
             present_columns = {(str(row["table_name"]), str(row["column_name"])) for row in columns}
             missing_columns = sorted(f"{table}.{column}" for table, names in required_columns.items() for column in names if (table, column) not in present_columns)
             if missing_columns:
@@ -190,6 +194,91 @@ def init_db() -> None:
             )
             _ensure_phase4_schema(db)
             _ensure_recommendation_versioning(db)
+            _ensure_seller_schema(db)
+
+
+def _ensure_seller_schema(db: _Database) -> None:
+    """Keep local SQLite tests aligned with the migration-owned Postgres schema."""
+    if db.postgres:
+        return
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS sellers (
+            id TEXT PRIMARY KEY,
+            auth_user_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ebay_accounts (
+            id TEXT PRIMARY KEY,
+            seller_id TEXT NOT NULL REFERENCES sellers(id),
+            ebay_account_id TEXT NOT NULL UNIQUE,
+            connected_at TEXT NOT NULL,
+            disconnected_at TEXT
+        );
+        """
+    )
+    for table, column, definition in (
+        ("listings", "seller_id", "TEXT"),
+        ("listings", "ebay_account_id", "TEXT"),
+        ("recommendations", "seller_id", "TEXT"),
+        ("actions", "seller_id", "TEXT"),
+        ("actions", "approved_by", "TEXT"),
+        ("actions", "applied_by", "TEXT"),
+        ("actions", "rolled_back_by", "TEXT"),
+        ("rotation_actions", "seller_id", "TEXT"),
+        ("rotation_actions", "approved_by", "TEXT"),
+    ):
+        columns = {str(row[1]) for row in db.connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def ensure_seller_identity(auth_user_id: str) -> dict[str, Any]:
+    """Return the seller bound to the caller, bootstrapping only the configured pilot."""
+    init_db()
+    with connect() as db:
+        seller = db.execute(
+            "SELECT * FROM sellers WHERE auth_user_id=? AND status='active'",
+            (auth_user_id,),
+        ).fetchone()
+        if seller:
+            return dict(seller)
+
+        bootstrap_user_id = os.environ.get("SELLER_BOOTSTRAP_AUTH_USER_ID", "").strip()
+        ebay_account_id = os.environ.get("EBAY_ACCOUNT_ID", "").strip()
+        if not bootstrap_user_id or not ebay_account_id or auth_user_id != bootstrap_user_id:
+            raise PermissionError("This Supabase user is not bound to an HHT seller account.")
+
+        seller_id = str(uuid.uuid4())
+        account_id = str(uuid.uuid4())
+        now = utc_now()
+        db.execute(
+            "INSERT INTO sellers(id,auth_user_id,status,created_at) VALUES(?,?,?,?)",
+            (seller_id, auth_user_id, "active", now),
+        )
+        db.execute(
+            "INSERT INTO ebay_accounts(id,seller_id,ebay_account_id,connected_at) VALUES(?,?,?,?)",
+            (account_id, seller_id, ebay_account_id, now),
+        )
+        # Legacy catalog data is adopted only by the preconfigured pilot user.
+        db.execute(
+            "UPDATE listings SET seller_id=?, ebay_account_id=? WHERE seller_id IS NULL",
+            (seller_id, account_id),
+        )
+        db.execute(
+            "UPDATE recommendations SET seller_id=? WHERE seller_id IS NULL",
+            (seller_id,),
+        )
+        db.execute(
+            "UPDATE actions SET seller_id=? WHERE seller_id IS NULL",
+            (seller_id,),
+        )
+        db.execute(
+            "UPDATE rotation_actions SET seller_id=? WHERE seller_id IS NULL",
+            (seller_id,),
+        )
+        return {"id": seller_id, "auth_user_id": auth_user_id, "status": "active"}
 
 
 def _ensure_phase4_schema(db: _Database) -> None:
@@ -725,7 +814,11 @@ def rotation_queue(performance: list[dict[str, Any]] | None = None) -> list[dict
     return queue
 
 
-def approve_rotation_actions(action_ids: list[str]) -> dict[str, Any]:
+def approve_rotation_actions(
+    action_ids: list[str],
+    seller_id: str | None = None,
+    auth_user_id: str | None = None,
+) -> dict[str, Any]:
     raise ValueError("Rotation approvals are paused until rotation recommendations use the existing actions approval and rollback model.")
 
 
@@ -1388,12 +1481,17 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) or note_only_review else "low", "evidence": evidence_summary(item), "taxonomy": taxonomy, "soldPricing": pricing, "soldComparableSummary": sold, "demand": demand}
 
 
-def audit_all() -> dict[str, Any]:
+def audit_all(seller_id: str | None = None) -> dict[str, Any]:
     init_db()
     results = []
     now = utc_now()
     with connect() as db:
-        for row in db.execute("SELECT * FROM listings").fetchall():
+        query = "SELECT * FROM listings"
+        params: tuple[Any, ...] = ()
+        if seller_id:
+            query += " WHERE seller_id=?"
+            params = (seller_id,)
+        for row in db.execute(query, params).fetchall():
             item = _row_listing(row)
             if str(item.get("status") or "active").lower() != "active":
                 # A completed active-list refresh may retain historical local
@@ -1408,7 +1506,7 @@ def audit_all() -> dict[str, Any]:
             version_number = int(version_row["version"] if version_row else 0) + 1
             recommendation_id = str(uuid.uuid4())
             stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "soldComparableSummary": audit["soldComparableSummary"], "demandMetrics": audit["demand"]}
-            db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at,version_number,is_current) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now, version_number, True if db.postgres else 1))
+            db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at,version_number,is_current,seller_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now, version_number, True if db.postgres else 1, row["seller_id"] if "seller_id" in row.keys() else seller_id))
             results.append({"recommendationId": recommendation_id, "listing": stored_current, **audit, "status": "Pending", "version": version_number, "isCurrent": True})
     return {"count": len(results), "results": results}
 
@@ -1500,15 +1598,22 @@ def recommendations_page(status: str = "", page: int = 1, page_size: int = ENRIC
     return {"page": page, "pageSize": page_size, "total": total, "totalPages": max(1, (total + page_size - 1) // page_size), "items": [_recommendation(row) for row in rows]}
 
 
-def get_recommendation(recommendation_id: str) -> dict[str, Any] | None:
+def get_recommendation(recommendation_id: str, seller_id: str | None = None) -> dict[str, Any] | None:
     init_db()
     with connect() as db:
         row = db.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
+    if row and seller_id and str(row["seller_id"] or "") != seller_id:
+        raise PermissionError("This recommendation belongs to a different seller.")
     return _recommendation(row) if row else None
 
 
-def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | None = None) -> dict[str, Any]:
-    recommendation = get_recommendation(recommendation_id)
+def approve_recommendation(
+    recommendation_id: str,
+    approved: dict[str, Any] | None = None,
+    seller_id: str | None = None,
+    auth_user_id: str | None = None,
+) -> dict[str, Any]:
+    recommendation = get_recommendation(recommendation_id, seller_id)
     if not recommendation:
         raise ValueError("Recommendation not found.")
     if not recommendation.get("isCurrent", True):
@@ -1541,13 +1646,15 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
     listing_snapshot = dict(current)
     listing_state_hash = _listing_state_hash(listing_snapshot)
     with connect() as db:
-        rec_row = db.execute("SELECT r.listing_row_id, r.version_number, r.is_current, l.data_json FROM recommendations r JOIN listings l ON l.id=r.listing_row_id WHERE r.id=?", (recommendation_id,)).fetchone()
+        rec_row = db.execute("SELECT r.listing_row_id, r.version_number, r.is_current, r.seller_id, l.data_json, l.seller_id AS listing_seller_id FROM recommendations r JOIN listings l ON l.id=r.listing_row_id WHERE r.id=?", (recommendation_id,)).fetchone()
         if not rec_row or not bool(rec_row["is_current"]):
             raise ValueError("This recommendation version has been superseded; review the current listing recommendation.")
+        if seller_id and (str(rec_row["seller_id"] or "") != seller_id or str(rec_row["listing_seller_id"] or "") != seller_id):
+            raise PermissionError("This recommendation belongs to a different seller.")
         recommendation_version = int(rec_row["version_number"])
         listing_snapshot = _decode(rec_row["data_json"], current)
         listing_state_hash = _listing_state_hash(listing_snapshot)
-        db.execute("INSERT INTO actions(id,recommendation_id,listing_row_id,approved_json,old_json,created_at,recommendation_version,listing_snapshot_json,listing_state_hash) VALUES(?,?,?,?,?,?,?,?,?)", (action_id, recommendation_id, rec_row["listing_row_id"], _json(changes), _json({key: current.get(key) for key in changes}), now, recommendation_version, _json(listing_snapshot), listing_state_hash))
+        db.execute("INSERT INTO actions(id,recommendation_id,listing_row_id,approved_json,old_json,created_at,recommendation_version,listing_snapshot_json,listing_state_hash,seller_id,approved_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (action_id, recommendation_id, rec_row["listing_row_id"], _json(changes), _json({key: current.get(key) for key in changes}), now, recommendation_version, _json(listing_snapshot), listing_state_hash, seller_id, auth_user_id))
         db.execute("UPDATE recommendations SET status='Approved', updated_at=? WHERE id=?", (now, recommendation_id))
         listing_row = db.execute("SELECT listing_row_id FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
         if listing_row:
@@ -1557,16 +1664,20 @@ def approve_recommendation(recommendation_id: str, approved: dict[str, Any] | No
     return {"actionId": action_id, "recommendationId": recommendation_id, "status": "Approved", "approved": changes}
 
 
-def apply_action(action_id: str) -> dict[str, Any]:
+def apply_action(action_id: str, seller_id: str | None = None, auth_user_id: str | None = None) -> dict[str, Any]:
     init_db()
     with connect() as db:
         if db.postgres:
-            row = db.execute("SELECT a.*, r.current_json, r.version_number, r.is_current, r.listing_row_id AS recommendation_listing_row_id, l.data_json AS listing_data_json, l.sku AS listing_sku, l.listing_id AS listing_listing_id FROM actions a JOIN recommendations r ON r.id=a.recommendation_id JOIN listings l ON l.id=r.listing_row_id WHERE a.id=? FOR UPDATE", (action_id,)).fetchone()
+            row = db.execute("SELECT a.*, r.current_json, r.version_number, r.is_current, r.listing_row_id AS recommendation_listing_row_id, r.seller_id AS recommendation_seller_id, l.data_json AS listing_data_json, l.sku AS listing_sku, l.listing_id AS listing_listing_id, l.seller_id AS listing_seller_id, l.ownership_classification AS listing_ownership_classification FROM actions a JOIN recommendations r ON r.id=a.recommendation_id JOIN listings l ON l.id=r.listing_row_id WHERE a.id=? FOR UPDATE", (action_id,)).fetchone()
         else:
             db.connection.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT a.*, r.current_json, r.version_number, r.is_current, r.listing_row_id AS recommendation_listing_row_id, l.data_json AS listing_data_json, l.sku AS listing_sku, l.listing_id AS listing_listing_id FROM actions a JOIN recommendations r ON r.id=a.recommendation_id JOIN listings l ON l.id=r.listing_row_id WHERE a.id=?", (action_id,)).fetchone()
+            row = db.execute("SELECT a.*, r.current_json, r.version_number, r.is_current, r.listing_row_id AS recommendation_listing_row_id, r.seller_id AS recommendation_seller_id, l.data_json AS listing_data_json, l.sku AS listing_sku, l.listing_id AS listing_listing_id, l.seller_id AS listing_seller_id, l.ownership_classification AS listing_ownership_classification FROM actions a JOIN recommendations r ON r.id=a.recommendation_id JOIN listings l ON l.id=r.listing_row_id WHERE a.id=?", (action_id,)).fetchone()
         if not row:
             raise ValueError("Approved action not found.")
+        if seller_id and any(str(row[column] or "") != seller_id for column in ("seller_id", "recommendation_seller_id", "listing_seller_id")):
+            raise PermissionError("This action belongs to a different seller.")
+        if auth_user_id and str(row["approved_by"] or "") != auth_user_id:
+            raise PermissionError("This action was not approved by the authenticated user.")
         if row["status"] not in {"Approved", "Failed"}:
             raise ValueError("Only an approved action can be applied.")
         current = _decode(row["current_json"], {})
@@ -1586,6 +1697,9 @@ def apply_action(action_id: str) -> dict[str, Any]:
             db.execute("UPDATE actions SET status='Stale', error=? WHERE id=?", (stale_reason, action_id))
             db.connection.commit()
             raise ValueError(stale_reason)
+        ownership = str(listing_state.get("ownershipClassification") or row["listing_ownership_classification"] or "").strip().lower()
+        if ownership != "inventory_api_managed":
+            raise PermissionError("Only inventory_api_managed listings may be updated through the Inventory API.")
         offer_id = str(current.get("offerId") or "")
         if not offer_id:
             raise ValueError("This listing has no eBay offer ID; it cannot be updated through the Inventory API.")
@@ -1598,7 +1712,7 @@ def apply_action(action_id: str) -> dict[str, Any]:
             db.execute("UPDATE recommendations SET status='Failed', updated_at=? WHERE id=?", (utc_now(), row["recommendation_id"]))
             raise
         now = utc_now()
-        db.execute("UPDATE actions SET status='Applied', new_json=?, ebay_result_json=?, applied_at=? WHERE id=?", (_json(changes), _json(result), now, action_id))
+        db.execute("UPDATE actions SET status='Applied', new_json=?, ebay_result_json=?, applied_at=?, applied_by=? WHERE id=?", (_json(changes), _json(result), now, auth_user_id, action_id))
         db.execute("UPDATE recommendations SET status='Applied', updated_at=? WHERE id=?", (now, row["recommendation_id"]))
     return {"actionId": action_id, "recommendationId": row["recommendation_id"], "status": "Applied", "result": result}
 
@@ -1637,7 +1751,11 @@ def set_recommendation_status(recommendation_id: str, status: str) -> dict[str, 
     return {"recommendationId": recommendation_id, "status": status}
 
 
-def bulk_approve(recommendation_ids: list[str]) -> dict[str, Any]:
+def bulk_approve(
+    recommendation_ids: list[str],
+    seller_id: str | None = None,
+    auth_user_id: str | None = None,
+) -> dict[str, Any]:
     requested = list(dict.fromkeys(str(value).strip() for value in recommendation_ids if str(value).strip()))
     if not requested or len(requested) > 25:
         raise ValueError("Provide between 1 and 25 recommendation IDs.")
@@ -1645,18 +1763,20 @@ def bulk_approve(recommendation_ids: list[str]) -> dict[str, Any]:
     errors: list[dict[str, Any]] = []
     for recommendation_id in requested:
         try:
-            approved.append(approve_recommendation(recommendation_id))
-        except ValueError as exc:
+            approved.append(approve_recommendation(recommendation_id, seller_id=seller_id, auth_user_id=auth_user_id))
+        except (ValueError, PermissionError) as exc:
             errors.append({"recommendationId": recommendation_id, "error": str(exc)})
     return {"requested": len(requested), "approved": len(approved), "failed": len(errors), "results": approved, "errors": errors}
 
 
-def rollback_action(action_id: str) -> dict[str, Any]:
+def rollback_action(action_id: str, seller_id: str | None = None, auth_user_id: str | None = None) -> dict[str, Any]:
     init_db()
     with connect() as db:
-        row = db.execute("SELECT a.*, r.current_json FROM actions a JOIN recommendations r ON r.id=a.recommendation_id WHERE a.id=?", (action_id,)).fetchone()
+        row = db.execute("SELECT a.*, r.current_json, r.seller_id AS recommendation_seller_id, l.seller_id AS listing_seller_id FROM actions a JOIN recommendations r ON r.id=a.recommendation_id JOIN listings l ON l.id=a.listing_row_id WHERE a.id=?", (action_id,)).fetchone()
     if not row:
         raise ValueError("Action not found.")
+    if seller_id and any(str(row[column] or "") != seller_id for column in ("seller_id", "recommendation_seller_id", "listing_seller_id")):
+        raise PermissionError("This action belongs to a different seller.")
     if row["status"] != "Applied":
         raise ValueError("Only an applied action can be rolled back.")
     current = _decode(row["current_json"], {})
@@ -1678,7 +1798,7 @@ def rollback_action(action_id: str) -> dict[str, Any]:
     result = update_ebay_offer(offer_id, restored)
     now = utc_now()
     with connect() as db:
-        db.execute("UPDATE actions SET status='RolledBack', ebay_result_json=?, applied_at=? WHERE id=?", (_json(result), now, action_id))
+        db.execute("UPDATE actions SET status='RolledBack', ebay_result_json=?, applied_at=?, rolled_back_by=? WHERE id=?", (_json(result), now, auth_user_id, action_id))
         db.execute("UPDATE recommendations SET status='RolledBack', updated_at=? WHERE id=?", (now, row["recommendation_id"]))
         db.execute("UPDATE listings SET data_json=?, imported_at=? WHERE id=(SELECT listing_row_id FROM actions WHERE id=?)", (_json(restored), now, action_id))
     return {"actionId": action_id, "recommendationId": row["recommendation_id"], "status": "RolledBack", "result": result}
