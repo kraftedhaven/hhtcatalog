@@ -36,22 +36,38 @@ CORS(
 PUBLIC_AUTH_PATHS = {"/", "/health", "/api/ebay/oauth/start", "/api/ebay/oauth/callback"}
 
 
+def _requires_seller_auth() -> bool:
+    path = request.path
+    # Publishing is intentionally not implemented; its permanent 404 leaks no
+    # seller data and cannot reach an eBay mutation function.
+    if path.startswith("/api/ebay/offers/") and path.endswith("/publish"):
+        return False
+    if path in {"/api/commerce/rotation/approve", "/api/commerce/recommendations/bulk-approve", "/api/ebay/drafts", "/api/ebay/draft-feed"}:
+        return True
+    if path.startswith("/api/commerce/actions/") and path.endswith(("/apply", "/rollback")):
+        return True
+    if path.startswith("/api/commerce/recommendations/") and request.method == "POST":
+        return True
+    return path.startswith("/api/ebay/offers/")
+
+
 @app.before_request
 def require_supabase_auth():
     if request.method == "OPTIONS" or request.endpoint == "static":
         return None
     if request.path in PUBLIC_AUTH_PATHS:
         return None
+    if not _requires_seller_auth():
+        return None
     response = authenticate_request()
     if response is not None:
         return response
-    if request.path.startswith(("/api/commerce/", "/api/catalog/", "/api/ebay/")):
-        try:
-            seller = commerce_agent.ensure_seller_identity(str(g.supabase_user["sub"]))
-        except PermissionError as exc:
-            return jsonify({"error": str(exc)}), 403
-        g.seller_id = seller["id"]
-        g.auth_user_id = str(g.supabase_user["sub"])
+    try:
+        seller = commerce_agent.ensure_seller_identity(str(g.supabase_user["sub"]))
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    g.seller_id = seller["id"]
+    g.auth_user_id = str(g.supabase_user["sub"])
     return None
 
 
@@ -359,14 +375,14 @@ def ebay_feed_result(task_id):
 @app.route("/api/commerce/dashboard", methods=["GET"])
 def commerce_dashboard():
     try:
-        return jsonify({"result": commerce_agent.dashboard()})
+        return jsonify({"result": commerce_agent.dashboard(getattr(g, "seller_id", None))})
     except Exception:
         return jsonify({"error": "Commerce Agent database is unavailable. Verify DATABASE_URL and Supabase connectivity."}), 503
 
 
 @app.route("/api/commerce/listings", methods=["GET"])
 def commerce_listings():
-    return jsonify({"result": commerce_agent.list_listings({"status": request.args.get("status", "")})})
+    return jsonify({"result": commerce_agent.list_listings({"status": request.args.get("status", "")}, getattr(g, "seller_id", None))})
 
 
 @app.route("/api/commerce/enrich", methods=["POST"])
@@ -520,7 +536,7 @@ def commerce_job(job_id):
 @app.route("/api/commerce/audit", methods=["POST"])
 def commerce_audit():
     try:
-        return jsonify({"result": commerce_agent.audit_all(g.seller_id)})
+        return jsonify({"result": commerce_agent.audit_all(getattr(g, "seller_id", None))})
     except Exception as exc:
         app.logger.exception("Commerce Agent audit failed")
         return jsonify({"error": "Commerce Agent audit failed. Check the Heroku logs for the diagnostic."}), 502
@@ -537,19 +553,23 @@ def commerce_audit_start():
 
 @app.route("/api/commerce/recommendations", methods=["GET"])
 def commerce_recommendations():
-    return jsonify({"result": commerce_agent.recommendations(request.args.get("status", ""))})
+    return jsonify({"result": commerce_agent.recommendations(request.args.get("status", ""), getattr(g, "seller_id", None))})
 
 
 @app.route("/api/commerce/recommendations/page", methods=["GET"])
 def commerce_recommendations_page():
+    seller_id = getattr(g, "seller_id", None)
+    args = [request.args.get("status", ""), request.args.get("page", 1), request.args.get("pageSize", 25)]
+    if seller_id:
+        args.append(seller_id)
     return jsonify({"result": commerce_agent.recommendations_page(
-        request.args.get("status", ""), request.args.get("page", 1), request.args.get("pageSize", 25)
+        *args
     )})
 
 
 @app.route("/api/commerce/recommendations/<recommendation_id>", methods=["GET"])
 def commerce_recommendation(recommendation_id):
-    result = commerce_agent.get_recommendation(recommendation_id, g.seller_id)
+    result = commerce_agent.get_recommendation(recommendation_id, getattr(g, "seller_id", None))
     if not result:
         return jsonify({"error": "Recommendation not found."}), 404
     return jsonify({"result": result})
@@ -558,7 +578,7 @@ def commerce_recommendation(recommendation_id):
 @app.route("/api/commerce/recommendations/<recommendation_id>/explain", methods=["GET"])
 def commerce_recommendation_explain(recommendation_id):
     try:
-        return jsonify({"result": commerce_agent.explain_recommendation(recommendation_id)})
+        return jsonify({"result": commerce_agent.explain_recommendation(recommendation_id, getattr(g, "seller_id", None))})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
 
@@ -592,7 +612,7 @@ def commerce_recommendation_decision(recommendation_id, decision):
     if not status:
         return jsonify({"error": "Decision must be reject or skip."}), 400
     try:
-        return jsonify({"result": commerce_agent.set_recommendation_status(recommendation_id, status)})
+        return jsonify({"result": commerce_agent.set_recommendation_status(recommendation_id, status, g.seller_id)})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -621,7 +641,7 @@ def commerce_rollback(action_id):
 
 @app.route("/api/commerce/history", methods=["GET"])
 def commerce_history():
-    return jsonify({"result": commerce_agent.history()})
+    return jsonify({"result": commerce_agent.history(getattr(g, "seller_id", None))})
 
 
 @app.route("/api/commerce/settings", methods=["GET", "PUT"])

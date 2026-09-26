@@ -1261,11 +1261,14 @@ def _row_listing(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
-def list_listings(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def list_listings(filters: dict[str, Any] | None = None, seller_id: str | None = None) -> list[dict[str, Any]]:
     filters = filters or {}
     init_db()
     with connect() as db:
-        rows = db.execute("SELECT * FROM listings ORDER BY imported_at DESC").fetchall()
+        if seller_id:
+            rows = db.execute("SELECT * FROM listings WHERE seller_id=? ORDER BY imported_at DESC", (seller_id,)).fetchall()
+        else:
+            rows = db.execute("SELECT * FROM listings ORDER BY imported_at DESC").fetchall()
     items = [_row_listing(row) for row in rows]
     status = str(filters.get("status") or "").lower()
     if status:
@@ -1563,7 +1566,7 @@ def _recommendation(row: sqlite3.Row) -> dict[str, Any]:
     return {"recommendationId": row["id"], "actionId": row["action_id"] if "action_id" in row.keys() else "", "listing": listing, "proposed": proposed, "findings": findings, "evidence": listing.get("attributeEvidence", []), "taxonomy": listing.get("taxonomyValidation", {}), "soldPricing": listing.get("soldPricing", {}), "soldComparableSummary": listing.get("soldComparableSummary", {}), "demand": listing.get("demandMetrics", {}), "score": row["score"], "classification": row["classification"], "reason": row["reason"], "confidence": row["confidence"], "risk": row["risk"], "status": row["status"], "version": row["version_number"] if "version_number" in row.keys() else 1, "isCurrent": bool(row["is_current"]) if "is_current" in row.keys() else True, "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
 
 
-def recommendations(status: str = "") -> list[dict[str, Any]]:
+def recommendations(status: str = "", seller_id: str | None = None) -> list[dict[str, Any]]:
     init_db()
     query = "SELECT r.*, (SELECT a.id FROM actions a WHERE a.recommendation_id=r.id ORDER BY a.created_at DESC LIMIT 1) AS action_id FROM recommendations r WHERE r.is_current=?"
     current_value = True
@@ -1571,12 +1574,15 @@ def recommendations(status: str = "") -> list[dict[str, Any]]:
     if status:
         query += " AND r.status=?"
         params = (current_value, status)
+    if seller_id:
+        query += " AND r.seller_id=?"
+        params += (seller_id,)
     query += " ORDER BY score ASC, created_at DESC"
     with connect() as db:
         return [_recommendation(row) for row in db.execute(query, params).fetchall()]
 
 
-def recommendations_page(status: str = "", page: int = 1, page_size: int = ENRICHMENT_PAGE_SIZE) -> dict[str, Any]:
+def recommendations_page(status: str = "", page: int = 1, page_size: int = ENRICHMENT_PAGE_SIZE, seller_id: str | None = None) -> dict[str, Any]:
     """Return a stable small review page instead of an unbounded queue payload."""
     init_db()
     page = _positive_int(page, 1, 100_000)
@@ -1589,6 +1595,9 @@ def recommendations_page(status: str = "", page: int = 1, page_size: int = ENRIC
     else:
         where = " WHERE r.is_current=?"
         params = (True,)
+    if seller_id:
+        where += " AND r.seller_id=?"
+        params += (seller_id,)
     with connect() as db:
         total_row = db.execute(f"SELECT COUNT(*) AS count FROM recommendations r{where}", params).fetchone()
         total = int(total_row["count"])
@@ -1697,7 +1706,7 @@ def apply_action(action_id: str, seller_id: str | None = None, auth_user_id: str
             db.execute("UPDATE actions SET status='Stale', error=? WHERE id=?", (stale_reason, action_id))
             db.connection.commit()
             raise ValueError(stale_reason)
-        ownership = str(listing_state.get("ownershipClassification") or row["listing_ownership_classification"] or "").strip().lower()
+        ownership = str(row["listing_ownership_classification"] or listing_state.get("ownershipClassification") or "").strip().lower()
         if ownership != "inventory_api_managed":
             raise PermissionError("Only inventory_api_managed listings may be updated through the Inventory API.")
         offer_id = str(current.get("offerId") or "")
@@ -1717,8 +1726,8 @@ def apply_action(action_id: str, seller_id: str | None = None, auth_user_id: str
     return {"actionId": action_id, "recommendationId": row["recommendation_id"], "status": "Applied", "result": result}
 
 
-def explain_recommendation(recommendation_id: str) -> dict[str, Any]:
-    recommendation = get_recommendation(recommendation_id)
+def explain_recommendation(recommendation_id: str, seller_id: str | None = None) -> dict[str, Any]:
+    recommendation = get_recommendation(recommendation_id, seller_id)
     if not recommendation:
         raise ValueError("Recommendation not found.")
     return {
@@ -1738,10 +1747,10 @@ def explain_recommendation(recommendation_id: str) -> dict[str, Any]:
     }
 
 
-def set_recommendation_status(recommendation_id: str, status: str) -> dict[str, Any]:
+def set_recommendation_status(recommendation_id: str, status: str, seller_id: str | None = None) -> dict[str, Any]:
     if status not in {"Rejected", "Skipped"}:
         raise ValueError("Unsupported recommendation decision.")
-    recommendation = get_recommendation(recommendation_id)
+    recommendation = get_recommendation(recommendation_id, seller_id)
     if not recommendation:
         raise ValueError("Recommendation not found.")
     if recommendation["status"] != "Pending":
@@ -1804,16 +1813,21 @@ def rollback_action(action_id: str, seller_id: str | None = None, auth_user_id: 
     return {"actionId": action_id, "recommendationId": row["recommendation_id"], "status": "RolledBack", "result": result}
 
 
-def history() -> list[dict[str, Any]]:
+def history(seller_id: str | None = None) -> list[dict[str, Any]]:
     init_db()
     with connect() as db:
-        rows = db.execute("SELECT a.*, r.current_json FROM actions a JOIN recommendations r ON r.id=a.recommendation_id ORDER BY a.created_at DESC").fetchall()
+        query = "SELECT a.*, r.current_json FROM actions a JOIN recommendations r ON r.id=a.recommendation_id"
+        params: tuple[Any, ...] = ()
+        if seller_id:
+            query += " WHERE a.seller_id=?"
+            params = (seller_id,)
+        rows = db.execute(query + " ORDER BY a.created_at DESC", params).fetchall()
     return [{"actionId": row["id"], "recommendationId": row["recommendation_id"], "listing": _decode(row["current_json"], {}), "approved": _decode(row["approved_json"], {}), "old": _decode(row["old_json"], {}), "new": _decode(row["new_json"], {}), "status": row["status"], "error": row["error"], "ebayResult": _decode(row["ebay_result_json"], {}), "createdAt": row["created_at"], "appliedAt": row["applied_at"], "rollbackEligible": row["status"] == "Applied" and bool(_decode(row["old_json"], {})) and bool(_decode(row["new_json"], {})), "rollbackNote": "Eligible only after eBay confirms the listing still has the applied values." if row["status"] == "Applied" else ""} for row in rows]
 
 
-def dashboard() -> dict[str, Any]:
-    items = list_listings()
-    recs = recommendations()
+def dashboard(seller_id: str | None = None) -> dict[str, Any]:
+    items = list_listings(seller_id=seller_id)
+    recs = recommendations(seller_id=seller_id)
     active_items = [item for item in items if str(item.get("status") or "active").lower() == "active"]
     active_recs = [recommendation for recommendation in recs if str((recommendation.get("listing") or {}).get("status") or "active").lower() == "active"]
     return {"connectedStore": "eBay", "listingsFound": len(active_items), "recordsFound": len(items), "recommendations": len(active_recs), "needOptimization": sum(1 for r in active_recs if r["classification"] in {"Needs Optimization", "High Priority", "Needs Review"}), "titleImprovements": sum(1 for r in active_recs if any(f.get("field") == "title" for f in r["findings"])), "missingItemSpecifics": sum(1 for r in active_recs if any(f.get("field") == "item_specifics" for f in r["findings"])), "needsReview": sum(1 for r in active_recs if r["classification"] == "Needs Review"), "recovery": seller_recovery_metrics(active_recs, active_items), "mode": "recommend"}

@@ -886,7 +886,13 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(calls[1][2]["json"]["pricingSummary"]["price"]["value"], "24.99")
 
     def test_ebay_draft_endpoint_returns_result(self):
-        with mock.patch("app.create_ebay_draft", return_value={"status": "draft_created", "offerId": "offer-1", "published": False}) as create:
+        def authenticated():
+            app.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch("app.create_ebay_draft", return_value={"status": "draft_created", "offerId": "offer-1", "published": False}) as create:
             response = self.client.post("/api/ebay/drafts", json={"item": {"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["result"]["offerId"], "offer-1")
@@ -1153,7 +1159,13 @@ class MergePipelineTests(unittest.TestCase):
         self.assertIn("production-only", ctx.exception.safe_message)
 
     def test_draft_feed_endpoint_returns_task(self):
-        with mock.patch("app.upload_seller_hub_draft_csv", return_value={"status": "submitted", "taskId": "task-123"}) as upload:
+        def authenticated():
+            app.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch("app.upload_seller_hub_draft_csv", return_value={"status": "submitted", "taskId": "task-123"}) as upload:
             response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}]})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["result"]["taskId"], "task-123")

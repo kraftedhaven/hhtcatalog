@@ -15,12 +15,12 @@ class CommerceAgentTests(unittest.TestCase):
         commerce_agent.init_db()
         with commerce_agent.connect() as db:
             db.execute(
-                "INSERT INTO listings(listing_id, offer_id, sku, marketplace, data_json, imported_at) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO listings(listing_id, offer_id, sku, marketplace, data_json, imported_at, ownership_classification) VALUES(?,?,?,?,?,?,?)",
                 ("L1", "O1", "SKU1", "EBAY_US", commerce_agent._json({
                     "listingId": "L1", "offerId": "O1", "sku": "SKU1", "title": "Short Coat", "price": 100,
                     "desc": "", "cat": "57988", "brand": "Brand", "size": "M", "color": "Blue", "mat": "",
-                    "cnote": "", "pic": ""
-                }), commerce_agent.utc_now()),
+                    "cnote": "", "pic": "", "ownershipClassification": "inventory_api_managed"
+                }), commerce_agent.utc_now(), "inventory_api_managed"),
             )
 
     def tearDown(self):

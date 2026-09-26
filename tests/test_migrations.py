@@ -32,15 +32,15 @@ class MigrationTests(unittest.TestCase):
             {"table_name": table} for table in (
                 "listings", "recommendations", "actions", "settings", "commerce_jobs",
                 "enrichment_checkpoints", "listing_performance_daily", "listing_versions",
-                "fulfillment_orders", "rotation_actions",
+                "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts",
             )
         ]
         columns = [
             {"table_name": table, "column_name": column}
             for table, values in {
-                "recommendations": ("version_number", "is_current"),
-                "actions": ("recommendation_version", "listing_snapshot_json", "listing_state_hash"),
-                "listings": ("lifecycle_status", "listing_start_time", "quantity_sold", "watch_count", "ownership_classification"),
+                "recommendations": ("version_number", "is_current", "seller_id"),
+                "actions": ("recommendation_version", "listing_snapshot_json", "listing_state_hash", "seller_id", "approved_by", "applied_by", "rolled_back_by"),
+                "listings": ("lifecycle_status", "listing_start_time", "quantity_sold", "watch_count", "ownership_classification", "seller_id", "ebay_account_id"),
             }.items()
             for column in values
         ]
