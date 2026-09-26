@@ -13,6 +13,8 @@ services:
       LOCAL_UPLOAD_DIR: "/data/uploads"
       SAVE_UPLOADS: "true"
       MAX_UPLOAD_MB: "10"
+      SUPABASE_URL: "${SUPABASE_URL:-}"
+      SUPABASE_PUBLISHABLE_KEY: "${SUPABASE_PUBLISHABLE_KEY:-}"
       DATABASE_URL: "${DATABASE_URL:-}"
       COMMERCE_AGENT_DB: "${COMMERCE_AGENT_DB:-/data/commerce_agent.sqlite3}"
       EBAY_CLIENT_ID: "${EBAY_CLIENT_ID:-}"
@@ -43,6 +45,8 @@ services:
       - "5173:5173"
     environment:
       VITE_PUBLIC_API_URL: "http://localhost:8080"
+      VITE_SUPABASE_URL: "${SUPABASE_URL:-}"
+      VITE_SUPABASE_PUBLISHABLE_KEY: "${SUPABASE_PUBLISHABLE_KEY:-}"
     volumes:
       - ./frontend:/app/frontend
       - frontend_node_modules:/app/frontend/node_modules

@@ -1,5 +1,6 @@
 import { normalizeClientItem, normalizeClientPayloadItem } from './ebay.js';
 import { retryWithBackoff, getCachedCategorySearch, setCategorySearchCache } from './utils.js';
+import { getAccessToken } from './supabase.js';
 
 const PUBLIC_API_URL = import.meta.env.DEV
     ? import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || ''
@@ -7,6 +8,19 @@ const PUBLIC_API_URL = import.meta.env.DEV
 
 function baseUrl() {
     return (PUBLIC_API_URL || '').replace(/\/+$/, '');
+}
+
+async function authenticatedFetch(url, options = {}) {
+    const token = await getAccessToken();
+    if (!token) {
+        const error = new Error('Your session has expired. Please sign in again.');
+        error.status = 401;
+        throw error;
+    }
+
+    const headers = new Headers(options.headers || {});
+    headers.set('Authorization', `Bearer ${token}`);
+    return fetch(url, { ...options, headers });
 }
 
 async function parseResponse(res) {
@@ -36,7 +50,7 @@ export async function analyzeImages(files, sellerDefaults = {}, options = {}) {
     for (const file of files.slice(0, 3)) form.append('file', file);
     form.append('sellerDefaults', JSON.stringify({ ...sellerDefaults, analysisHints: options.analysisHints || {} }));
     if (options.tryAlternate) form.append('tryAlternate', '1');
-    const res = await fetch(`${baseUrl()}/analyze`, { method: 'POST', body: form });
+    const res = await authenticatedFetch(`${baseUrl()}/analyze`, { method: 'POST', body: form });
     const body = await parseResponse(res);
     return body.result || body;
 }
@@ -45,18 +59,18 @@ export async function startNvidiaAnalysis(files, sellerDefaults = {}, analysisHi
     const form = new FormData();
     for (const file of files.slice(0, 3)) form.append('file', file);
     form.append('sellerDefaults', JSON.stringify({ ...sellerDefaults, analysisHints }));
-    const res = await fetch(`${baseUrl()}/api/nvidia/analyze/start`, { method: 'POST', body: form });
+    const res = await authenticatedFetch(`${baseUrl()}/api/nvidia/analyze/start`, { method: 'POST', body: form });
     const body = await parseResponse(res);
     return body.result || body;
 }
 
 export async function health() {
-    const res = await fetch(`${baseUrl()}/health`);
+    const res = await authenticatedFetch(`${baseUrl()}/health`);
     return parseResponse(res);
 }
 
 export async function downloadCSV(items, defaults = {}) {
-    const res = await fetch(`${baseUrl()}/export/csv`, {
+    const res = await authenticatedFetch(`${baseUrl()}/export/csv`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)), sellerDefaults: defaults })
@@ -77,7 +91,7 @@ export async function downloadCSV(items, defaults = {}) {
 }
 
 export async function downloadDraftCSV(items) {
-    const res = await fetch(`${baseUrl()}/export/draft-csv`, {
+    const res = await authenticatedFetch(`${baseUrl()}/export/draft-csv`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)) })
@@ -100,7 +114,7 @@ export async function downloadDraftCSV(items) {
 // Retry-enabled eBay mutations
 export async function createEbayDraft(item) {
     return retryWithBackoff(async () => {
-        const res = await fetch(`${baseUrl()}/api/ebay/drafts`, {
+        const res = await authenticatedFetch(`${baseUrl()}/api/ebay/drafts`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ item: normalizeClientPayloadItem(item) })
@@ -112,7 +126,7 @@ export async function createEbayDraft(item) {
 
 export async function updateEbayOffer(offerId, item) {
     return retryWithBackoff(async () => {
-        const res = await fetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`, {
+        const res = await authenticatedFetch(`${baseUrl()}/api/ebay/offers/${encodeURIComponent(offerId)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ item: normalizeClientPayloadItem(item) })
@@ -124,7 +138,7 @@ export async function updateEbayOffer(offerId, item) {
 
 export async function sendDraftFeed(items) {
     return retryWithBackoff(async () => {
-        const res = await fetch(`${baseUrl()}/api/ebay/draft-feed`, {
+        const res = await authenticatedFetch(`${baseUrl()}/api/ebay/draft-feed`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)) })
@@ -143,7 +157,7 @@ export function ebayOAuthStatus() {
 }
 
 export async function ebayOAuthStart() {
-    const res = await fetch(`${baseUrl()}/api/ebay/oauth/start`);
+    const res = await authenticatedFetch(`${baseUrl()}/api/ebay/oauth/start`);
     return parseResponse(res);
 }
 
@@ -162,7 +176,7 @@ export function ebayCategoryAspects(categoryId) {
 }
 
 async function commerceRequest(path, options = {}) {
-    const res = await fetch(`${baseUrl()}${path}`, options);
+    const res = await authenticatedFetch(`${baseUrl()}${path}`, options);
     const body = await parseResponse(res);
     return body.result || body;
 }

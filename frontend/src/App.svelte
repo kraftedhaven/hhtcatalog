@@ -3,6 +3,7 @@
     import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, sendDraftFeed, startNvidiaAnalysis } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
+    import AuthGate from "$lib/components/AuthGate.svelte";
 
     const emptyItem = EMPTY_ITEM;
     const defaultSeller = {
@@ -763,6 +764,7 @@
 
 </script>
 
+<AuthGate>
 <div class="shell">
     <header class="topbar">
         <div>
@@ -1070,6 +1072,7 @@
         </section>
     {/if}
 </div>
+</AuthGate>
 
 <style>
     .bulk-staging-dropzone {

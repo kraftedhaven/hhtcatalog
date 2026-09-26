@@ -14,6 +14,7 @@ from hht_app import commerce_agent
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
 from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
 from hht_app.photo_quality import assess_image
+from hht_app.supabase_auth import authenticate_request
 
 
 PORT = int(os.environ.get("PORT", 8080))
@@ -26,7 +27,22 @@ mimetypes.add_type("image/heif", ".heif")
 
 app = Flask(__name__, static_folder="frontend/dist", static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
-CORS(app, resources={r"/*": {"origins": os.environ.get("CORS_ORIGINS", "*")}})
+CORS(
+    app,
+    resources={r"/*": {"origins": os.environ.get("CORS_ORIGINS", "*")}},
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+PUBLIC_AUTH_PATHS = {"/", "/health", "/api/ebay/oauth/callback"}
+
+
+@app.before_request
+def require_supabase_auth():
+    if request.method == "OPTIONS" or request.endpoint == "static":
+        return None
+    if request.path in PUBLIC_AUTH_PATHS:
+        return None
+    return authenticate_request()
 
 
 @app.route("/health", methods=["GET"])
