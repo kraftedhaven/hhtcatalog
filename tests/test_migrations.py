@@ -26,13 +26,17 @@ class MigrationTests(unittest.TestCase):
         rls = (self.migration_dir / names[1]).read_text()
         self.assertIn("public.rotation_actions ENABLE ROW LEVEL SECURITY", rls)
         self.assertIn("public.rotation_actions FROM anon", rls)
+        analysis_runs = (self.migration_dir / "202609260900_analysis_runs.sql").read_text()
+        self.assertIn("CREATE TABLE IF NOT EXISTS public.analysis_runs", analysis_runs)
+        self.assertIn("public.analysis_runs ENABLE ROW LEVEL SECURITY", analysis_runs)
+        self.assertIn("public.analysis_runs FROM anon, authenticated", analysis_runs)
 
     def test_postgres_init_db_is_read_only_schema_check(self):
         required_tables = [
             {"table_name": table} for table in (
                 "listings", "recommendations", "actions", "settings", "commerce_jobs",
                 "enrichment_checkpoints", "listing_performance_daily", "listing_versions",
-                "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts",
+                "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs",
             )
         ]
         columns = [
@@ -41,6 +45,7 @@ class MigrationTests(unittest.TestCase):
                 "recommendations": ("version_number", "is_current", "seller_id"),
                 "actions": ("recommendation_version", "listing_snapshot_json", "listing_state_hash", "seller_id", "approved_by", "applied_by", "rolled_back_by"),
                 "listings": ("lifecycle_status", "listing_start_time", "quantity_sold", "watch_count", "ownership_classification", "seller_id", "ebay_account_id"),
+                "analysis_runs": ("provider", "job_id", "status", "review_status", "result_json"),
             }.items()
             for column in values
         ]

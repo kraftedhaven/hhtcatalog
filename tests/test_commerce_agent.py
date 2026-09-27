@@ -49,6 +49,20 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(heavy["route"], "nvidia_worker")
         self.assertEqual(photo_heavy["route"], "nvidia_worker")
 
+    def test_analysis_runs_are_persisted_without_creating_an_ebay_action(self):
+        run = commerce_agent.record_analysis_run(
+            "breakground", {"title": "Review candidate"}, job_id="job-1", input_photo_count=3,
+        )
+        self.assertTrue(run["reviewOnly"])
+        with commerce_agent.connect() as db:
+            stored = db.execute("SELECT provider, job_id, review_status, result_json FROM analysis_runs WHERE id=?", (run["id"],)).fetchone()
+            actions = db.execute("SELECT COUNT(*) AS count FROM actions").fetchone()
+        self.assertEqual(stored["provider"], "breakground")
+        self.assertEqual(stored["job_id"], "job-1")
+        self.assertEqual(stored["review_status"], "pending")
+        self.assertIn("Review candidate", stored["result_json"])
+        self.assertEqual(actions["count"], 0)
+
     def test_reaudit_preserves_history_but_returns_one_current_card(self):
         first = commerce_agent.audit_all()
         second = commerce_agent.audit_all()

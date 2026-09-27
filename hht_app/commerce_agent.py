@@ -36,6 +36,7 @@ from .evidence import evidence_for_listing, evidence_summary, normalize_evidence
 from .ebay_taxonomy import validate_listing
 from .title_optimizer import optimize_title
 from .market_metrics import demand_score, pricing_recommendation, seller_recovery_metrics, sold_price_summary
+from .analysis_contract import canonical_analysis_run
 
 logger = logging.getLogger(__name__)
 DB_PATH = os.environ.get("COMMERCE_AGENT_DB", "commerce_agent.sqlite3")
@@ -128,17 +129,18 @@ def connect() -> _Database:
 def init_db() -> None:
     with connect() as db:
         if db.postgres:
-            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts"}
+            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs"}
             rows = db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(?)", (list(required),)).fetchall()
             present = {str(row["table_name"]) for row in rows}
             missing = sorted(required - present)
             if missing:
                 raise RuntimeError("Commerce Agent database schema is incomplete. Apply the ordered Supabase migrations before starting the app: " + ", ".join(missing))
-            columns = db.execute("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('recommendations','actions','listings')").fetchall()
+            columns = db.execute("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('recommendations','actions','listings','analysis_runs')").fetchall()
             required_columns = {
                 "recommendations": {"version_number", "is_current", "seller_id"},
                 "actions": {"recommendation_version", "listing_snapshot_json", "listing_state_hash", "seller_id", "approved_by", "applied_by", "rolled_back_by"},
                 "listings": {"lifecycle_status", "listing_start_time", "quantity_sold", "watch_count", "ownership_classification", "seller_id", "ebay_account_id"},
+                "analysis_runs": {"provider", "job_id", "status", "review_status", "result_json"},
             }
             present_columns = {(str(row["table_name"]), str(row["column_name"])) for row in columns}
             missing_columns = sorted(f"{table}.{column}" for table, names in required_columns.items() for column in names if (table, column) not in present_columns)
@@ -182,6 +184,17 @@ def init_db() -> None:
                 progress INTEGER NOT NULL DEFAULT 0, result_json TEXT NOT NULL DEFAULT '{}',
                 error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS analysis_runs (
+                id TEXT PRIMARY KEY, seller_id TEXT REFERENCES sellers(id),
+                listing_row_id INTEGER REFERENCES listings(id), provider TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL DEFAULT '',
+                input_photo_count INTEGER NOT NULL DEFAULT 0, token_usage_json TEXT NOT NULL DEFAULT '{}',
+                prompt_version TEXT NOT NULL DEFAULT '', schema_version TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL, completed_at TEXT, status TEXT NOT NULL,
+                review_status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT NOT NULL DEFAULT '', result_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS enrichment_checkpoints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, listing_row_id INTEGER NOT NULL UNIQUE REFERENCES listings(id),
                 listing_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
@@ -189,6 +202,7 @@ def init_db() -> None:
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS enrichment_checkpoints_status_idx ON enrichment_checkpoints(status, updated_at);
+            CREATE INDEX IF NOT EXISTS analysis_runs_listing_idx ON analysis_runs(listing_row_id, created_at);
             INSERT OR IGNORE INTO settings(id) VALUES (1);
             """
             )
@@ -232,6 +246,35 @@ def _ensure_seller_schema(db: _Database) -> None:
         columns = {str(row[1]) for row in db.connection.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in columns:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def record_analysis_run(
+    provider: str,
+    result: dict[str, Any],
+    *,
+    seller_id: str = "",
+    listing_row_id: int | None = None,
+    **metadata: Any,
+) -> dict[str, Any]:
+    """Persist a provider-neutral analysis result; this never creates an eBay action."""
+    run = canonical_analysis_run(provider, result, **metadata)
+    init_db()
+    with connect() as db:
+        db.execute(
+            """INSERT INTO analysis_runs(
+                id,seller_id,listing_row_id,provider,model,job_id,input_photo_count,
+                token_usage_json,prompt_version,schema_version,started_at,completed_at,
+                status,review_status,error,result_json,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                run["id"], seller_id or None, listing_row_id, run["provider"], run["model"],
+                run["jobId"], run["inputPhotoCount"], _json(run["tokenUsage"]),
+                run["promptVersion"], run["schemaVersion"], run["startedAt"],
+                run["completedAt"], run["status"], run["reviewStatus"], run["error"],
+                _json(run["result"]), utc_now(),
+            ),
+        )
+    return run
 
 
 def ensure_seller_identity(auth_user_id: str) -> dict[str, Any]:
@@ -1854,4 +1897,4 @@ def _review_note(item: dict[str, Any], findings: list[dict[str, Any]], taxonomy:
     return f"{existing} {addition}".strip()[:900]
 
 
-__all__ = ["dashboard", "import_listings", "list_listings", "audit_all", "recommendations", "recommendations_page", "get_recommendation", "explain_recommendation", "approve_recommendation", "bulk_approve", "set_recommendation_status", "apply_action", "rollback_action", "history", "settings", "update_settings"]
+__all__ = ["dashboard", "import_listings", "list_listings", "audit_all", "recommendations", "recommendations_page", "get_recommendation", "explain_recommendation", "approve_recommendation", "bulk_approve", "set_recommendation_status", "apply_action", "rollback_action", "history", "settings", "update_settings", "record_analysis_run"]
