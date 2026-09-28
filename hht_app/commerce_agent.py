@@ -1334,18 +1334,26 @@ def _fetch_listing_detail_with_backoff(listing_id: str, timeout: float) -> dict[
     raise EbayActiveError(502, "eBay listing detail retrieval failed.")
 
 
-def enriched_catalog_page(page: int = 1, page_size: int = ENRICHMENT_PAGE_SIZE) -> dict[str, Any]:
+def enriched_catalog_page(page: int = 1, page_size: int = ENRICHMENT_PAGE_SIZE, seller_id: str | None = None) -> dict[str, Any]:
     """Return only successfully enriched records in stable 25-item review pages."""
     init_db()
     page = _positive_int(page, 1, 100_000)
     page_size = _positive_int(page_size, ENRICHMENT_PAGE_SIZE, ENRICHMENT_PAGE_SIZE)
     offset = (page - 1) * page_size
+    where = "c.status='processed'"
+    params: tuple[Any, ...] = ()
+    if seller_id:
+        where += " AND l.seller_id=?"
+        params = (seller_id,)
     with connect() as db:
-        total_row = db.execute("SELECT COUNT(*) AS count FROM enrichment_checkpoints WHERE status='processed'").fetchone()
+        total_row = db.execute(
+            f"SELECT COUNT(*) AS count FROM enrichment_checkpoints c JOIN listings l ON l.id=c.listing_row_id WHERE {where}",
+            params,
+        ).fetchone()
         total = int(total_row["count"])
         rows = db.execute(
-            "SELECT l.*, c.status AS enrichment_status, c.attempts AS enrichment_attempts, c.enriched_at, c.last_error, c.details_json FROM enrichment_checkpoints c JOIN listings l ON l.id=c.listing_row_id WHERE c.status='processed' ORDER BY c.enriched_at DESC, l.id DESC LIMIT ? OFFSET ?",
-            (page_size, offset),
+            f"SELECT l.*, c.status AS enrichment_status, c.attempts AS enrichment_attempts, c.enriched_at, c.last_error, c.details_json FROM enrichment_checkpoints c JOIN listings l ON l.id=c.listing_row_id WHERE {where} ORDER BY c.enriched_at DESC, l.id DESC LIMIT ? OFFSET ?",
+            params + (page_size, offset),
         ).fetchall()
     records = []
     for row in rows:

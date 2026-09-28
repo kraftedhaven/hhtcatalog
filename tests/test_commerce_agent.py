@@ -526,6 +526,29 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(second["totalPages"], 2)
         self.assertEqual(len(second["items"]), 2)
 
+    def test_enriched_catalog_page_filters_by_seller(self):
+        now = commerce_agent.utc_now()
+        with commerce_agent.connect() as db:
+            for seller_id, auth_user_id in (("seller-a", "user-a"), ("seller-b", "user-b")):
+                db.execute(
+                    "INSERT INTO sellers(id,auth_user_id,status,created_at) VALUES(?,?,?,?)",
+                    (seller_id, auth_user_id, "active", now),
+                )
+            for seller_id in ("seller-a", "seller-b"):
+                cursor = db.execute(
+                    "INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,imported_at,seller_id) VALUES(?,?,?,?,?,?,?)",
+                    (seller_id, "", seller_id, "EBAY_US", "{}", now, seller_id),
+                )
+                db.execute(
+                    "INSERT INTO enrichment_checkpoints(listing_row_id,listing_id,status,enriched_at,details_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                    (cursor.lastrowid, seller_id, "processed", now, "{}", now, now),
+                )
+
+        page = commerce_agent.enriched_catalog_page(seller_id="seller-a")
+
+        self.assertEqual(page["total"], 1)
+        self.assertEqual([item["listingId"] for item in page["items"]], ["seller-a"])
+
     def test_recommendation_page_is_limited_to_25_records(self):
         for index in range(2, 28):
             with commerce_agent.connect() as db:

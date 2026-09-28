@@ -38,6 +38,8 @@ PUBLIC_AUTH_PATHS = {"/", "/health", "/api/ebay/oauth/start", "/api/ebay/oauth/c
 
 def _requires_seller_auth() -> bool:
     path = request.path
+    if path.startswith(("/api/commerce/", "/api/catalog/")):
+        return True
     # Publishing is intentionally not implemented; its permanent 404 leaks no
     # seller data and cannot reach an eBay mutation function.
     if path.startswith("/api/ebay/offers/") and path.endswith("/publish"):
@@ -430,7 +432,9 @@ def commerce_enrich_full_start():
 def enriched_catalog():
     """Serve successful read-only enrichment records in fixed review pages."""
     try:
-        return jsonify({"result": commerce_agent.enriched_catalog_page(request.args.get("page", 1), request.args.get("pageSize", 25))})
+        return jsonify({"result": commerce_agent.enriched_catalog_page(
+            request.args.get("page", 1), request.args.get("pageSize", 25), getattr(g, "seller_id", None)
+        )})
     except Exception:
         app.logger.exception("Enriched catalog page could not be loaded")
         return jsonify({"error": "Enriched catalog records are unavailable."}), 503

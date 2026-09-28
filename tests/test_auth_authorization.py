@@ -25,6 +25,19 @@ class JwtVerificationTests(unittest.TestCase):
         response = hht_app.app.test_client().post("/api/commerce/actions/action/apply")
         self.assertEqual(response.status_code, 401)
 
+    def test_seller_commerce_reads_require_authentication(self):
+        client = hht_app.app.test_client()
+        for path in (
+            "/api/commerce/dashboard",
+            "/api/commerce/listings",
+            "/api/commerce/recommendations/page",
+            "/api/commerce/history",
+            "/api/catalog/enriched",
+        ):
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 401)
+
     def _assert_invalid_token_is_401(self, error):
         with hht_app.app.test_request_context(
             "/api/commerce/actions/action/apply",
