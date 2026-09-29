@@ -11,7 +11,9 @@ class CommerceAgentTests(unittest.TestCase):
         self.db_file = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
         self.db_file.close()
         self.old_db = os.environ.get("COMMERCE_AGENT_DB")
+        self.old_mutation_switch = os.environ.get("EBAY_MUTATIONS_ENABLED")
         os.environ["COMMERCE_AGENT_DB"] = self.db_file.name
+        os.environ["EBAY_MUTATIONS_ENABLED"] = "true"
         commerce_agent.init_db()
         with commerce_agent.connect() as db:
             db.execute(
@@ -32,6 +34,10 @@ class CommerceAgentTests(unittest.TestCase):
             os.environ.pop("COMMERCE_AGENT_DB", None)
         else:
             os.environ["COMMERCE_AGENT_DB"] = self.old_db
+        if self.old_mutation_switch is None:
+            os.environ.pop("EBAY_MUTATIONS_ENABLED", None)
+        else:
+            os.environ["EBAY_MUTATIONS_ENABLED"] = self.old_mutation_switch
 
     def test_audit_creates_structured_recommendation(self):
         result = commerce_agent.audit_all()

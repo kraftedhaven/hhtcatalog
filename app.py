@@ -317,6 +317,8 @@ def ebay_category_aspects(category_id):
 
 @app.route("/api/ebay/drafts", methods=["POST"])
 def ebay_drafts():
+    if not commerce_agent.ebay_mutations_enabled():
+        return jsonify({"error": "eBay listing mutations are disabled pending controlled-pilot authorization."}), 403
     body = request.get_json(silent=True) or {}
     item = body.get("item") or body.get("listing") or body
     if not isinstance(item, dict):
@@ -342,6 +344,8 @@ def ebay_offer_publish_removed(_removed):
 
 @app.route("/api/ebay/draft-feed", methods=["POST"])
 def ebay_draft_feed():
+    if not commerce_agent.ebay_mutations_enabled():
+        return jsonify({"error": "eBay listing mutations are disabled pending controlled-pilot authorization."}), 403
     body = request.get_json(silent=True) or {}
     items = body.get("items") or body.get("queue") or []
     if not isinstance(items, list):

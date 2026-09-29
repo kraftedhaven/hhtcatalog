@@ -160,7 +160,9 @@ class SellerOwnershipTests(unittest.TestCase):
 
     def test_authorized_inventory_action_updates_ebay_once(self):
         action_id = self._approved_action()
-        with mock.patch.object(commerce_agent, "update_ebay_offer", return_value={"status": "offer_updated"}) as update:
+        with mock.patch.dict(os.environ, {"EBAY_MUTATIONS_ENABLED": "true"}), mock.patch.object(
+            commerce_agent, "update_ebay_offer", return_value={"status": "offer_updated"}
+        ) as update:
             result = commerce_agent.apply_action(action_id, self.seller_id, self.auth_user_id)
         update.assert_called_once()
         self.assertEqual(result["status"], "Applied")
@@ -168,6 +170,15 @@ class SellerOwnershipTests(unittest.TestCase):
             row = db.execute("SELECT approved_by,applied_by FROM actions WHERE id=?", (action_id,)).fetchone()
         self.assertEqual(row["approved_by"], self.auth_user_id)
         self.assertEqual(row["applied_by"], self.auth_user_id)
+
+    def test_mutation_switch_blocks_ebay_call(self):
+        action_id = self._approved_action()
+        with mock.patch.dict(os.environ, {"EBAY_MUTATIONS_ENABLED": "false"}), mock.patch.object(
+            commerce_agent, "update_ebay_offer"
+        ) as update:
+            with self.assertRaises(PermissionError):
+                commerce_agent.apply_action(action_id, self.seller_id, self.auth_user_id)
+        update.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -43,6 +43,16 @@ DB_PATH = os.environ.get("COMMERCE_AGENT_DB", "commerce_agent.sqlite3")
 MAX_TITLE_LENGTH = 80
 EDITABLE_FIELDS = {"title", "price", "cid", "desc", "cat", "cnote", "notes", "pic", "brand", "size", "color", "dept", "type", "model", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
 ENRICHMENT_PAGE_SIZE = 25
+
+
+def ebay_mutations_enabled() -> bool:
+    """Keep every live listing write disabled until an operator enables it."""
+    return os.environ.get("EBAY_MUTATIONS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def require_ebay_mutations_enabled() -> None:
+    if not ebay_mutations_enabled():
+        raise PermissionError("eBay listing mutations are disabled pending controlled-pilot authorization.")
 NVIDIA_HEAVY_ITEM_THRESHOLD = 30
 NVIDIA_HEAVY_PHOTO_THRESHOLD = 300
 NVIDIA_BATCH_MAX_PHOTOS = 500
@@ -1765,6 +1775,7 @@ def apply_action(action_id: str, seller_id: str | None = None, auth_user_id: str
             raise ValueError("This listing has no eBay offer ID; it cannot be updated through the Inventory API.")
         changes = _decode(row["approved_json"], {})
         merged = {**current, **changes, "sku": current.get("sku")}
+        require_ebay_mutations_enabled()
         try:
             result = update_ebay_offer(offer_id, merged)
         except EbayDraftError as exc:
@@ -1855,6 +1866,7 @@ def rollback_action(action_id: str, seller_id: str | None = None, auth_user_id: 
         if str(actual or "") != str(expected or ""):
             raise ValueError(f"Rollback stopped because eBay field '{field}' no longer matches the applied value.")
     restored = {**current, **old_values, "sku": current.get("sku")}
+    require_ebay_mutations_enabled()
     result = update_ebay_offer(offer_id, restored)
     now = utc_now()
     with connect() as db:
