@@ -30,13 +30,16 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS public.analysis_runs", analysis_runs)
         self.assertIn("public.analysis_runs ENABLE ROW LEVEL SECURITY", analysis_runs)
         self.assertIn("public.analysis_runs FROM anon, authenticated", analysis_runs)
+        scope_proofs = (self.migration_dir / "202609290100_ebay_scope_proofs.sql").read_text()
+        self.assertIn("CREATE TABLE IF NOT EXISTS public.ebay_scope_proofs", scope_proofs)
+        self.assertIn("public.ebay_scope_proofs ENABLE ROW LEVEL SECURITY", scope_proofs)
 
     def test_postgres_init_db_is_read_only_schema_check(self):
         required_tables = [
             {"table_name": table} for table in (
                 "listings", "recommendations", "actions", "settings", "commerce_jobs",
                 "enrichment_checkpoints", "listing_performance_daily", "listing_versions",
-                "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs",
+                "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs",
             )
         ]
         columns = [

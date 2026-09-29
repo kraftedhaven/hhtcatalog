@@ -44,6 +44,12 @@ MAX_TITLE_LENGTH = 80
 EDITABLE_FIELDS = {"title", "price", "cid", "desc", "cat", "cnote", "notes", "pic", "brand", "size", "color", "dept", "type", "model", "style", "theme", "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn", "serialNumber", "measurements"}
 ENRICHMENT_PAGE_SIZE = 25
 
+EBAY_SCOPE_PROBES = {
+    "sell.inventory": ("/sell/inventory/v1/inventory_item", {"limit": 1}),
+    "sell.fulfillment": ("/sell/fulfillment/v1/order", {"limit": 1}),
+    "sell.analytics.readonly": ("/sell/analytics/v1/seller_standards_profile", {}),
+}
+
 
 def ebay_mutations_enabled() -> bool:
     """Keep every live listing write disabled until an operator enables it."""
@@ -53,6 +59,24 @@ def ebay_mutations_enabled() -> bool:
 def require_ebay_mutations_enabled() -> None:
     if not ebay_mutations_enabled():
         raise PermissionError("eBay listing mutations are disabled pending controlled-pilot authorization.")
+
+
+def _ebay_refresh_token_fingerprint() -> str:
+    token = os.environ.get("EBAY_REFRESH_TOKEN", "").strip()
+    return hashlib.sha256(token.encode("utf-8")).hexdigest() if token else ""
+
+
+def _ebay_refresh_token_issued_at() -> str:
+    value = os.environ.get("EBAY_REFRESH_TOKEN_ISSUED_AT", "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if parsed.tzinfo is None:
+        return ""
+    return parsed.astimezone(timezone.utc).isoformat()
 NVIDIA_HEAVY_ITEM_THRESHOLD = 30
 NVIDIA_HEAVY_PHOTO_THRESHOLD = 300
 NVIDIA_BATCH_MAX_PHOTOS = 500
@@ -139,7 +163,7 @@ def connect() -> _Database:
 def init_db() -> None:
     with connect() as db:
         if db.postgres:
-            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs"}
+            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs"}
             rows = db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(?)", (list(required),)).fetchall()
             present = {str(row["table_name"]) for row in rows}
             missing = sorted(required - present)
@@ -219,6 +243,7 @@ def init_db() -> None:
             _ensure_phase4_schema(db)
             _ensure_recommendation_versioning(db)
             _ensure_seller_schema(db)
+            _ensure_ebay_scope_proof_schema(db)
 
 
 def _ensure_seller_schema(db: _Database) -> None:
@@ -256,6 +281,105 @@ def _ensure_seller_schema(db: _Database) -> None:
         columns = {str(row[1]) for row in db.connection.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in columns:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _ensure_ebay_scope_proof_schema(db: _Database) -> None:
+    if db.postgres:
+        return
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ebay_scope_proofs (
+            scope TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            probe TEXT NOT NULL,
+            http_status INTEGER,
+            checked_at TEXT,
+            token_fingerprint TEXT NOT NULL,
+            token_issued_at TEXT,
+            error_category TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+
+
+def ebay_scope_status() -> dict[str, Any]:
+    """Return scope evidence only when it belongs to the configured refresh token."""
+    init_db()
+    fingerprint = _ebay_refresh_token_fingerprint()
+    issued_at = _ebay_refresh_token_issued_at()
+    with connect() as db:
+        rows = {
+            str(row["scope"]): dict(row)
+            for row in db.execute("SELECT * FROM ebay_scope_proofs").fetchall()
+        }
+    proofs = []
+    all_verified = bool(fingerprint and issued_at)
+    for scope, (path, _params) in EBAY_SCOPE_PROBES.items():
+        row = rows.get(scope)
+        checked_at = str(row.get("checked_at") or "") if row else ""
+        verified = bool(
+            row
+            and row.get("status") == "verified"
+            and row.get("token_fingerprint") == fingerprint
+            and checked_at >= issued_at
+        )
+        all_verified = all_verified and verified
+        proofs.append({
+            "scope": scope,
+            "status": "verified" if verified else "unknown" if not row or row.get("token_fingerprint") != fingerprint else str(row.get("status") or "unknown"),
+            "probe": path,
+            "httpStatus": row.get("http_status") if row else None,
+            "checkedAt": checked_at or None,
+            "tokenIssuedAt": issued_at or None,
+        })
+    return {
+        "grantedScopesStatus": "verified" if all_verified else "unknown",
+        "scopeProofs": proofs,
+        "refreshTokenIssuedAt": issued_at or None,
+    }
+
+
+def probe_ebay_scopes() -> dict[str, Any]:
+    """Run the required scope probes with GET-only eBay API calls."""
+    init_db()
+    fingerprint = _ebay_refresh_token_fingerprint()
+    if not fingerprint:
+        raise ValueError("EBAY_REFRESH_TOKEN is not configured.")
+    issued_at = _ebay_refresh_token_issued_at()
+    token = seller_access_token()
+    now = utc_now()
+    results = []
+    for scope, (path, params) in EBAY_SCOPE_PROBES.items():
+        http_status = None
+        error_category = ""
+        try:
+            response = requests.get(
+                f"{_api_base_url()}{path}",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                params=params,
+                timeout=8.0,
+            )
+            http_status = response.status_code
+            status = "verified" if http_status == 200 else "failed"
+            if status == "failed":
+                error_category = "insufficient_scope" if http_status == 403 else "request_failed"
+        except requests.Timeout:
+            status = "failed"
+            error_category = "timeout"
+        except requests.RequestException:
+            status = "failed"
+            error_category = "transport"
+        with connect() as db:
+            db.execute(
+                """INSERT INTO ebay_scope_proofs(scope,status,probe,http_status,checked_at,token_fingerprint,token_issued_at,error_category)
+                   VALUES(?,?,?,?,?,?,?,?)
+                   ON CONFLICT(scope) DO UPDATE SET status=excluded.status,probe=excluded.probe,http_status=excluded.http_status,
+                       checked_at=excluded.checked_at,token_fingerprint=excluded.token_fingerprint,
+                       token_issued_at=excluded.token_issued_at,error_category=excluded.error_category""",
+                (scope, status, path, http_status, now, fingerprint, issued_at or None, error_category),
+            )
+        results.append({"scope": scope, "status": status, "probe": path, "httpStatus": http_status, "checkedAt": now})
+    return {**ebay_scope_status(), "scopeProofs": results}
 
 
 def record_analysis_run(
@@ -1917,4 +2041,4 @@ def _review_note(item: dict[str, Any], findings: list[dict[str, Any]], taxonomy:
     return f"{existing} {addition}".strip()[:900]
 
 
-__all__ = ["dashboard", "import_listings", "list_listings", "audit_all", "recommendations", "recommendations_page", "get_recommendation", "explain_recommendation", "approve_recommendation", "bulk_approve", "set_recommendation_status", "apply_action", "rollback_action", "history", "settings", "update_settings", "record_analysis_run"]
+__all__ = ["dashboard", "import_listings", "list_listings", "audit_all", "recommendations", "recommendations_page", "get_recommendation", "explain_recommendation", "approve_recommendation", "bulk_approve", "set_recommendation_status", "apply_action", "rollback_action", "history", "settings", "update_settings", "record_analysis_run", "ebay_scope_status", "probe_ebay_scopes"]

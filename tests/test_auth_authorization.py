@@ -38,6 +38,10 @@ class JwtVerificationTests(unittest.TestCase):
                 response = client.get(path)
                 self.assertEqual(response.status_code, 401)
 
+    def test_scope_probe_requires_authentication(self):
+        response = hht_app.app.test_client().post("/api/ebay/oauth/probe-scopes")
+        self.assertEqual(response.status_code, 401)
+
     def _assert_invalid_token_is_401(self, error):
         with hht_app.app.test_request_context(
             "/api/commerce/actions/action/apply",

@@ -203,6 +203,44 @@ class CommerceAgentTests(unittest.TestCase):
         entry = commerce_agent.history()[0]
         self.assertTrue(entry["rollbackEligible"])
 
+    def test_scope_probes_are_get_only_and_prove_all_required_scopes(self):
+        class Response:
+            status_code = 200
+
+        with mock.patch.dict(os.environ, {
+            "EBAY_REFRESH_TOKEN": "new-refresh-token",
+            "EBAY_REFRESH_TOKEN_ISSUED_AT": "2026-09-29T00:00:00+00:00",
+        }), mock.patch.object(commerce_agent, "seller_access_token", return_value="access-token"), mock.patch.object(
+            commerce_agent.requests, "get", return_value=Response()
+        ) as get:
+            result = commerce_agent.probe_ebay_scopes()
+
+        self.assertEqual(result["grantedScopesStatus"], "verified")
+        self.assertEqual({proof["scope"] for proof in result["scopeProofs"]}, set(commerce_agent.EBAY_SCOPE_PROBES))
+        self.assertEqual(get.call_count, 3)
+        self.assertTrue(all(call.args[0].startswith("https://api.ebay.com/") for call in get.call_args_list))
+        self.assertTrue(all(call.kwargs["params"].get("limit", 1) == 1 for call in get.call_args_list))
+
+    def test_scope_proofs_become_unknown_after_refresh_token_replacement(self):
+        class Response:
+            status_code = 200
+
+        with mock.patch.dict(os.environ, {
+            "EBAY_REFRESH_TOKEN": "first-refresh-token",
+            "EBAY_REFRESH_TOKEN_ISSUED_AT": "2026-09-29T00:00:00+00:00",
+        }), mock.patch.object(commerce_agent, "seller_access_token", return_value="access-token"), mock.patch.object(
+            commerce_agent.requests, "get", return_value=Response()
+        ):
+            commerce_agent.probe_ebay_scopes()
+        with mock.patch.dict(os.environ, {
+            "EBAY_REFRESH_TOKEN": "replacement-refresh-token",
+            "EBAY_REFRESH_TOKEN_ISSUED_AT": "2026-09-30T00:00:00+00:00",
+        }):
+            status = commerce_agent.ebay_scope_status()
+
+        self.assertEqual(status["grantedScopesStatus"], "unknown")
+        self.assertTrue(all(proof["status"] == "unknown" for proof in status["scopeProofs"]))
+
     def test_superseded_approved_action_is_rejected_without_ebay_call(self):
         commerce_agent.audit_all()
         recommendation = commerce_agent.recommendations()[0]

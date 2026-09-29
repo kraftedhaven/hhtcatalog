@@ -46,6 +46,8 @@ def _requires_seller_auth() -> bool:
         return False
     if path in {"/api/commerce/rotation/approve", "/api/commerce/recommendations/bulk-approve", "/api/ebay/drafts", "/api/ebay/draft-feed"}:
         return True
+    if path == "/api/ebay/oauth/probe-scopes":
+        return True
     if path.startswith("/api/commerce/actions/") and path.endswith(("/apply", "/rollback")):
         return True
     if path.startswith("/api/commerce/recommendations/") and request.method == "POST":
@@ -299,7 +301,17 @@ def ebay_oauth_status():
         seller_access_token()
     except EbayAuthError as exc:
         return jsonify({"configured": False, "provider_errors": [exc.to_public()]}), exc.status_code
-    return jsonify({"configured": True, "provider": "ebay_oauth", "requiredScopes": required_user_scopes(), "grantedScopesStatus": "unknown", "requiresReauthorization": reauthorization_required(), "reauthorizationMessage": "Reconnect eBay after enabling Analytics/Fulfillment scopes; an existing refresh token cannot gain new scopes." if reauthorization_required() else "The token is configured, but eBay does not expose its granted scope list through this status check. Reauthorize if an Analytics or Fulfillment call returns 401/403."})
+    return jsonify({"configured": True, "provider": "ebay_oauth", "requiredScopes": required_user_scopes(), **commerce_agent.ebay_scope_status(), "requiresReauthorization": reauthorization_required(), "reauthorizationMessage": "Reconnect eBay and set EBAY_REFRESH_TOKEN_ISSUED_AT before running the authenticated scope probes."})
+
+
+@app.route("/api/ebay/oauth/probe-scopes", methods=["POST"])
+def ebay_oauth_probe_scopes():
+    try:
+        return jsonify({"result": commerce_agent.probe_ebay_scopes()})
+    except EbayAuthError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/api/ebay/categories", methods=["GET"])
