@@ -254,14 +254,29 @@ def seller_recovery_metrics(recommendations: list[dict[str, Any]], listings: lis
 
 def _pricing_result(source: str, recommended: float, current: float, confidence: str, sample_size: int, low: float, high: float, reason: str, query: str) -> dict[str, Any]:
     change = round(((recommended - current) / current) * 100, 1) if current > 0 else None
+    low_value = round(low or recommended, 2)
+    high_value = round(high or recommended, 2)
+    target_value = round(recommended, 2)
+    if source in {"exact_used_sold", "similar_used_sold"}:
+        quick_value = min(low_value, round(target_value * 0.9, 2))
+        premium_value = high_value
+    elif source == "active_comparable":
+        quick_value = round(target_value * 0.85, 2)
+        premium_value = high_value
+    else:
+        quick_value = round(target_value * 0.9, 2)
+        premium_value = round(target_value * 1.1, 2)
     return {
         "status": "ok",
-        "recommendedPrice": round(recommended, 2),
+        "recommendedPrice": target_value,
+        "quickSalePrice": quick_value,
+        "targetPrice": target_value,
+        "premiumPrice": premium_value,
         "pricingSource": source,
         "pricingConfidence": confidence,
         "sampleSize": sample_size,
-        "lowPrice": round(low or recommended, 2),
-        "highPrice": round(high or recommended, 2),
+        "lowPrice": low_value,
+        "highPrice": high_value,
         "currentPrice": round(current, 2),
         "recommendedChangePct": change,
         "adjustmentReason": reason,

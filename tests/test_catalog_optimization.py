@@ -211,8 +211,20 @@ class CatalogOptimizationTests(unittest.TestCase):
         preserved = optimize_title({"title": "Seller Custom Title", "brand": "Coach", "type": "Bag", "sellerEditedTitle": True})
         candidate = optimize_title({"title": "Bag", "brand": "Coach", "model": "Willow", "type": "Handbag", "style": "Tote", "theme": "Classic", "mat": "Leather", "color": "Brown", "pat": "Signature", "size": "Large"})
         self.assertFalse(preserved["changed"])
+        self.assertEqual(preserved["candidates"], {})
         self.assertLessEqual(candidate["length"], 80)
         self.assertIn("Coach", candidate["title"])
+        self.assertEqual(set(candidate["candidates"]), {"search_first", "balanced", "quick_sale"})
+        self.assertTrue(all(value["length"] <= 80 for value in candidate["candidates"].values()))
+
+    def test_pricing_result_exposes_three_advisory_tiers(self):
+        result = market_metrics.pricing_recommendation(
+            {"price": 100},
+            sold_summary={"status": "ok", "pricingSource": "exact_used_sold", "medianSoldPrice": 80, "lowSoldPrice": 70, "highSoldPrice": 95, "sampleSize": 4, "query": "Coach bag"},
+        )
+        self.assertEqual(result["targetPrice"], 80.0)
+        self.assertEqual(result["quickSalePrice"], 70.0)
+        self.assertEqual(result["premiumPrice"], 95.0)
 
 
 class CatalogOptimizationActionabilityTests(unittest.TestCase):
