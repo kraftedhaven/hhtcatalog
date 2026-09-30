@@ -557,6 +557,25 @@
         scheduleAutoDraftUpload();
     }
 
+    function retryFailedDraftBatch() {
+        const submitted = queue.filter((entry) => entry.ebayFeedTaskId);
+        if (!submitted.length) {
+            error = "There is no submitted Seller Hub batch to retry.";
+            return;
+        }
+        const taskIds = [...new Set(submitted.map((entry) => entry.ebayFeedTaskId))];
+        const taskLabel = taskIds.join(", ");
+        const confirmed = window.confirm(
+            `The selected Seller Hub task(s) ${taskLabel} must already be confirmed failed in eBay's result file. Clear the task marker and make these approved rows sendable again? This does not submit or publish anything.`
+        );
+        if (!confirmed) return;
+        queue = queue.map((entry) => entry.ebayFeedTaskId
+            ? { ...entry, ebayFeedTaskId: undefined, ebayDraftStatus: undefined }
+            : entry);
+        error = "";
+        status = `Failed Seller Hub batch ${taskLabel} cleared. Review the approved rows, then send the corrected draft CSV once.`;
+    }
+
     function scheduleAutoDraftUpload() {
         if (!autoDraftEnabled || autoDraftInFlight || draftLoading || approvedDraftQueue().length < 5) return;
         setTimeout(() => {
@@ -1021,7 +1040,7 @@
             {:else}
                 {#each queue as queued, index}
                     <div class="queue-row">
-                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)} · {queued.approved ? "Approved" : "Needs approval"}{queued.ebayFeedTaskId ? ` / feed task ${queued.ebayFeedTaskId}` : ""}</span></div>
+                        <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)} · {queued.approved ? "Approved" : "Needs approval"}{queued.ebayFeedTaskId ? ` / feed task ${queued.ebayFeedTaskId} (${queued.ebayDraftStatus || "submitted"})` : ""}</span></div>
                         {#if !queued.approved}<button type="button" on:click={() => approveQueued(index)}>Approve</button>{/if}
                         <button type="button" on:click={() => editQueued(index)}>Edit</button>
                         <button type="button" on:click={() => queue = queue.filter((_, i) => i !== index)}>Remove</button>
@@ -1029,6 +1048,9 @@
                 {/each}
                 <div class="actions">
                     <button class="primary" disabled={draftLoading || approvedDraftQueue().length < 5} on:click={() => sendDraftQueue()}>{draftLoading ? "Sending..." : "Send approved drafts now (5+ items)"}</button>
+                    {#if queue.some((entry) => entry.ebayFeedTaskId)}
+                        <button type="button" on:click={retryFailedDraftBatch}>Retry confirmed failed batch</button>
+                    {/if}
                     <button on:click={exportDraftQueue}>Download Seller Hub Draft CSV</button>
                     <button on:click={exportQueue}>Download legacy File Exchange CSV</button>
                     <button on:click={backupQueue}>Download JSON backup</button>
