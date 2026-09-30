@@ -1189,6 +1189,21 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(response.get_json()["result"]["taskId"], "task-123")
         upload.assert_called_once()
 
+    def test_draft_feed_endpoint_is_not_blocked_by_live_mutation_flag(self):
+        def authenticated():
+            app.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        with mock.patch.dict(os.environ, {"EBAY_MUTATIONS_ENABLED": "false"}), mock.patch(
+            "app.authenticate_request", side_effect=authenticated
+        ), mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}), mock.patch(
+            "app.upload_seller_hub_draft_csv", return_value={"status": "submitted", "taskId": "task-draft"}
+        ) as upload:
+            response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["result"]["taskId"], "task-draft")
+        upload.assert_called_once()
+
     def test_offer_verify_and_publish_endpoints_are_removed(self):
         self.assertEqual(self.client.get("/api/ebay/offers/offer-123").status_code, 404)
         self.assertEqual(self.client.post("/api/ebay/offers/offer-123/publish", json={"confirmPublish": True}).status_code, 404)

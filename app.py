@@ -356,8 +356,9 @@ def ebay_offer_publish_removed(_removed):
 
 @app.route("/api/ebay/draft-feed", methods=["POST"])
 def ebay_draft_feed():
-    if not commerce_agent.ebay_mutations_enabled():
-        return jsonify({"error": "eBay listing mutations are disabled pending controlled-pilot authorization."}), 403
+    # Seller Hub draft-feed submission is intentionally separate from live
+    # listing mutations. It creates unpublished draft-processing jobs; the
+    # global flag must not block this approval-only FX_LISTING workflow.
     body = request.get_json(silent=True) or {}
     items = body.get("items") or body.get("queue") or []
     if not isinstance(items, list):
