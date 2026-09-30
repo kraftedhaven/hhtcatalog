@@ -140,6 +140,15 @@
         return "No price evidence available";
     }
 
+    function titleCandidates(entry) {
+        return Object.entries(entry?.listing?.titleCandidates || {});
+    }
+
+    function money(value) {
+        const amount = Number(value);
+        return Number.isFinite(amount) && amount > 0 ? `$${amount.toFixed(2)}` : "Not available";
+    }
+
     function demandSummary(entry) {
         const score = entry?.demand?.score;
         if (score === undefined || score === null || score === "") {
@@ -770,6 +779,33 @@
                         <div><span>Confidence</span><strong>{entry.confidence}</strong></div>
                         <div><span>Seller action</span><strong>{entry.risk === "high" ? "Review manually" : "Approve only if evidence is clear"}</strong></div>
                     </div>
+                    {#if titleCandidates(entry).length}
+                        <details class="card-details">
+                            <summary>Compare title candidates ({titleCandidates(entry).length})</summary>
+                            <div class="advisory-grid">
+                                {#each titleCandidates(entry) as candidate}
+                                    <div>
+                                        <span>{candidate[0].replaceAll("_", " ")}</span>
+                                        <strong>{candidate[1].title}</strong>
+                                        <small>{candidate[1].length}/80 characters · {candidate[1].confidence} confidence · {candidate[1].attributesUsed?.join(", ")}</small>
+                                    </div>
+                                {/each}
+                            </div>
+                            <p class="help meta-note">Candidates use only stored listing attributes and evidence. Select or edit one yourself before approval; HHT does not automatically replace the current title.</p>
+                        </details>
+                    {/if}
+                    {#if entry.soldPricing?.status === "ok"}
+                        <details class="card-details">
+                            <summary>Compare pricing tiers</summary>
+                            <div class="advisory-grid">
+                                <div><span>Quick sale</span><strong>{money(entry.soldPricing.quickSalePrice)}</strong></div>
+                                <div><span>Target</span><strong>{money(entry.soldPricing.targetPrice || entry.soldPricing.recommendedPrice)}</strong></div>
+                                <div><span>Premium</span><strong>{money(entry.soldPricing.premiumPrice)}</strong></div>
+                                <div><span>Evidence</span><strong>{pricingSource(entry)}</strong><small>{entry.soldPricing.sampleSize || 0} comparable item{Number(entry.soldPricing.sampleSize || 0) === 1 ? "" : "s"} · {entry.soldPricing.pricingConfidence || "low"} confidence</small></div>
+                            </div>
+                            <p class="help meta-note">The target price is the recommendation currently eligible for seller review. Tier prices are advisory and never update eBay automatically.</p>
+                        </details>
+                    {/if}
                     {#if proposedEntries(entry).length}
                         <details class="card-details">
                             <summary>Show proposed changes ({proposedEntries(entry).length})</summary>

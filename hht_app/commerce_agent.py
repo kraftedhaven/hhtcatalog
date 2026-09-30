@@ -1666,7 +1666,7 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
         classification = "Needs Review"
     confidence = "low" if note_only_review else "high" if findings and all(f["field"] not in {"cat", "price"} for f in findings) else "medium"
     reason = "; ".join(f["message"] for f in findings) or "No material listing quality issue was identified from the imported data."
-    return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) or note_only_review else "low", "evidence": evidence_summary(item), "taxonomy": taxonomy, "soldPricing": pricing, "soldComparableSummary": sold, "demand": demand}
+    return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) or note_only_review else "low", "evidence": evidence_summary(item), "taxonomy": taxonomy, "soldPricing": pricing, "soldComparableSummary": sold, "demand": demand, "titleCandidates": title_plan.get("candidates", {})}
 
 
 def audit_all(seller_id: str | None = None) -> dict[str, Any]:
@@ -1693,7 +1693,7 @@ def audit_all(seller_id: str | None = None) -> dict[str, Any]:
             version_row = db.execute("SELECT COALESCE(MAX(version_number), 0) AS version FROM recommendations WHERE listing_row_id=?", (row["id"],)).fetchone()
             version_number = int(version_row["version"] if version_row else 0) + 1
             recommendation_id = str(uuid.uuid4())
-            stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "soldComparableSummary": audit["soldComparableSummary"], "demandMetrics": audit["demand"]}
+            stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "soldComparableSummary": audit["soldComparableSummary"], "demandMetrics": audit["demand"], "titleCandidates": audit["titleCandidates"]}
             db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at,version_number,is_current,seller_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now, version_number, True if db.postgres else 1, row["seller_id"] if "seller_id" in row.keys() else seller_id))
             results.append({"recommendationId": recommendation_id, "listing": stored_current, **audit, "status": "Pending", "version": version_number, "isCurrent": True})
     return {"count": len(results), "results": results}
