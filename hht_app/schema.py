@@ -33,7 +33,10 @@ HEADERS = [
 ]
 
 EBAY_DRAFT_COLUMNS = [
-    "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)",
+    # Seller Hub Reports draft templates use the plain Action header. The
+    # decorated Action(SiteID=...) header belongs to legacy File Exchange and
+    # triggers BAF.Error.5 in Seller Hub draft-feed processing.
+    "Action",
     "Custom label (SKU)",
     "Category ID",
     "Title",
@@ -260,7 +263,7 @@ def build_ebay_draft_csv_row(item: dict[str, Any], sku: str = "") -> dict[str, A
     listing = normalize_listing(item)
     price = _price(listing.get("price"))
     return {
-        "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)": "Draft",
+        "Action": "Draft",
         "Custom label (SKU)": _text(sku or item.get("sku") or item.get("customLabel")),
         "Category ID": _text(listing.get("cat")),
         "Title": _text(listing.get("title")),

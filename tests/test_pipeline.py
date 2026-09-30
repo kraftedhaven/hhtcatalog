@@ -1105,7 +1105,7 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(calls[1][2]["data"]["name"], "file")
         self.assertEqual(calls[1][2]["data"]["type"], "form-data")
         uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
-        self.assertEqual(next(csv.DictReader(io.StringIO(uploaded_csv)))["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"], "Draft")
+        self.assertEqual(next(csv.DictReader(io.StringIO(uploaded_csv)))["Action"], "Draft")
 
     def test_seller_hub_draft_feed_ignores_stale_fx_draft_setting(self):
         with env(EBAY_SELLER_HUB_DRAFT_FEED_TYPE="FX_DRAFT"):
@@ -1136,7 +1136,7 @@ class MergePipelineTests(unittest.TestCase):
         uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
         rows = list(csv.DictReader(io.StringIO(uploaded_csv)))
         self.assertEqual(len(rows), 5)
-        self.assertEqual({row["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"] for row in rows}, {"Draft"})
+        self.assertEqual({row["Action"] for row in rows}, {"Draft"})
 
     def test_seller_hub_draft_feed_deduplicates_by_sku_before_upload(self):
         calls = []
@@ -1468,7 +1468,7 @@ class MergePipelineTests(unittest.TestCase):
         text = csv_from_draft_row(row)
         rows = list(csv.DictReader(io.StringIO(text)))
         self.assertEqual(list(csv.reader(io.StringIO(text)))[0], EBAY_DRAFT_COLUMNS)
-        self.assertEqual(rows[0]["Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"], "Draft")
+        self.assertEqual(rows[0]["Action"], "Draft")
         self.assertEqual(rows[0]["Custom label (SKU)"], "LEVIS-123")
         self.assertEqual(rows[0]["Category ID"], "57988")
         self.assertEqual(rows[0]["Condition ID"], "USED")
