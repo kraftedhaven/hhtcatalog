@@ -55,6 +55,7 @@ def optimize_title(item: dict[str, Any], *, category_name: str = "") -> dict[str
     candidate = fit_title(re.sub(r"\s+", " ", " ".join(parts)).strip(), values.get("brand", ""))
     changed = bool(candidate and candidate.casefold() != current.casefold())
     confidence = "medium" if changed else "low"
+    confirmed_keywords = [value for value in values.values() if value]
     return {
         "title": candidate if changed else "",
         "candidates": candidates,
@@ -62,4 +63,11 @@ def optimize_title(item: dict[str, Any], *, category_name: str = "") -> dict[str
         "length": len(candidate),
         "confidence": confidence,
         "reason": "Uses confirmed/imported attributes in a category-aware order; seller must verify inferred fields.",
+        "seoMetadata": {
+            "confirmedKeywords": confirmed_keywords,
+            "keywordCoverage": round(sum(1 for value in confirmed_keywords if value.casefold() in candidate.casefold()) / len(confirmed_keywords), 2) if confirmed_keywords else 0.0,
+            "titleLimit": 80,
+            "source": "stored listing attributes",
+            "note": "Transparent keyword coverage only; eBay's private ranking algorithm is not exposed by its APIs.",
+        },
     }

@@ -216,6 +216,8 @@ class CatalogOptimizationTests(unittest.TestCase):
         self.assertIn("Coach", candidate["title"])
         self.assertEqual(set(candidate["candidates"]), {"search_first", "balanced", "quick_sale"})
         self.assertTrue(all(value["length"] <= 80 for value in candidate["candidates"].values()))
+        self.assertEqual(candidate["seoMetadata"]["titleLimit"], 80)
+        self.assertIn("Coach", candidate["seoMetadata"]["confirmedKeywords"])
 
     def test_pricing_result_exposes_three_advisory_tiers(self):
         result = market_metrics.pricing_recommendation(
