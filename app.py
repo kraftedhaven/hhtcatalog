@@ -207,20 +207,28 @@ def photo_upload():
     listing_key = str(request.form.get("listingKey") or "unassigned")[:80]
     assets = []
     failures = []
+    results = []
     for file in files[:12]:
+        filename = file.filename or "photo.jpg"
         try:
-            assets.append(store_photo(
+            asset = store_photo(
                 seller_id=str(g.seller_id),
                 listing_key=listing_key,
-                filename=file.filename or "photo.jpg",
+                filename=filename,
                 mime_type=file.mimetype or "",
                 data=file.read(),
-            ))
+            )
+            assets.append(asset)
+            results.append({"filename": filename, "status": "stored", "asset": asset})
         except PhotoStorageError:
-            failures.append({"filename": file.filename or "photo.jpg", "error": "Photo could not be saved.", "category": "storage"})
+            failure = {"filename": filename, "error": "Photo could not be saved.", "category": "storage"}
+            failures.append(failure)
+            results.append({"filename": filename, "status": "error", **failure})
         except Exception:
-            failures.append({"filename": file.filename or "photo.jpg", "error": "Photo could not be saved.", "category": "storage"})
-    result = {"count": len(assets), "assets": assets, "failures": failures}
+            failure = {"filename": filename, "error": "Photo could not be saved.", "category": "storage"}
+            failures.append(failure)
+            results.append({"filename": filename, "status": "error", **failure})
+    result = {"count": len(assets), "assets": assets, "files": results, "failures": failures}
     return jsonify({"result": result}), 207 if failures else 201
 
 

@@ -25,7 +25,7 @@ class PhotoStorageError(RuntimeError):
         self.category = category
 
 
-ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"}
 MAX_ORIGINAL_BYTES = int(os.environ.get("PHOTO_MAX_BYTES", str(12 * 1024 * 1024)))
 MAX_DIMENSION = int(os.environ.get("PHOTO_MAX_DIMENSION", "1800"))
 
@@ -36,23 +36,27 @@ def storage_provider() -> str:
 
 def storage_status() -> dict[str, Any]:
     provider = storage_provider()
-    configured = False
-    if provider == "supabase":
-        configured = bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY") and os.environ.get("PHOTO_STORAGE_BUCKET"))
-    elif provider == "ibm_cos":
-        configured = bool(os.environ.get("IBM_COS_ENDPOINT") and os.environ.get("IBM_COS_BUCKET") and os.environ.get("IBM_COS_ACCESS_KEY_ID") and os.environ.get("IBM_COS_SECRET_ACCESS_KEY"))
+    configured = _provider_configured(provider)
     return {"provider": provider, "configured": configured, "maxBytes": MAX_ORIGINAL_BYTES, "maxDimension": MAX_DIMENSION}
+
+
+def _provider_configured(provider: str) -> bool:
+    if provider == "supabase":
+        return bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY") and os.environ.get("PHOTO_STORAGE_BUCKET"))
+    if provider == "ibm_cos":
+        return bool(os.environ.get("IBM_COS_ENDPOINT") and os.environ.get("IBM_COS_BUCKET") and os.environ.get("IBM_COS_ACCESS_KEY_ID") and os.environ.get("IBM_COS_SECRET_ACCESS_KEY"))
+    return False
 
 
 def store_photo(*, seller_id: str, filename: str, mime_type: str, data: bytes, listing_key: str = "unassigned") -> dict[str, Any]:
     if not seller_id:
         raise PhotoStorageError("Seller ownership is required for photo storage.", 403, "ownership")
     if mime_type not in ALLOWED_TYPES:
-        raise PhotoStorageError("Unsupported image type. Use JPEG, PNG, WebP, or GIF.", 415, "invalid_type")
+        raise PhotoStorageError("Unsupported image type. Use JPEG, PNG, WebP, GIF, or HEIC.", 415, "invalid_type")
     if not data or len(data) > MAX_ORIGINAL_BYTES:
         raise PhotoStorageError("Photo is empty or exceeds the configured size limit.", 413, "payload_too_large")
     provider = storage_provider()
-    if provider not in {"supabase", "ibm_cos"} or not storage_status()["configured"]:
+    if provider not in {"supabase", "ibm_cos"} or not _provider_configured(provider):
         raise PhotoStorageError("Persistent photo storage is not configured. Set PHOTO_STORAGE_PROVIDER and its provider credentials.", 503, "configuration")
 
     safe_listing = _safe_segment(listing_key)
@@ -62,28 +66,40 @@ def store_photo(*, seller_id: str, filename: str, mime_type: str, data: bytes, l
     derivative_key = f"{seller_id}/{safe_listing}/{asset_id}/ebay.webp"
     checksum = hashlib.sha256(data).hexdigest()
 
-    if provider == "supabase":
-        _supabase_upload(original_key, data, mime_type)
-        _supabase_upload(derivative_key, derivative, derivative_type)
-        public_url = _supabase_signed_url(derivative_key)
-    else:
-        _ibm_upload(original_key, data, mime_type)
-        _ibm_upload(derivative_key, derivative, derivative_type)
-        public_url = _ibm_signed_url(derivative_key)
+    uploaded_keys = []
+    try:
+        if provider == "supabase":
+            _supabase_upload(original_key, data, mime_type)
+            uploaded_keys.append(original_key)
+            _supabase_upload(derivative_key, derivative, derivative_type)
+            uploaded_keys.append(derivative_key)
+            public_url = _supabase_signed_url(derivative_key)
+        else:
+            _ibm_upload(original_key, data, mime_type)
+            uploaded_keys.append(original_key)
+            _ibm_upload(derivative_key, derivative, derivative_type)
+            uploaded_keys.append(derivative_key)
+            public_url = _ibm_signed_url(derivative_key)
 
-    now = datetime.now(timezone.utc).isoformat()
-    init_db()
-    with connect() as db:
-        db.execute(
-            """INSERT INTO photo_assets(
-                id,seller_id,listing_key,original_key,derivative_key,provider,
-                original_mime,derivative_mime,original_bytes,derivative_bytes,
-                checksum_sha256,ebay_url,url_expires_at,created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (asset_id, seller_id, safe_listing, original_key, derivative_key, provider,
-             mime_type, derivative_type, len(data), len(derivative), checksum,
-             public_url, _url_expiry().isoformat(), now),
-        )
+        now = datetime.now(timezone.utc).isoformat()
+        init_db()
+        with connect() as db:
+            db.execute(
+                """INSERT INTO photo_assets(
+                    id,seller_id,listing_key,original_key,derivative_key,provider,
+                    original_mime,derivative_mime,original_bytes,derivative_bytes,
+                    checksum_sha256,ebay_url,url_expires_at,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (asset_id, seller_id, safe_listing, original_key, derivative_key, provider,
+                 mime_type, derivative_type, len(data), len(derivative), checksum,
+                 public_url, _url_expiry().isoformat(), now),
+            )
+    except Exception as exc:
+        _delete_uploaded_objects(provider, uploaded_keys)
+        if isinstance(exc, PhotoStorageError):
+            raise
+        raise PhotoStorageError("Photo asset could not be recorded.", 502, "metadata") from exc
+
     return {
         "assetId": asset_id,
         "provider": provider,
@@ -96,8 +112,23 @@ def store_photo(*, seller_id: str, filename: str, mime_type: str, data: bytes, l
     }
 
 
+def _delete_uploaded_objects(provider: str, keys: list[str]) -> None:
+    for key in reversed(keys):
+        try:
+            if provider == "supabase":
+                _supabase_delete(key)
+            else:
+                _ibm_delete(key)
+        except Exception:
+            pass
+
+
 def _compress(data: bytes, mime_type: str) -> tuple[bytes, str]:
     try:
+        if mime_type in {"image/heic", "image/heif"}:
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
         image = Image.open(io.BytesIO(data))
         image = ImageOps.exif_transpose(image)
         image.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.Resampling.LANCZOS)
@@ -122,6 +153,16 @@ def _supabase_upload(key: str, data: bytes, content_type: str) -> None:
         raise PhotoStorageError("Photo storage request failed.", 502, "transport") from exc
     if response.status_code not in {200, 201}:
         raise PhotoStorageError("Supabase Storage rejected the photo upload.", response.status_code if response.status_code < 500 else 502, "upload")
+
+
+def _supabase_delete(key: str) -> None:
+    url = f"{os.environ['SUPABASE_URL'].rstrip('/')}/storage/v1/object/{os.environ['PHOTO_STORAGE_BUCKET'].strip('/')}"
+    try:
+        response = requests.delete(url, headers=_supabase_headers("application/json"), json={"prefixes": [key]}, timeout=10)
+    except requests.RequestException as exc:
+        raise PhotoStorageError("Supabase Storage could not remove a partial photo upload.", 502, "cleanup") from exc
+    if response.status_code not in {200, 204}:
+        raise PhotoStorageError("Supabase Storage could not remove a partial photo upload.", 502, "cleanup")
 
 
 def _supabase_signed_url(key: str) -> str:
@@ -159,6 +200,13 @@ def _ibm_upload(key: str, data: bytes, content_type: str) -> None:
         _ibm_client().put_object(Bucket=os.environ["IBM_COS_BUCKET"], Key=key, Body=data, ContentType=content_type)
     except Exception as exc:
         raise PhotoStorageError("IBM Cloud Object Storage rejected the photo upload.", 502, "upload") from exc
+
+
+def _ibm_delete(key: str) -> None:
+    try:
+        _ibm_client().delete_object(Bucket=os.environ["IBM_COS_BUCKET"], Key=key)
+    except Exception as exc:
+        raise PhotoStorageError("IBM Cloud Object Storage could not remove a partial photo upload.", 502, "cleanup") from exc
 
 
 def _ibm_signed_url(key: str) -> str:
