@@ -219,7 +219,7 @@ def photo_upload():
         except PhotoStorageError as exc:
             failures.append({"filename": file.filename or "photo.jpg", "error": str(exc), "category": exc.category})
         except Exception:
-            app.logger.exception("Unexpected photo storage failure")
+            app.logger.error("Unexpected photo storage failure")
             failures.append({"filename": file.filename or "photo.jpg", "error": "Photo could not be saved.", "category": "storage"})
     result = {"count": len(assets), "assets": assets, "failures": failures}
     return jsonify({"result": result}), 207 if failures else 201
