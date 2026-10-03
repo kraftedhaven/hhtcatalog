@@ -52,7 +52,7 @@ def store_photo(*, seller_id: str, filename: str, mime_type: str, data: bytes, l
     if not data or len(data) > MAX_ORIGINAL_BYTES:
         raise PhotoStorageError("Photo is empty or exceeds the configured size limit.", 413, "payload_too_large")
     provider = storage_provider()
-    if provider not in {"supabase", "ibm_cos"}:
+    if provider not in {"supabase", "ibm_cos"} or not storage_status()["configured"]:
         raise PhotoStorageError("Persistent photo storage is not configured. Set PHOTO_STORAGE_PROVIDER and its provider credentials.", 503, "configuration")
 
     safe_listing = _safe_segment(listing_key)

@@ -1,9 +1,11 @@
 <script>
+    import { onMount } from "svelte";
     import "./app.css";
     import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, photoStorageStatus, sendDraftFeed, startNvidiaAnalysis, uploadListingPhotos } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
     import AuthGate from "$lib/components/AuthGate.svelte";
+    import { supabase } from "$lib/supabase";
 
     const emptyItem = EMPTY_ITEM;
     const breakGroundEnabled = String(import.meta.env.VITE_BREAKGROUND_ENABLED || "false").toLowerCase() === "true";
@@ -51,6 +53,7 @@
     let performanceSyncing = false;
     let rotationSelected = [];
     let photoStorage = { provider: "disabled", configured: false };
+    let photoStorageRequest = 0;
     let onboardingDismissed = loadFlag("hht_onboarding_dismissed");
 
     const canonicalAspectKeys = {
@@ -73,7 +76,27 @@
     $: visibleCategoryFields = categoryFields.filter((field) => !canonicalAspectKeys[aspectKey(field.name)]);
     $: selectedStagingPhotos = stagingPhotos.filter((photo) => selectedPhotoIds.includes(photo.id) && !photo.processed);
 
-    photoStorageStatus().then((result) => { photoStorage = result || photoStorage; }).catch(() => {});
+    onMount(() => {
+        if (!supabase) return;
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+            setTimeout(() => refreshPhotoStorage(session), 0);
+        });
+        return () => subscription.unsubscribe();
+    });
+
+    async function refreshPhotoStorage(session) {
+        const request = ++photoStorageRequest;
+        if (!session) {
+            photoStorage = { provider: "disabled", configured: false };
+            return;
+        }
+        try {
+            const result = await photoStorageStatus();
+            if (request === photoStorageRequest) photoStorage = result || photoStorage;
+        } catch {
+            if (request === photoStorageRequest) photoStorage = { provider: "disabled", configured: false };
+        }
+    }
 
     function load(key, fallback) {
         try {
@@ -227,7 +250,7 @@
                     const stored = await uploadListingPhotos(hostedFiles, item.sku || "unassigned");
                     const ebayUrls = (stored.assets || []).map((asset) => asset.ebayUrl).filter(Boolean);
                     if (ebayUrls.length) result = { ...result, pic: ebayUrls.join(" "), photoAssets: stored.assets };
-                    storageNotice = ` ${ebayUrls.length} eBay-ready photo URL${ebayUrls.length === 1 ? "" : "s"} saved.`;
+                    storageNotice = ` ${ebayUrls.length} eBay-ready photo URL${ebayUrls.length === 1 ? "" : "s"} saved.${stored.failures?.length ? ` ${stored.failures.length} photo${stored.failures.length === 1 ? "" : "s"} could not be saved.` : ""}`;
                 } catch (storageError) {
                     storageNotice = " Persistent photo storage was unavailable, so photos remain analysis-only.";
                 }
@@ -841,7 +864,7 @@
                 <div class="wide notice info onboarding-card">
                     <div class="section-heading"><div><strong>HHT quick start</strong><p>Group photos, analyze, review the eBay-aligned fields, then add only approved items to the Seller Hub draft queue.</p></div><button type="button" on:click={dismissOnboarding}>Dismiss</button></div>
                     <div class="onboarding-steps"><span class:complete={stagingPhotos.length > 0}>1. Group photos</span><span class:complete={item.title && item.cat && item.price}>2. Review listing</span><span class:complete={queue.length > 0}>3. Save to queue</span><span class:complete={queue.filter((entry) => entry.approved).length >= 5}>4. Send 5 approved drafts</span></div>
-                    <p class="help">BreakGround guidance is optional and receives only checklist events—not photos, tokens, or listing payloads.</p>
+                    <p class="help">BreakGround guidance is optional and stays in this app; no checklist events are currently transmitted.</p>
                 </div>
             {/if}
             <label class="field">
