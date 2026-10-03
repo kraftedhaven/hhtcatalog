@@ -219,7 +219,7 @@ def photo_upload():
             ))
             results.append({"filename": filename, "status": "stored", "asset": assets[-1]})
         except PhotoStorageError as exc:
-            results.append({"filename": filename, "status": "error", "error": str(exc), "category": exc.category})
+            results.append({"filename": filename, "status": "error", "error": "Photo could not be stored.", "category": exc.category})
     failures = [result for result in results if result["status"] == "error"]
     return jsonify({"result": {"count": len(assets), "assets": assets, "files": results, "failures": failures}}), 207 if failures else 201
 
