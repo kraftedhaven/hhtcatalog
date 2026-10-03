@@ -238,9 +238,9 @@ def _product_aspects(listing: dict[str, Any]) -> dict[str, list[str]]:
     explicit = listing.get("itemSpecifics") if isinstance(listing.get("itemSpecifics"), dict) else {}
     for label, value in explicit.items():
         cleaned_label = str(label or "").strip()[:80]
-        cleaned_value = _clean_aspect_value(value)
-        if cleaned_label and cleaned_value:
-            aspects[cleaned_label] = [cleaned_value]
+        cleaned_values = _clean_aspect_values(value)
+        if cleaned_label and cleaned_values:
+            aspects[cleaned_label] = cleaned_values
     for label, key in EBAY_ITEM_SPECIFICS:
         value = _clean_aspect_value(listing.get(key))
         if value and label not in aspects:
@@ -352,6 +352,16 @@ def _clean_aspect_value(value: Any) -> str:
     if not text or text.lower() in {"not visible", "[seller to add image urls]"}:
         return ""
     return text[:65]
+
+
+def _clean_aspect_values(value: Any) -> list[str]:
+    values = value if isinstance(value, list) else str(value or "").split("|")
+    result: list[str] = []
+    for entry in values:
+        cleaned = _clean_aspect_value(entry)
+        if cleaned and cleaned not in result:
+            result.append(cleaned)
+    return result[:20]
 
 
 def _required_env(name: str) -> str:
