@@ -14,6 +14,7 @@ from hht_app import commerce_agent
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
 from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
 from hht_app.photo_quality import assess_image
+from hht_app.photo_storage import PhotoStorageError, storage_status, store_photo
 from hht_app.supabase_auth import authenticate_request
 
 
@@ -39,6 +40,8 @@ PUBLIC_AUTH_PATHS = {"/", "/health", "/api/ebay/oauth/start", "/api/ebay/oauth/c
 def _requires_seller_auth() -> bool:
     path = request.path
     if path.startswith(("/api/commerce/", "/api/catalog/")):
+        return True
+    if path.startswith("/api/photos/") or path == "/api/photos":
         return True
     # Publishing is intentionally not implemented; its permanent 404 leaks no
     # seller data and cannot reach an eBay mutation function.
@@ -88,6 +91,7 @@ def health():
         "demo_mode": demo_mode(),
         "csv_columns": len(HEADERS),
         "seller_hub_feed_type": seller_hub_feed_type(),
+        "photo_storage": storage_status(),
     })
 
 
@@ -188,6 +192,32 @@ def photo_quality():
         except Exception:
             results.append({"filename": file.filename or "image", "status": "invalid", "score": 0, "issues": ["Photo quality check failed."]})
     return jsonify({"count": len(results), "results": results, "ready": all(item["status"] == "pass" for item in results)})
+
+
+@app.route("/api/photos/storage", methods=["GET"])
+def photo_storage_info():
+    return jsonify({"result": storage_status()})
+
+
+@app.route("/api/photos", methods=["POST"])
+def photo_upload():
+    files = request.files.getlist("file") or request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "Upload one or more image files."}), 400
+    listing_key = str(request.form.get("listingKey") or "unassigned")[:80]
+    assets = []
+    try:
+        for file in files[:12]:
+            assets.append(store_photo(
+                seller_id=str(g.seller_id),
+                listing_key=listing_key,
+                filename=file.filename or "photo.jpg",
+                mime_type=file.mimetype or "",
+                data=file.read(),
+            ))
+    except PhotoStorageError as exc:
+        return jsonify({"error": str(exc), "category": exc.category}), exc.status_code
+    return jsonify({"result": {"count": len(assets), "assets": assets}}), 201
 
 
 @app.route("/export/csv", methods=["POST"])

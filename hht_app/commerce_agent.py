@@ -77,8 +77,8 @@ def _ebay_refresh_token_issued_at() -> str:
     if parsed.tzinfo is None:
         return ""
     return parsed.astimezone(timezone.utc).isoformat()
-NVIDIA_HEAVY_ITEM_THRESHOLD = 30
-NVIDIA_HEAVY_PHOTO_THRESHOLD = 300
+NVIDIA_HEAVY_ITEM_THRESHOLD = int(os.environ.get("NVIDIA_ITEM_THRESHOLD", "30"))
+NVIDIA_HEAVY_PHOTO_THRESHOLD = int(os.environ.get("NVIDIA_PHOTO_THRESHOLD", "300"))
 NVIDIA_BATCH_MAX_PHOTOS = 500
 NVIDIA_BATCH_MAX_BYTES = 100 * 1024 * 1024
 ENRICHMENT_CHUNK_SIZE = 20
@@ -163,7 +163,7 @@ def connect() -> _Database:
 def init_db() -> None:
     with connect() as db:
         if db.postgres:
-            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs"}
+            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs", "photo_assets"}
             rows = db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(?)", (list(required),)).fetchall()
             present = {str(row["table_name"]) for row in rows}
             missing = sorted(required - present)
@@ -227,6 +227,14 @@ def init_db() -> None:
                 started_at TEXT NOT NULL, completed_at TEXT, status TEXT NOT NULL,
                 review_status TEXT NOT NULL DEFAULT 'pending',
                 error TEXT NOT NULL DEFAULT '', result_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS photo_assets (
+                id TEXT PRIMARY KEY, seller_id TEXT NOT NULL, listing_key TEXT NOT NULL DEFAULT 'unassigned',
+                original_key TEXT NOT NULL, derivative_key TEXT NOT NULL, provider TEXT NOT NULL,
+                original_mime TEXT NOT NULL, derivative_mime TEXT NOT NULL,
+                original_bytes INTEGER NOT NULL, derivative_bytes INTEGER NOT NULL,
+                checksum_sha256 TEXT NOT NULL, ebay_url TEXT NOT NULL, url_expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS enrichment_checkpoints (
