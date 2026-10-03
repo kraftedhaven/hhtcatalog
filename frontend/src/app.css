@@ -334,6 +334,30 @@ button.primary {
     margin-top: 12px;
 }
 
+.multi-select-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 6px;
+    max-height: 180px;
+    overflow: auto;
+    padding: 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fff;
+}
+
+.multi-select-options label {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.multi-select-options input {
+    margin-top: 2px;
+}
+
 .required {
     color: var(--red) !important;
     font-weight: 900;
