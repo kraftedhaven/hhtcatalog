@@ -1,7 +1,8 @@
 <script>
-    import { onMount } from "svelte";
+    import { createEventDispatcher, onMount } from "svelte";
     import { isSupabaseConfigured, supabase } from "$lib/supabase";
 
+    const dispatch = createEventDispatcher();
     let email = "";
     let password = "";
     let mode = "sign-in";
@@ -21,11 +22,13 @@
             session = data.session;
             error = sessionError?.message || "";
             loading = false;
+            dispatch("sessionChange", session);
         });
 
         const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
             session = nextSession;
             loading = false;
+            dispatch("sessionChange", session);
         });
 
         return () => listener.subscription.unsubscribe();
