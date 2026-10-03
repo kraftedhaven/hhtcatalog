@@ -51,6 +51,7 @@
     let performanceSyncing = false;
     let rotationSelected = [];
     let photoStorage = { provider: "disabled", configured: false };
+    let photoStorageRequest = 0;
     let onboardingDismissed = loadFlag("hht_onboarding_dismissed");
 
     const canonicalAspectKeys = {
@@ -73,7 +74,19 @@
     $: visibleCategoryFields = categoryFields.filter((field) => !canonicalAspectKeys[aspectKey(field.name)]);
     $: selectedStagingPhotos = stagingPhotos.filter((photo) => selectedPhotoIds.includes(photo.id) && !photo.processed);
 
-    photoStorageStatus().then((result) => { photoStorage = result || photoStorage; }).catch(() => {});
+    async function refreshPhotoStorage(event) {
+        const request = ++photoStorageRequest;
+        if (!event.detail) {
+            photoStorage = { provider: "disabled", configured: false };
+            return;
+        }
+        try {
+            const result = await photoStorageStatus();
+            if (request === photoStorageRequest) photoStorage = result || photoStorage;
+        } catch {
+            if (request === photoStorageRequest) photoStorage = { provider: "disabled", configured: false };
+        }
+    }
 
     function load(key, fallback) {
         try {
@@ -224,10 +237,11 @@
             let storageNotice = "";
             if (photoStorage.configured && hostedFiles.length) {
                 try {
-                    const stored = await uploadListingPhotos(hostedFiles, item.sku || "unassigned");
+                    const stored = await uploadListingPhotos(analysisFiles, item.sku || "unassigned");
                     const ebayUrls = (stored.assets || []).map((asset) => asset.ebayUrl).filter(Boolean);
                     if (ebayUrls.length) result = { ...result, pic: ebayUrls.join(" "), photoAssets: stored.assets };
-                    storageNotice = ` ${ebayUrls.length} eBay-ready photo URL${ebayUrls.length === 1 ? "" : "s"} saved.`;
+                    const failures = stored.failures || [];
+                    storageNotice = ` ${ebayUrls.length} eBay-ready photo URL${ebayUrls.length === 1 ? "" : "s"} saved.${failures.length ? ` ${failures.length} photo${failures.length === 1 ? "" : "s"} could not be stored.` : ""}`;
                 } catch (storageError) {
                     storageNotice = " Persistent photo storage was unavailable, so photos remain analysis-only.";
                 }
@@ -804,7 +818,7 @@
 
 </script>
 
-<AuthGate>
+<AuthGate on:sessionChange={refreshPhotoStorage}>
 <div class="shell">
     <header class="topbar">
         <div>
@@ -841,7 +855,7 @@
                 <div class="wide notice info onboarding-card">
                     <div class="section-heading"><div><strong>HHT quick start</strong><p>Group photos, analyze, review the eBay-aligned fields, then add only approved items to the Seller Hub draft queue.</p></div><button type="button" on:click={dismissOnboarding}>Dismiss</button></div>
                     <div class="onboarding-steps"><span class:complete={stagingPhotos.length > 0}>1. Group photos</span><span class:complete={item.title && item.cat && item.price}>2. Review listing</span><span class:complete={queue.length > 0}>3. Save to queue</span><span class:complete={queue.filter((entry) => entry.approved).length >= 5}>4. Send 5 approved drafts</span></div>
-                    <p class="help">BreakGround guidance is optional and receives only checklist events—not photos, tokens, or listing payloads.</p>
+                    <p class="help">BreakGround guidance is optional and the checklist is displayed locally; no checklist events are currently transmitted.</p>
                 </div>
             {/if}
             <label class="field">

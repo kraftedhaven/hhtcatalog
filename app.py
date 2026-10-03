@@ -206,18 +206,22 @@ def photo_upload():
         return jsonify({"error": "Upload one or more image files."}), 400
     listing_key = str(request.form.get("listingKey") or "unassigned")[:80]
     assets = []
-    try:
-        for file in files[:12]:
+    results = []
+    for file in files[:12]:
+        filename = file.filename or "photo.jpg"
+        try:
             assets.append(store_photo(
                 seller_id=str(g.seller_id),
                 listing_key=listing_key,
-                filename=file.filename or "photo.jpg",
+                filename=filename,
                 mime_type=file.mimetype or "",
                 data=file.read(),
             ))
-    except PhotoStorageError as exc:
-        return jsonify({"error": str(exc), "category": exc.category}), exc.status_code
-    return jsonify({"result": {"count": len(assets), "assets": assets}}), 201
+            results.append({"filename": filename, "status": "stored", "asset": assets[-1]})
+        except PhotoStorageError as exc:
+            results.append({"filename": filename, "status": "error", "error": "Photo could not be stored.", "category": exc.category})
+    failures = [result for result in results if result["status"] == "error"]
+    return jsonify({"result": {"count": len(assets), "assets": assets, "files": results, "failures": failures}}), 207 if failures else 201
 
 
 @app.route("/export/csv", methods=["POST"])
