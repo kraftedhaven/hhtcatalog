@@ -73,7 +73,7 @@ class PhotoStorageTests(unittest.TestCase):
         result = response.get_json()["result"]
         self.assertEqual(result["assets"], [stored_asset])
         self.assertEqual(result["failures"], [
-            {"filename": "two.jpg", "error": "Upload failed.", "category": "upload"},
+            {"filename": "two.jpg", "error": "Photo could not be saved.", "category": "storage"},
             {"filename": "three.jpg", "error": "Photo could not be saved.", "category": "storage"},
         ])
 

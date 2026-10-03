@@ -216,8 +216,8 @@ def photo_upload():
                 mime_type=file.mimetype or "",
                 data=file.read(),
             ))
-        except PhotoStorageError as exc:
-            failures.append({"filename": file.filename or "photo.jpg", "error": str(exc), "category": exc.category})
+        except PhotoStorageError:
+            failures.append({"filename": file.filename or "photo.jpg", "error": "Photo could not be saved.", "category": "storage"})
         except Exception:
             failures.append({"filename": file.filename or "photo.jpg", "error": "Photo could not be saved.", "category": "storage"})
     result = {"count": len(assets), "assets": assets, "failures": failures}
