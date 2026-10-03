@@ -218,8 +218,8 @@ def photo_upload():
                 data=file.read(),
             ))
             results.append({"filename": filename, "status": "stored", "asset": assets[-1]})
-        except PhotoStorageError as exc:
-            results.append({"filename": filename, "status": "error", "error": str(exc), "category": exc.category})
+        except PhotoStorageError:
+            results.append({"filename": filename, "status": "error", "error": "Photo could not be saved.", "category": "storage"})
         except Exception:
             results.append({"filename": filename, "status": "error", "error": "Photo could not be saved.", "category": "storage"})
     failures = [

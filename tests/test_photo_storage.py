@@ -123,7 +123,7 @@ class PhotoStorageTests(unittest.TestCase):
         self.assertEqual(body["count"], 1)
         self.assertEqual([entry["status"] for entry in body["files"]], ["stored", "error"])
         self.assertEqual(body["assets"][0]["assetId"], "saved")
-        self.assertEqual(body["failures"][0]["category"], "upload")
+        self.assertEqual(body["failures"][0]["category"], "storage")
 
     def test_rejects_unsupported_type_before_provider_call(self):
         with mock.patch.dict(os.environ, {"PHOTO_STORAGE_PROVIDER": "supabase"}, clear=True):
@@ -166,7 +166,7 @@ class PhotoStorageTests(unittest.TestCase):
         result = response.get_json()["result"]
         self.assertEqual(result["assets"], [stored_asset])
         self.assertEqual(result["failures"], [
-            {"filename": "two.jpg", "error": "Upload failed.", "category": "upload"},
+            {"filename": "two.jpg", "error": "Photo could not be saved.", "category": "storage"},
             {"filename": "three.jpg", "error": "Photo could not be saved.", "category": "storage"},
         ])
 
