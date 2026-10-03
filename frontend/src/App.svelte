@@ -1,11 +1,12 @@
 <script>
     import "./app.css";
-    import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, sendDraftFeed, startNvidiaAnalysis } from "$lib/api";
+    import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, photoStorageStatus, sendDraftFeed, startNvidiaAnalysis, uploadListingPhotos } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
     import AuthGate from "$lib/components/AuthGate.svelte";
 
     const emptyItem = EMPTY_ITEM;
+    const breakGroundEnabled = String(import.meta.env.VITE_BREAKGROUND_ENABLED || "false").toLowerCase() === "true";
     const defaultSeller = {
         location: "Kettering, Ohio",
         postalCode: "45429",
@@ -49,6 +50,8 @@
     let performanceLoading = false;
     let performanceSyncing = false;
     let rotationSelected = [];
+    let photoStorage = { provider: "disabled", configured: false };
+    let onboardingDismissed = loadFlag("hht_onboarding_dismissed");
 
     const canonicalAspectKeys = {
         brand: "brand", model: "model", size: "size", color: "color", department: "dept",
@@ -70,6 +73,8 @@
     $: visibleCategoryFields = categoryFields.filter((field) => !canonicalAspectKeys[aspectKey(field.name)]);
     $: selectedStagingPhotos = stagingPhotos.filter((photo) => selectedPhotoIds.includes(photo.id) && !photo.processed);
 
+    photoStorageStatus().then((result) => { photoStorage = result || photoStorage; }).catch(() => {});
+
     function load(key, fallback) {
         try {
             const parsed = JSON.parse(localStorage.getItem(key) || "null");
@@ -90,6 +95,11 @@
         } catch {
             return false;
         }
+    }
+
+    function dismissOnboarding() {
+        onboardingDismissed = true;
+        persist("hht_onboarding_dismissed", true);
     }
 
     async function onFilesSelected(event) {
@@ -211,8 +221,19 @@
             } else {
                 result = await localAnalyze();
             }
+            let storageNotice = "";
+            if (photoStorage.configured && hostedFiles.length) {
+                try {
+                    const stored = await uploadListingPhotos(hostedFiles, item.sku || "unassigned");
+                    const ebayUrls = (stored.assets || []).map((asset) => asset.ebayUrl).filter(Boolean);
+                    if (ebayUrls.length) result = { ...result, pic: ebayUrls.join(" "), photoAssets: stored.assets };
+                    storageNotice = ` ${ebayUrls.length} eBay-ready photo URL${ebayUrls.length === 1 ? "" : "s"} saved.`;
+                } catch (storageError) {
+                    storageNotice = " Persistent photo storage was unavailable, so photos remain analysis-only.";
+                }
+            }
             item = normalizeForForm(result);
-            status = result.demo ? "Demo result loaded. Review required." : `${options.isRerun ? "Re-analysis" : "Analysis"} complete via ${result.provider || engine}. Review required.`;
+            status = result.demo ? "Demo result loaded. Review required." : `${options.isRerun ? "Re-analysis" : "Analysis"} complete via ${result.provider || engine}.${storageNotice} Review required.`;
             tab = "edit";
         } catch (err) {
             if (engine === "hosted" && err.canTryAlternate && !options.tryAlternate) {
@@ -816,6 +837,13 @@
 
     {#if tab === "analyze"}
         <section class="panel">
+            {#if breakGroundEnabled && !onboardingDismissed}
+                <div class="wide notice info onboarding-card">
+                    <div class="section-heading"><div><strong>HHT quick start</strong><p>Group photos, analyze, review the eBay-aligned fields, then add only approved items to the Seller Hub draft queue.</p></div><button type="button" on:click={dismissOnboarding}>Dismiss</button></div>
+                    <div class="onboarding-steps"><span class:complete={stagingPhotos.length > 0}>1. Group photos</span><span class:complete={item.title && item.cat && item.price}>2. Review listing</span><span class:complete={queue.length > 0}>3. Save to queue</span><span class:complete={queue.filter((entry) => entry.approved).length >= 5}>4. Send 5 approved drafts</span></div>
+                    <p class="help">BreakGround guidance is optional and receives only checklist events—not photos, tokens, or listing payloads.</p>
+                </div>
+            {/if}
             <label class="field">
                 <span>Analysis engine</span>
                 <select bind:value={engine}>
@@ -1078,6 +1106,10 @@
                     <button type="button" disabled={oauthLoading} on:click={reconnectEbay}>{oauthLoading ? "Opening..." : "Reconnect eBay"}</button>
                     <button type="button" disabled={oauthLoading} on:click={checkEbayConnection}>Check connection</button>
                 </div>
+            </div>
+            <div class="wide notice info">
+                <strong>Photo storage</strong>
+                <p>{photoStorage.configured ? `Configured: ${photoStorage.provider}. Compressed derivatives can receive signed HTTPS URLs for eBay.` : "Not configured. Analysis still works, but browser-local photos are not yet durable eBay image URLs."}</p>
             </div>
             <label class="field wide checkbox-field">
                 <input type="checkbox" bind:checked={autoDraftEnabled} on:change={scheduleAutoDraftUpload} />

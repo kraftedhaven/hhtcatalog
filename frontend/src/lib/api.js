@@ -64,6 +64,21 @@ export async function startNvidiaAnalysis(files, sellerDefaults = {}, analysisHi
     return body.result || body;
 }
 
+export async function photoStorageStatus() {
+    const res = await authenticatedFetch(`${baseUrl()}/api/photos/storage`);
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function uploadListingPhotos(files, listingKey = 'unassigned') {
+    const form = new FormData();
+    for (const file of files.slice(0, 12)) form.append('file', file);
+    form.append('listingKey', listingKey);
+    const res = await authenticatedFetch(`${baseUrl()}/api/photos`, { method: 'POST', body: form });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
 export async function health() {
     const res = await authenticatedFetch(`${baseUrl()}/health`);
     return parseResponse(res);

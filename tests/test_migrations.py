@@ -39,7 +39,7 @@ class MigrationTests(unittest.TestCase):
             {"table_name": table} for table in (
                 "listings", "recommendations", "actions", "settings", "commerce_jobs",
                 "enrichment_checkpoints", "listing_performance_daily", "listing_versions",
-                "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs",
+                "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs", "photo_assets",
             )
         ]
         columns = [
