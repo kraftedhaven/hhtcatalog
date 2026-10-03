@@ -320,6 +320,21 @@
         );
     }
 
+    async function regenerateRecommendations() {
+        loading = true;
+        error = "";
+        message = "Regenerating title, pricing, taxonomy, and evidence recommendations. No eBay changes are being made.";
+        try {
+            const result = await auditInBackground();
+            message = `Regenerated ${result.count || 0} current recommendation${result.count === 1 ? "" : "s"}.`;
+            await refresh({ page: 1 });
+        } catch (err) {
+            error = err.message || String(err);
+        } finally {
+            loading = false;
+        }
+    }
+
     async function importAndAudit() {
         loading = true;
         error = "";
@@ -623,7 +638,7 @@
             <h3>{dashboard?.titleImprovements ? `Start with ${dashboard.titleImprovements} title opportunities` : "Review the recommendations below"}</h3>
             <p class="help">Recommended order: title and item specifics first, then price. Open evidence only when you need to verify a suggestion.</p>
         </div>
-        <button class="primary" disabled={loading} on:click={refresh}>Refresh recommendations</button>
+        <button class="primary" disabled={loading} on:click={regenerateRecommendations}>{loading ? "Regenerating..." : "Regenerate recommendations"}</button>
     </div>
     <details class="panel advanced-panel">
         <summary>Import, enrich, and pilot tools</summary>
@@ -780,8 +795,8 @@
                         <div><span>Seller action</span><strong>{entry.risk === "high" ? "Review manually" : "Approve only if evidence is clear"}</strong></div>
                     </div>
                     {#if titleCandidates(entry).length}
-                        <details class="card-details">
-                            <summary>Compare title candidates ({titleCandidates(entry).length})</summary>
+                        <details class="card-details" open>
+                            <summary>SEO title options ({titleCandidates(entry).length})</summary>
                             <div class="advisory-grid">
                                 {#each titleCandidates(entry) as candidate}
                                     <div>
@@ -791,12 +806,12 @@
                                     </div>
                                 {/each}
                             </div>
-                            <p class="help meta-note">Candidates use only stored listing attributes and evidence. Select or edit one yourself before approval; HHT does not automatically replace the current title.</p>
+                            <p class="help meta-note">Each option is capped at 80 characters and uses confirmed stored attributes. Confirmed-keyword coverage: {Math.round(Number(entry.listing.titleSeoMetadata?.keywordCoverage || 0) * 100)}%. This is transparent metadata—not access to eBay's private ranking algorithm. Select or edit one yourself before approval; HHT does not automatically replace the current title.</p>
                         </details>
                     {/if}
                     {#if entry.soldPricing?.status === "ok"}
-                        <details class="card-details">
-                            <summary>Compare pricing tiers</summary>
+                        <details class="card-details" open>
+                            <summary>Pricing options</summary>
                             <div class="advisory-grid">
                                 <div><span>Quick sale</span><strong>{money(entry.soldPricing.quickSalePrice)}</strong></div>
                                 <div><span>Target</span><strong>{money(entry.soldPricing.targetPrice || entry.soldPricing.recommendedPrice)}</strong></div>
