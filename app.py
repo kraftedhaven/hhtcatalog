@@ -221,7 +221,6 @@ def photo_upload():
         except PhotoStorageError as exc:
             results.append({"filename": filename, "status": "error", "error": str(exc), "category": exc.category})
         except Exception:
-            app.logger.error("Unexpected photo storage failure")
             results.append({"filename": filename, "status": "error", "error": "Photo could not be saved.", "category": "storage"})
     failures = [
         {"filename": result["filename"], "error": result["error"], "category": result["category"]}
