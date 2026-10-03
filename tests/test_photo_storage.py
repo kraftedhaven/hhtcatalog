@@ -8,13 +8,14 @@ from PIL import Image
 
 import hht_app.photo_storage as photo_storage
 from hht_app.photo_storage import PhotoStorageError, _compress, storage_status, store_photo
-from app import app
+from app import app as flask_app
+import app as app_module
 
 
 class PhotoStorageTests(unittest.TestCase):
     def test_photo_storage_status_requires_authentication(self):
         with mock.patch.dict(os.environ, {"SUPABASE_URL": "https://example.supabase.co"}):
-            response = app.test_client().get("/api/photos/storage")
+            response = flask_app.test_client().get("/api/photos/storage")
         self.assertEqual(response.status_code, 401)
 
     def test_compresses_image_to_webp_derivative(self):
@@ -112,7 +113,7 @@ class PhotoStorageTests(unittest.TestCase):
         with mock.patch("app.authenticate_request", side_effect=authenticate), mock.patch(
             "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller"}
         ), mock.patch("app.store_photo", side_effect=store):
-            response = app.test_client().post(
+            response = flask_app.test_client().post(
                 "/api/photos",
                 data={"file": [(io.BytesIO(b"one"), "saved.jpg"), (io.BytesIO(b"two"), "failed.jpg")]},
                 content_type="multipart/form-data",
@@ -122,7 +123,8 @@ class PhotoStorageTests(unittest.TestCase):
         self.assertEqual(body["count"], 1)
         self.assertEqual([entry["status"] for entry in body["files"]], ["stored", "error"])
         self.assertEqual(body["assets"][0]["assetId"], "saved")
-        self.assertEqual(body["failures"][0]["category"], "upload")
+        self.assertEqual(body["failures"][0]["error"], "Photo could not be saved.")
+        self.assertEqual(body["failures"][0]["category"], "storage")
 
     def test_rejects_unsupported_type_before_provider_call(self):
         with mock.patch.dict(os.environ, {"PHOTO_STORAGE_PROVIDER": "supabase"}, clear=True):
@@ -130,6 +132,44 @@ class PhotoStorageTests(unittest.TestCase):
                 store_photo(seller_id="seller", filename="x.txt", mime_type="text/plain", data=b"x")
         self.assertEqual(context.exception.status_code, 415)
         self.assertEqual(context.exception.category, "invalid_type")
+
+    def test_storage_requires_provider_credentials(self):
+        with mock.patch.dict(os.environ, {"PHOTO_STORAGE_PROVIDER": "supabase"}, clear=True):
+            with self.assertRaises(PhotoStorageError) as context:
+                store_photo(seller_id="seller", filename="x.jpg", mime_type="image/jpeg", data=b"image")
+        self.assertEqual(context.exception.status_code, 503)
+        self.assertEqual(context.exception.category, "configuration")
+
+    def test_photo_upload_returns_successes_and_failures_for_partial_batch(self):
+        def authenticated():
+            app_module.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        stored_asset = {"assetId": "asset-1", "ebayUrl": "https://example.com/photo.webp"}
+        with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch("app.store_photo", side_effect=[
+            stored_asset,
+            PhotoStorageError("Upload failed.", 502, "upload"),
+            RuntimeError("Unexpected database error"),
+        ]):
+            response = flask_app.test_client().post(
+                "/api/photos",
+                data={"file": [
+                    (io.BytesIO(b"one"), "one.jpg", "image/jpeg"),
+                    (io.BytesIO(b"two"), "two.jpg", "image/jpeg"),
+                    (io.BytesIO(b"three"), "three.jpg", "image/jpeg"),
+                ]},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 207)
+        result = response.get_json()["result"]
+        self.assertEqual(result["assets"], [stored_asset])
+        self.assertEqual(result["failures"], [
+            {"filename": "two.jpg", "error": "Photo could not be saved.", "category": "storage"},
+            {"filename": "three.jpg", "error": "Photo could not be saved.", "category": "storage"},
+        ])
 
 
 if __name__ == "__main__":

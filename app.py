@@ -206,22 +206,31 @@ def photo_upload():
         return jsonify({"error": "Upload one or more image files."}), 400
     listing_key = str(request.form.get("listingKey") or "unassigned")[:80]
     assets = []
+    failures = []
     results = []
     for file in files[:12]:
         filename = file.filename or "photo.jpg"
         try:
-            assets.append(store_photo(
+            asset = store_photo(
                 seller_id=str(g.seller_id),
                 listing_key=listing_key,
                 filename=filename,
                 mime_type=file.mimetype or "",
                 data=file.read(),
-            ))
-            results.append({"filename": filename, "status": "stored", "asset": assets[-1]})
-        except PhotoStorageError as exc:
-            results.append({"filename": filename, "status": "error", "error": "Photo could not be stored.", "category": exc.category})
-    failures = [result for result in results if result["status"] == "error"]
-    return jsonify({"result": {"count": len(assets), "assets": assets, "files": results, "failures": failures}}), 207 if failures else 201
+            )
+            assets.append(asset)
+            results.append({"filename": filename, "status": "stored", "asset": asset})
+        except PhotoStorageError:
+            failure = {"filename": filename, "error": "Photo could not be saved.", "category": "storage"}
+            failures.append(failure)
+            results.append({"filename": filename, "status": "error", **failure})
+        except Exception:
+            app.logger.exception("Unexpected photo storage failure for %r", filename)
+            failure = {"filename": filename, "error": "Photo could not be saved.", "category": "storage"}
+            failures.append(failure)
+            results.append({"filename": filename, "status": "error", **failure})
+    result = {"count": len(assets), "assets": assets, "files": results, "failures": failures}
+    return jsonify({"result": result}), 207 if failures else 201
 
 
 @app.route("/export/csv", methods=["POST"])
