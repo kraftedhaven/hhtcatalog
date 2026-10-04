@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 import base64
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
@@ -32,7 +33,7 @@ from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_active import EbayActiveError, fetch_active_listings, fetch_listing_detail
 from .ebay_drafts import EbayDraftError, update_ebay_offer
 from .schema import normalize_listing
-from .evidence import evidence_for_listing, evidence_summary, normalize_evidence
+from .evidence import evidence_for_listing, evidence_summary, has_confirmed_value, normalize_evidence
 from .ebay_taxonomy import validate_listing
 from .title_optimizer import optimize_title
 from .market_metrics import demand_score, pricing_recommendation, seller_recovery_metrics, sold_price_summary
@@ -84,6 +85,7 @@ NVIDIA_BATCH_MAX_BYTES = 100 * 1024 * 1024
 ENRICHMENT_CHUNK_SIZE = 20
 MAX_VISION_JOB_IMAGES = 3
 MAX_VISION_JOB_BYTES = 6 * 1024 * 1024
+MAX_LISTING_ANALYSIS_BYTES = 12 * 1024 * 1024
 
 
 def utc_now() -> str:
@@ -163,14 +165,15 @@ def connect() -> _Database:
 def init_db() -> None:
     with connect() as db:
         if db.postgres:
-            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs", "photo_assets"}
+            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "vision_result_cache", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs", "photo_assets"}
             rows = db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(?)", (list(required),)).fetchall()
             present = {str(row["table_name"]) for row in rows}
             missing = sorted(required - present)
             if missing:
                 raise RuntimeError("Commerce Agent database schema is incomplete. Apply the ordered Supabase migrations before starting the app: " + ", ".join(missing))
-            columns = db.execute("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('recommendations','actions','listings','analysis_runs')").fetchall()
+            columns = db.execute("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('commerce_jobs','recommendations','actions','listings','analysis_runs')").fetchall()
             required_columns = {
+                "commerce_jobs": {"seller_id"},
                 "recommendations": {"version_number", "is_current", "seller_id"},
                 "actions": {"recommendation_version", "listing_snapshot_json", "listing_state_hash", "seller_id", "approved_by", "applied_by", "rolled_back_by"},
                 "listings": {"lifecycle_status", "listing_start_time", "quantity_sold", "watch_count", "ownership_classification", "seller_id", "ebay_account_id"},
@@ -218,6 +221,10 @@ def init_db() -> None:
                 progress INTEGER NOT NULL DEFAULT 0, result_json TEXT NOT NULL DEFAULT '{}',
                 error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS vision_result_cache (
+                cache_key TEXT PRIMARY KEY, result_json TEXT NOT NULL,
+                expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS analysis_runs (
                 id TEXT PRIMARY KEY, seller_id TEXT REFERENCES sellers(id),
                 listing_row_id INTEGER REFERENCES listings(id), provider TEXT NOT NULL,
@@ -252,6 +259,9 @@ def init_db() -> None:
             _ensure_recommendation_versioning(db)
             _ensure_seller_schema(db)
             _ensure_ebay_scope_proof_schema(db)
+            job_columns = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(commerce_jobs)").fetchall()}
+            if "seller_id" not in job_columns:
+                db.execute("ALTER TABLE commerce_jobs ADD COLUMN seller_id TEXT")
 
 
 def _ensure_seller_schema(db: _Database) -> None:
@@ -1156,6 +1166,35 @@ def start_nvidia_vision_job(images: list[dict[str, Any]], seller_defaults: dict[
     )
 
 
+def start_listing_analysis_job(
+    images: list[dict[str, Any]], seller_id: str, seller_defaults: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    if not seller_id:
+        raise ValueError("Seller ownership is required for listing analysis.")
+    if not isinstance(images, list) or not images or len(images) > 5:
+        raise ValueError("Upload one to five photos for one item.")
+    prepared: list[dict[str, str]] = []
+    total_bytes = 0
+    for image in images:
+        if not isinstance(image, dict) or not isinstance(image.get("data"), (bytes, bytearray)) or not image.get("data"):
+            raise ValueError("Invalid image payload.")
+        data = bytes(image["data"])
+        total_bytes += len(data)
+        prepared.append({
+            "data": base64.b64encode(data).decode("ascii"),
+            "mimeType": str(image.get("mimeType") or "image/jpeg"),
+            "filename": str(image.get("filename") or "image.jpg")[:180],
+        })
+    if total_bytes > MAX_LISTING_ANALYSIS_BYTES:
+        raise ValueError("Analysis photos exceed the 12 MB per-item limit.")
+    return _start_background_job(
+        "listing_analysis",
+        {"images": prepared, "sellerDefaults": seller_defaults if isinstance(seller_defaults, dict) else {}, "cacheNamespace": seller_id},
+        run_in_web_thread=False,
+        seller_id=seller_id,
+    )
+
+
 def start_routed_vision_job(images: list[dict[str, Any]], item_count: int = 1, seller_defaults: dict[str, Any] | None = None) -> dict[str, Any]:
     """Route normal work to Groq and heavy batches to the NVIDIA worker."""
     if not isinstance(images, list) or not images:
@@ -1178,14 +1217,20 @@ def start_routed_vision_job(images: list[dict[str, Any]], item_count: int = 1, s
     return _start_background_job("nvidia_vision_batch", {"images": prepared, "itemCount": route["itemCount"], "sellerDefaults": seller_defaults if isinstance(seller_defaults, dict) else {}, "route": route}, run_in_web_thread=False) | {"route": route}
 
 
-def _start_background_job(kind: str, payload: dict[str, Any], *, run_in_web_thread: bool = True) -> dict[str, Any]:
+def _start_background_job(
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    run_in_web_thread: bool = True,
+    seller_id: str | None = None,
+) -> dict[str, Any]:
     init_db()
     job_id = str(uuid.uuid4())
     now = utc_now()
     with connect() as db:
         db.execute(
-            "INSERT INTO commerce_jobs(id,kind,status,progress,result_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-            (job_id, kind, "queued", 0, _json(payload), "", now, now),
+            "INSERT INTO commerce_jobs(id,kind,status,progress,result_json,error,created_at,updated_at,seller_id) VALUES(?,?,?,?,?,?,?,?,?)",
+            (job_id, kind, "queued", 0, _json(payload), "", now, now, seller_id),
         )
     if run_in_web_thread:
         target = _run_until_terminal if kind == "full_enrichment" else run_job
@@ -1207,10 +1252,13 @@ def _run_until_terminal(job_id: str) -> None:
         time.sleep(0.1)
 
 
-def active_import_job(job_id: str) -> dict[str, Any] | None:
+def active_import_job(job_id: str, seller_id: str | None = None) -> dict[str, Any] | None:
     init_db()
     with connect() as db:
-        row = db.execute("SELECT * FROM commerce_jobs WHERE id=?", (job_id,)).fetchone()
+        if seller_id:
+            row = db.execute("SELECT * FROM commerce_jobs WHERE id=? AND seller_id=?", (job_id, seller_id)).fetchone()
+        else:
+            row = db.execute("SELECT * FROM commerce_jobs WHERE id=?", (job_id,)).fetchone()
     return dict(row) if row else None
 
 
@@ -1254,6 +1302,91 @@ def run_job(job_id: str) -> dict[str, Any] | None:
         elif kind == "audit":
             audited = audit_all()
             result = {"count": audited["count"], "readOnly": True}
+        elif kind == "listing_analysis":
+            from .providers import (
+                UploadedImage,
+                analyze_images,
+                audit_listing_with_nvidia,
+                cache_vision_result,
+                get_cached_vision_result,
+                vision_result_cache_key,
+            )
+
+            total_started_at = time.monotonic()
+            encoded_images = payload.get("images") if isinstance(payload, dict) else []
+            images = []
+            for entry in encoded_images if isinstance(encoded_images, list) else []:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    data = base64.b64decode(str(entry.get("data") or ""), validate=True)
+                except (ValueError, TypeError):
+                    continue
+                if data:
+                    images.append(UploadedImage(data, str(entry.get("mimeType") or "image/jpeg"), str(entry.get("filename") or "image.jpg")))
+            if not images:
+                raise ValueError("Listing analysis job did not contain a usable image.")
+
+            seller_defaults = payload.get("sellerDefaults") if isinstance(payload.get("sellerDefaults"), dict) else {}
+            context = {
+                "seller_defaults": seller_defaults,
+                "cache_namespace": str(payload.get("cacheNamespace") or ""),
+                "background_worker": True,
+                "provider_override": "groq",
+                "skip_active_pricing": True,
+                "provider_timeout_seconds": _positive_int(os.environ.get("GROQ_WORKER_PROVIDER_TIMEOUT_SECONDS"), 12, 20),
+                "deadline": time.monotonic() + _positive_int(os.environ.get("GROQ_WORKER_DEADLINE_SECONDS"), 30, 45),
+            }
+            cache_key = vision_result_cache_key(images, context)
+            cached_listing = get_cached_vision_result(cache_key)
+            audit_timeout = _positive_int(os.environ.get("NVIDIA_AUDIT_TIMEOUT_SECONDS"), 8, 12)
+            audit_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nvidia-audit")
+            audit_future = audit_pool.submit(audit_listing_with_nvidia, images, {}, audit_timeout)
+            first_pass_started_at = time.monotonic()
+            try:
+                listing = cached_listing
+                if listing is None:
+                    listing = analyze_images(images, context)
+                    cache_vision_result(cache_key, listing)
+                listing["photoCount"] = len(images)
+                listing["analysisStatus"] = "groq_ready"
+                listing["auditStatus"] = "running"
+                listing["provenance"] = _listing_provenance(listing)
+                first_pass_seconds = round(time.monotonic() - first_pass_started_at, 3)
+                listing["analysisTimings"] = {"firstPassSeconds": first_pass_seconds, "auditSeconds": None}
+                _update_job(job_id, "running", 65, {"listing": listing, "auditStatus": "running", "cacheHit": cached_listing is not None}, "")
+            except Exception:
+                audit_future.cancel()
+                audit_pool.shutdown(wait=False, cancel_futures=True)
+                raise
+
+            audit_status = "completed"
+            audit_seconds = None
+            try:
+                audit = audit_future.result(timeout=audit_timeout + 3)
+                audit_seconds = audit.get("providerSeconds")
+                listing = _merge_vision_audit(listing, audit)
+            except FutureTimeout:
+                audit_status = "timeout"
+                listing["needsReview"].append({"field": "NVIDIA audit", "reason": "The second-pass audit timed out; review the Groq result manually."})
+            except Exception:
+                audit_status = "unavailable"
+                listing["needsReview"].append({"field": "NVIDIA audit", "reason": "The second-pass audit was unavailable; review the Groq result manually."})
+            finally:
+                audit_pool.shutdown(wait=False, cancel_futures=True)
+
+            taxonomy = validate_listing(listing, timeout=3.0)
+            listing["rulesCheck"] = check_listing_rules(listing, len(images), taxonomy)
+            listing["analysisStatus"] = "complete"
+            listing["auditStatus"] = audit_status
+            timings = {
+                "firstPassSeconds": first_pass_seconds,
+                "auditSeconds": audit_seconds,
+                "totalSeconds": round(time.monotonic() - total_started_at, 3),
+                "cacheHit": cached_listing is not None,
+            }
+            listing["analysisTimings"] = timings
+            result = {"listing": listing, "auditStatus": audit_status, "cacheHit": cached_listing is not None, "timings": timings}
         elif kind == "nvidia_vision":
             from .providers import UploadedImage, analyze_images
 
@@ -1344,6 +1477,122 @@ def run_next_queued_job() -> dict[str, Any] | None:
     with connect() as db:
         row = db.execute("SELECT id FROM commerce_jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1").fetchone()
     return run_job(str(row["id"])) if row else None
+
+
+def queued_job_ids(limit: int = 1, exclude_ids: list[str] | None = None, kind: str | None = None) -> list[str]:
+    init_db()
+    excluded = [str(job_id) for job_id in (exclude_ids or []) if job_id]
+    filters = ["status='queued'"]
+    params: list[Any] = []
+    if kind:
+        filters.append("kind=?")
+        params.append(kind)
+    if excluded:
+        filters.append(f"id NOT IN ({','.join('?' for _ in excluded)})")
+        params.extend(excluded)
+    params.append(max(1, int(limit)))
+    with connect() as db:
+        rows = db.execute(
+            f"SELECT id FROM commerce_jobs WHERE {' AND '.join(filters)} ORDER BY created_at ASC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
+def _listing_provenance(listing: dict[str, Any]) -> dict[str, str]:
+    metadata = {"attributeEvidence", "analysisHints", "analysisHintFields", "titleCandidates", "titleSeoMetadata", "providerFailures", "photoAssets"}
+    return {
+        key: "Unknown" if not has_confirmed_value(value) else "Inferred"
+        for key, value in listing.items()
+        if key not in metadata and not isinstance(value, (dict, list))
+    }
+
+
+def _merge_vision_audit(listing: dict[str, Any], audit: dict[str, Any]) -> dict[str, Any]:
+    aliases = {
+        "brand": "brand", "model": "model", "size": "size", "color": "color",
+        "department": "dept", "dept": "dept", "type": "type", "style": "style",
+        "theme": "theme", "material": "mat", "mat": "mat", "pattern": "pat",
+        "sleevelength": "slv", "neckline": "nk", "season": "sea", "occasion": "occ",
+        "sizetype": "st", "vintage": "vin", "madein": "madeIn", "serialnumber": "serialNumber",
+        "measurements": "measurements", "condition": "cnote",
+    }
+    provenance = listing.setdefault("provenance", _listing_provenance(listing))
+    needs_review = listing.setdefault("needsReview", [])
+    missed_fields = []
+    discrepancies = []
+    for observation in audit.get("observations", []):
+        source_field = str(observation.get("field") or "").strip()
+        key = aliases.get(re.sub(r"[^a-z0-9]", "", source_field.casefold()))
+        value = str(observation.get("value") or "").strip()
+        evidence = str(observation.get("evidence") or "").strip()
+        if not key or not value or not evidence:
+            continue
+        current = listing.get(key)
+        if not has_confirmed_value(current):
+            listing[key] = value
+            provenance[key] = "Known from image"
+            missed_fields.append({"field": key, "value": value, "evidence": evidence})
+        elif str(current).strip().casefold() != value.casefold():
+            provenance[key] = "Needs review"
+            finding = {"field": key, "groqValue": str(current), "observedValue": value, "evidence": evidence}
+            discrepancies.append(finding)
+            needs_review.append({"field": key, "reason": "Groq and NVIDIA disagree; compare both values with the photo.", **finding})
+        else:
+            provenance[key] = "Known from image"
+
+    visible_flaws = audit.get("visibleFlaws", [])
+    listing["auditDiscrepancies"] = discrepancies
+    listing["auditMissedFields"] = missed_fields
+    listing["auditVisibleFlaws"] = visible_flaws
+    listing["auditTagText"] = audit.get("tagText", [])
+    for flaw in visible_flaws:
+        needs_review.append({"field": "condition", "reason": f"NVIDIA observed a visible flaw: {flaw}"})
+    if visible_flaws:
+        note = "Photo audit observed: " + "; ".join(visible_flaws)
+        listing["cnote"] = (str(listing.get("cnote") or "").strip() + " " + note).strip()[:700]
+    return listing
+
+
+def check_listing_rules(listing: dict[str, Any], photo_count: int, taxonomy: dict[str, Any] | None = None) -> dict[str, Any]:
+    findings: list[dict[str, str]] = []
+    title = str(listing.get("title") or "").strip()
+    brand = str(listing.get("brand") or "").strip()
+    try:
+        price = float(listing.get("price") or 0)
+    except (TypeError, ValueError):
+        price = 0
+    if not title or len(title) > MAX_TITLE_LENGTH:
+        findings.append({"rule": "title_length", "message": "Title must contain 1 to 80 characters."})
+    if price <= 0:
+        findings.append({"rule": "positive_price", "message": "Price must be greater than zero."})
+    if photo_count < 1:
+        findings.append({"rule": "photo_count", "message": "At least one item photo is required."})
+    if has_confirmed_value(brand) and brand.casefold() not in title.casefold():
+        findings.append({"rule": "brand_title_consistency", "message": "The brand is not present in the listing title."})
+    specifics = listing.get("itemSpecifics") if isinstance(listing.get("itemSpecifics"), dict) else {}
+    specific_fields = {
+        "brand": "brand", "size": "size", "color": "color", "department": "dept",
+        "type": "type", "style": "style", "material": "mat", "pattern": "pat",
+        "vintage": "vin", "made in": "madeIn",
+    }
+    for label, field in specific_fields.items():
+        specific_value = next((value for name, value in specifics.items() if str(name).casefold() == label), "")
+        if not has_confirmed_value(specific_value):
+            continue
+        choices = specific_value if isinstance(specific_value, list) else [specific_value]
+        canonical = listing.get(field)
+        if has_confirmed_value(canonical) and str(canonical).casefold() not in {str(value).casefold() for value in choices}:
+            findings.append({"rule": "specific_consistency", "message": f"{label.title()} conflicts with the listing field."})
+    if str(listing.get("cid") or "") in {"3000", "4000", "5000", "6000"} and not str(listing.get("cnote") or "").strip():
+        findings.append({"rule": "used_condition", "message": "Add a condition description for this used item."})
+    taxonomy = taxonomy or {}
+    if taxonomy.get("status") == "valid":
+        for aspect in taxonomy.get("missingRequiredAspects", []):
+            findings.append({"rule": "taxonomy_required_specific", "message": f"Required eBay specific is missing: {aspect}."})
+    else:
+        findings.append({"rule": "taxonomy_unverified", "message": "Required item specifics could not be verified with eBay Taxonomy; review this listing."})
+    return {"passed": not findings, "findings": findings, "taxonomyStatus": taxonomy.get("status", "unavailable")}
 
 
 def _update_job(job_id: str, status: str, progress: int, result: dict[str, Any], error: str) -> None:

@@ -33,11 +33,14 @@ class MigrationTests(unittest.TestCase):
         scope_proofs = (self.migration_dir / "202609290100_ebay_scope_proofs.sql").read_text()
         self.assertIn("CREATE TABLE IF NOT EXISTS public.ebay_scope_proofs", scope_proofs)
         self.assertIn("public.ebay_scope_proofs ENABLE ROW LEVEL SECURITY", scope_proofs)
+        analysis_jobs = (self.migration_dir / "202610040100_analysis_job_ownership.sql").read_text()
+        self.assertIn("ALTER TABLE public.commerce_jobs", analysis_jobs)
+        self.assertIn("public.vision_result_cache", analysis_jobs)
 
     def test_postgres_init_db_is_read_only_schema_check(self):
         required_tables = [
             {"table_name": table} for table in (
-                "listings", "recommendations", "actions", "settings", "commerce_jobs",
+                "listings", "recommendations", "actions", "settings", "commerce_jobs", "vision_result_cache",
                 "enrichment_checkpoints", "listing_performance_daily", "listing_versions",
                 "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs", "photo_assets",
             )
@@ -45,6 +48,7 @@ class MigrationTests(unittest.TestCase):
         columns = [
             {"table_name": table, "column_name": column}
             for table, values in {
+                "commerce_jobs": ("seller_id",),
                 "recommendations": ("version_number", "is_current", "seller_id"),
                 "actions": ("recommendation_version", "listing_snapshot_json", "listing_state_hash", "seller_id", "approved_by", "applied_by", "rolled_back_by"),
                 "listings": ("lifecycle_status", "listing_start_time", "quantity_sold", "watch_count", "ownership_classification", "seller_id", "ebay_account_id"),

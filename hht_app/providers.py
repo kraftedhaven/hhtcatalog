@@ -1,11 +1,12 @@
 import base64
 from email.utils import parsedate_to_datetime
+import hashlib
 import json
 import os
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urljoin
 
@@ -48,6 +49,7 @@ MAX_ANALYZE_DEADLINE_SECONDS = 22.0
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 8.0
 MAX_WORKER_PROVIDER_TIMEOUT_SECONDS = 40.0
 MAX_PROVIDER_RETRY_DELAY_SECONDS = 3.0
+VISION_RESULT_CACHE_TTL_SECONDS = 900
 ZAI_IMAGE_MAX_EDGE = 896
 ZAI_IMAGE_RETRY_MAX_EDGE = 640
 ZAI_IMAGE_QUALITY = 72
@@ -246,6 +248,95 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
     raise ProviderError("Configured vision provider failed. No demo listing was generated.", 502, failures)
 
 
+def vision_result_cache_key(images: list[UploadedImage], context: dict[str, Any]) -> str:
+    digest = hashlib.sha256()
+    for image in images:
+        digest.update(len(image.data).to_bytes(8, "big"))
+        digest.update(image.data)
+    cache_context = {
+        "model": _groq_model(),
+        "hints": _analysis_hints(context),
+        "seller": context.get("seller_defaults") or {},
+        "cacheNamespace": context.get("cache_namespace") or "",
+        "promptVersion": 1,
+    }
+    digest.update(json.dumps(cache_context, sort_keys=True, default=str).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def get_cached_vision_result(cache_key: str) -> dict[str, Any] | None:
+    from .commerce_agent import connect, init_db, utc_now
+
+    init_db()
+    with connect() as db:
+        row = db.execute("SELECT result_json, expires_at FROM vision_result_cache WHERE cache_key=?", (cache_key,)).fetchone()
+        if not row:
+            return None
+        if str(row["expires_at"]) <= utc_now():
+            db.execute("DELETE FROM vision_result_cache WHERE cache_key=?", (cache_key,))
+            return None
+        value = row["result_json"]
+        return json.loads(value) if isinstance(value, str) else value
+
+
+def cache_vision_result(cache_key: str, result: dict[str, Any]) -> None:
+    from .commerce_agent import connect, init_db, utc_now
+
+    init_db()
+    now = datetime.now(timezone.utc)
+    with connect() as db:
+        db.execute(
+            "INSERT INTO vision_result_cache(cache_key,result_json,expires_at,created_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(cache_key) DO UPDATE SET result_json=excluded.result_json,expires_at=excluded.expires_at,created_at=excluded.created_at",
+            (cache_key, json.dumps(result, ensure_ascii=False), (now + timedelta(seconds=VISION_RESULT_CACHE_TTL_SECONDS)).isoformat(), utc_now()),
+        )
+        db.execute("DELETE FROM vision_result_cache WHERE expires_at<=?", (now.isoformat(),))
+
+
+def audit_listing_with_nvidia(
+    images: list[UploadedImage], listing: dict[str, Any] | None = None, timeout_seconds: int = 8
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    prompt = (
+        "Independently inspect the photos for additional listing evidence that a first-pass item listing may miss. "
+        "Return JSON only with exactly: observations (array of {field, value, evidence}), "
+        "visibleFlaws (array of strings), tagText (array of strings). Include only fields that are clearly "
+        "visible and useful, readable tag/label wording, and visible wear or damage. Do not infer hidden facts, "
+        "write a replacement listing, or repeat observations without specific image evidence. "
+        + (f" Compare against this first-pass listing: {json.dumps(listing, ensure_ascii=True, default=str)[:5000]}" if listing else "")
+    )
+    context = {
+        "background_worker": True,
+        "provider_timeout_seconds": max(3, timeout_seconds),
+        "deadline": time.monotonic() + max(3, timeout_seconds + 2),
+        "audit_prompt": prompt,
+        "nvidia_audit_only": True,
+    }
+    parsed = parse_model_json(_nvidia(images[:2], context))
+    return {
+        "providerSeconds": round(time.monotonic() - started_at, 3),
+        "observations": _audit_entries(parsed.get("observations"), ("field", "value", "evidence")),
+        "visibleFlaws": _audit_strings(parsed.get("visibleFlaws")),
+        "tagText": _audit_strings(parsed.get("tagText")),
+    }
+
+
+def _audit_entries(value: Any, keys: tuple[str, ...]) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {key: str(entry.get(key) or "")[:300] for key in keys}
+        for entry in value[:30]
+        if isinstance(entry, dict) and str(entry.get("field") or "").strip()
+    ]
+
+
+def _audit_strings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(entry).strip()[:300] for entry in value if str(entry).strip()))[:30]
+
+
 def _has_remaining_alternate(plan: dict[str, Any], context: dict[str, Any]) -> bool:
     alternates = plan.get("alternates", [])
     index = int(context.get("fallback_index", -1 if not context.get("try_alternate") else 0))
@@ -427,12 +518,16 @@ def _groq_once(model: str, content: list[dict[str, Any]], context: dict[str, Any
 
 def _nvidia(images: list[UploadedImage], context: dict[str, Any]) -> str:
     models = _nvidia_models()
+    if context.get("nvidia_audit_only"):
+        models = models[:1]
     model = models[0] if models else ""
     base_url = (os.environ.get("NVIDIA_NIM_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
     if not model:
         raise ProviderError("NVIDIA category model is not configured.", 503, provider="nvidia", category="configuration")
-    content = [{"type": "text", "text": _prompt(context)}]
-    content.extend({"type": "image_url", "image_url": {"url": _compressed_data_url(image, max_edge=896, quality=72)}} for image in images[:3])
+    content = [{"type": "text", "text": str(context.get("audit_prompt") or _prompt(context))}]
+    edge = 640 if context.get("nvidia_audit_only") else 896
+    image_limit = 2 if context.get("nvidia_audit_only") else 3
+    content.extend({"type": "image_url", "image_url": {"url": _compressed_data_url(image, max_edge=edge, quality=72)}} for image in images[:image_limit])
     last_error: ProviderError | None = None
     for index, model in enumerate(models):
         payload = _nvidia_payload(model, content)

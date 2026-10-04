@@ -10,10 +10,13 @@ class CommerceAgentTests(unittest.TestCase):
     def setUp(self):
         self.db_file = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
         self.db_file.close()
-        self.old_db = os.environ.get("COMMERCE_AGENT_DB")
-        self.old_mutation_switch = os.environ.get("EBAY_MUTATIONS_ENABLED")
-        os.environ["COMMERCE_AGENT_DB"] = self.db_file.name
-        os.environ["EBAY_MUTATIONS_ENABLED"] = "true"
+        self.addCleanup(lambda: os.unlink(self.db_file.name) if os.path.exists(self.db_file.name) else None)
+        env_patcher = mock.patch.dict(os.environ, {
+            "COMMERCE_AGENT_DB": self.db_file.name,
+            "EBAY_MUTATIONS_ENABLED": "true",
+        })
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
         commerce_agent.init_db()
         with commerce_agent.connect() as db:
             db.execute(
@@ -24,20 +27,6 @@ class CommerceAgentTests(unittest.TestCase):
                     "cnote": "", "pic": "", "ownershipClassification": "inventory_api_managed"
                 }), commerce_agent.utc_now(), "inventory_api_managed"),
             )
-
-    def tearDown(self):
-        try:
-            os.unlink(self.db_file.name)
-        except FileNotFoundError:
-            pass
-        if self.old_db is None:
-            os.environ.pop("COMMERCE_AGENT_DB", None)
-        else:
-            os.environ["COMMERCE_AGENT_DB"] = self.old_db
-        if self.old_mutation_switch is None:
-            os.environ.pop("EBAY_MUTATIONS_ENABLED", None)
-        else:
-            os.environ["EBAY_MUTATIONS_ENABLED"] = self.old_mutation_switch
 
     def test_audit_creates_structured_recommendation(self):
         result = commerce_agent.audit_all()
@@ -54,6 +43,36 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(normal["route"], "groq")
         self.assertEqual(heavy["route"], "nvidia_worker")
         self.assertEqual(photo_heavy["route"], "nvidia_worker")
+
+    def test_nvidia_audit_merges_missed_fields_and_flags_disagreement(self):
+        listing = {
+            "title": "Nike Red Baseball Cap", "brand": "Nike", "color": "Not visible",
+            "needsReview": [], "provenance": {"brand": "Inferred", "color": "Unknown"},
+        }
+        merged = commerce_agent._merge_vision_audit(listing, {
+            "observations": [
+                {"field": "Brand", "value": "Adidas", "evidence": "Adidas wordmark on front panel"},
+                {"field": "Color", "value": "Red", "evidence": "Red fabric across the crown"},
+            ],
+            "visibleFlaws": ["Small tear near the brim"],
+            "tagText": ["One size fits most"],
+        })
+        self.assertEqual(merged["provenance"]["brand"], "Needs review")
+        self.assertEqual(merged["auditDiscrepancies"][0]["observedValue"], "Adidas")
+        self.assertEqual(merged["color"], "Red")
+        self.assertEqual(merged["provenance"]["color"], "Known from image")
+        self.assertIn("Small tear near the brim", merged["cnote"])
+        self.assertEqual(merged["auditTagText"], ["One size fits most"])
+
+    def test_listing_rules_check_required_fields_and_consistency(self):
+        result = commerce_agent.check_listing_rules({
+            "title": "Short cap", "brand": "Nike", "price": 0, "cid": "3000",
+            "cnote": "", "cat": "45230", "itemSpecifics": {"Color": "Blue"}, "color": "Red",
+        }, 0, {"status": "valid", "missingRequiredAspects": ["Hat Size"]})
+        self.assertEqual({entry["rule"] for entry in result["findings"]}, {
+            "positive_price", "photo_count", "brand_title_consistency", "specific_consistency",
+            "used_condition", "taxonomy_required_specific",
+        })
 
     def test_analysis_runs_are_persisted_without_creating_an_ebay_action(self):
         run = commerce_agent.record_analysis_run(
@@ -374,15 +393,8 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(stale["lifecycleStatus"], "inactive_unknown")
 
     def test_listing_capacity_distinguishes_configured_from_verified(self):
-        old = os.environ.get("EBAY_LISTING_CAPACITY")
-        os.environ["EBAY_LISTING_CAPACITY"] = "1000"
-        try:
+        with mock.patch.dict(os.environ, {"EBAY_LISTING_CAPACITY": "1000"}):
             capacity = commerce_agent.listing_capacity()
-        finally:
-            if old is None:
-                os.environ.pop("EBAY_LISTING_CAPACITY", None)
-            else:
-                os.environ["EBAY_LISTING_CAPACITY"] = old
         self.assertEqual(capacity["activeListingCount"], 1)
         self.assertEqual(capacity["configuredCapacity"], 1000)
         self.assertIsNone(capacity["verifiedEbayAllowance"])
