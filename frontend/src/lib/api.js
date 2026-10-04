@@ -47,10 +47,15 @@ async function parseResponse(res) {
 
 export async function analyzeImages(files, sellerDefaults = {}, options = {}) {
     const form = new FormData();
-    for (const file of files.slice(0, 3)) form.append('file', file);
+    for (const file of files.slice(0, 5)) form.append('file', file);
     form.append('sellerDefaults', JSON.stringify({ ...sellerDefaults, analysisHints: options.analysisHints || {} }));
-    if (options.tryAlternate) form.append('tryAlternate', '1');
-    const res = await authenticatedFetch(`${baseUrl()}/analyze`, { method: 'POST', body: form });
+    const res = await authenticatedFetch(`${baseUrl()}/api/analysis/start`, { method: 'POST', body: form });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function listingAnalysisJob(jobId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/analysis/jobs/${encodeURIComponent(jobId)}`);
     const body = await parseResponse(res);
     return body.result || body;
 }
@@ -180,7 +185,7 @@ export async function ebayOAuthStart() {
 export async function ebayCategorySuggestions(query) {
     const cached = getCachedCategorySearch(query);
     if (cached) return cached;
-    
+
     const result = await commerceRequest(`/api/ebay/categories?q=${encodeURIComponent(query)}`);
     setCategorySearchCache(query, result);
     return result;

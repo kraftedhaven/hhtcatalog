@@ -1,6 +1,7 @@
 import mimetypes
 import os
 import html
+import re
 from typing import Any
 
 from flask import Flask, Response, g, jsonify, request, send_from_directory
@@ -39,6 +40,8 @@ PUBLIC_AUTH_PATHS = {"/", "/health", "/api/ebay/oauth/start", "/api/ebay/oauth/c
 
 def _requires_seller_auth() -> bool:
     path = request.path
+    if path in {"/bulk-analyze", "/api/nvidia/analyze/start"} or path.startswith("/api/analysis/"):
+        return True
     if path.startswith(("/api/commerce/", "/api/catalog/")):
         return True
     if path.startswith("/api/photos/") or path == "/api/photos":
@@ -127,6 +130,49 @@ def analyze():
         return jsonify({"error": "Analysis failed before a listing could be generated. Please retry or check provider configuration."}), 500
 
 
+@app.route("/api/analysis/start", methods=["POST"])
+def analysis_start():
+    files = _request_files()
+    if not files:
+        return jsonify({"error": "No image uploaded. Use multipart form field 'file' with one to five images."}), 400
+    try:
+        images = [_uploaded_image(file) for file in files[:5]]
+        result = commerce_agent.start_listing_analysis_job(
+            [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename} for image in images],
+            str(g.seller_id),
+            _seller_defaults_from_form(),
+        )
+        return jsonify({"result": result}), 202
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Listing analysis job could not start")
+        return jsonify({"error": "Listing analysis could not be queued. Please retry shortly."}), 503
+
+
+@app.route("/api/analysis/jobs/<job_id>", methods=["GET"])
+def analysis_job(job_id):
+    job = commerce_agent.active_import_job(job_id, str(g.seller_id))
+    if not job or job.get("kind") != "listing_analysis":
+        return jsonify({"error": "Analysis job not found."}), 404
+    result = {}
+    if int(job.get("progress") or 0) >= 65:
+        raw_result = job.get("result_json", "{}")
+        try:
+            import json
+            parsed = json.loads(raw_result or "{}") if isinstance(raw_result, str) else raw_result
+            result = parsed if isinstance(parsed, dict) else {}
+        except ValueError:
+            result = {}
+    return jsonify({"result": {
+        "jobId": job["id"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "result": result,
+        "error": job.get("error") or "",
+    }})
+
+
 @app.route("/api/nvidia/analyze/start", methods=["POST"])
 def nvidia_analyze_start():
     """Queue slow NVIDIA vision work; never hold the browser connection open."""
@@ -154,30 +200,23 @@ def bulk_analyze():
     files = _request_files()
     if not files:
         return jsonify({"error": "No image uploaded. Use multipart form field 'file' or 'files'."}), 400
-    item_count = request.form.get("itemCount") or len(files)
-    route = commerce_agent.choose_vision_route(item_count, len(files))
-    if route["route"] == "nvidia_worker":
-        try:
-            images = [_uploaded_image(file) for file in files]
-            queued = commerce_agent.start_routed_vision_job(
-                [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename} for image in images],
-                route["itemCount"],
-                _seller_defaults_from_form(),
-            )
-            return jsonify({"route": route, "result": queued, "nextStep": "Poll the returned job ID; heavy analysis is running on the NVIDIA worker."}), 202
-        except ValueError as exc:
-            return jsonify({"error": str(exc), "route": route}), 400
-        except Exception:
-            app.logger.exception("Heavy NVIDIA batch could not be queued")
-            return jsonify({"error": "Heavy NVIDIA batch could not be queued. Please retry shortly.", "route": route}), 503
-    results = []
+    route = {"route": "groq_first", "audit": "nvidia_second_pass", "workload": "per_item", "itemCount": len(files)}
+    items = []
     for file in files:
         try:
-            result = analyze_images([_uploaded_image(file)], {"seller_defaults": _seller_defaults_from_form()})
-            results.append({"filename": file.filename, "status": "ok", "result": result})
-        except Exception as exc:
-            results.append({"filename": file.filename, "status": "error", "error": str(exc)})
-    return jsonify({"count": len(results), "route": route, "results": results})
+            image = _uploaded_image(file)
+            job = commerce_agent.start_listing_analysis_job(
+                [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename}],
+                str(g.seller_id),
+                _seller_defaults_from_form(),
+            )
+            items.append({"filename": file.filename, **job})
+        except ValueError as exc:
+            items.append({"filename": file.filename, "status": "error", "error": str(exc)})
+        except Exception:
+            app.logger.exception("Bulk listing analysis job could not start for %r", file.filename)
+            items.append({"filename": file.filename, "status": "error", "error": "Analysis could not be queued."})
+    return jsonify({"count": len(items), "route": route, "items": items}), 202
 
 
 @app.route("/api/photo-quality", methods=["POST"])
@@ -382,6 +421,8 @@ def ebay_drafts():
     item = body.get("item") or body.get("listing") or body
     if not isinstance(item, dict):
         return jsonify({"error": "Request body must include an item object."}), 400
+    if item.get("reviewAcknowledged") is not True:
+        return jsonify({"error": "Review the item's Needs review list in HHT before creating an eBay draft."}), 400
     try:
         result = create_ebay_draft(item)
     except EbayDraftError as exc:
@@ -410,6 +451,15 @@ def ebay_draft_feed():
     items = body.get("items") or body.get("queue") or []
     if not isinstance(items, list):
         return jsonify({"error": "Request body must include an items array."}), 400
+    if any(not isinstance(item, dict) or item.get("reviewAcknowledged") is not True for item in items):
+        return jsonify({"error": "Review and acknowledge every item's Needs review list in HHT before sending Seller Hub drafts."}), 400
+    for index, item in enumerate(items):
+        image_urls = [url for url in re.split(r"[\s,]+", str(item.get("pic") or "").strip()) if url.startswith("https://")]
+        taxonomy = commerce_agent.validate_listing(item, timeout=3.0)
+        check = commerce_agent.check_listing_rules(item, len(image_urls), taxonomy)
+        blocking = [finding for finding in check["findings"] if finding["rule"] != "taxonomy_unverified"]
+        if blocking:
+            return jsonify({"error": f"Queue item {index + 1} failed the listing review checks.", "needsReview": blocking}), 400
     try:
         result = upload_seller_hub_draft_csv(items)
     except EbayFeedError as exc:
@@ -589,6 +639,12 @@ def commerce_job(job_id):
     job = commerce_agent.active_import_job(job_id)
     if not job:
         return jsonify({"error": "Commerce job not found."}), 404
+    if job.get("kind") == "listing_analysis":
+        if str(job.get("seller_id") or "") != str(g.seller_id):
+            return jsonify({"error": "Commerce job not found."}), 404
+        job.pop("seller_id", None)
+        if int(job.get("progress") or 0) < 65:
+            job["result_json"] = "{}"
     result = job.get("result_json", "{}")
     if isinstance(result, str):
         try:

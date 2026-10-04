@@ -55,6 +55,44 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(heavy["route"], "nvidia_worker")
         self.assertEqual(photo_heavy["route"], "nvidia_worker")
 
+    def test_nvidia_audit_merges_missed_fields_and_flags_disagreement(self):
+        listing = {
+            "title": "Nike Red Baseball Cap",
+            "brand": "Nike",
+            "color": "Not visible",
+            "needsReview": [],
+            "provenance": {"brand": "Inferred", "color": "Unknown"},
+        }
+        merged = commerce_agent._merge_vision_audit(listing, {
+            "observations": [
+                {"field": "Brand", "value": "Adidas", "evidence": "Adidas wordmark on front panel"},
+                {"field": "Color", "value": "Red", "evidence": "Red fabric across the crown"},
+            ],
+            "visibleFlaws": ["Small tear near the brim"],
+            "tagText": ["One size fits most"],
+        })
+        self.assertEqual(merged["provenance"]["brand"], "Needs review")
+        self.assertEqual(merged["auditDiscrepancies"][0]["observedValue"], "Adidas")
+        self.assertEqual(merged["color"], "Red")
+        self.assertEqual(merged["provenance"]["color"], "Known from image")
+        self.assertEqual(merged["auditMissedFields"][0]["field"], "color")
+        self.assertIn("Small tear near the brim", merged["cnote"])
+        self.assertEqual(merged["auditTagText"], ["One size fits most"])
+        self.assertTrue(any(entry["field"] == "brand" for entry in merged["needsReview"]))
+
+    def test_listing_rules_check_title_price_photo_brand_condition_and_taxonomy(self):
+        result = commerce_agent.check_listing_rules({
+            "title": "Short cap",
+            "brand": "Nike",
+            "price": 0,
+            "cid": "3000",
+            "cnote": "",
+            "cat": "45230",
+        }, 0, {"status": "valid", "missingRequiredAspects": ["Color"]})
+        self.assertEqual({entry["rule"] for entry in result["findings"]}, {
+            "positive_price", "photo_count", "brand_title_consistency", "used_condition", "taxonomy_required_specific",
+        })
+
     def test_analysis_runs_are_persisted_without_creating_an_ebay_action(self):
         run = commerce_agent.record_analysis_run(
             "breakground", {"title": "Review candidate"}, job_id="job-1", input_photo_count=3,

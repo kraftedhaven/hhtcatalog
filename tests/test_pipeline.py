@@ -131,6 +131,36 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("No image uploaded", response.get_json()["error"])
 
+    def test_listing_analysis_start_returns_202_and_seller_scoped_job(self):
+        def authenticate():
+            app.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        with mock.patch.object(app, "authenticate_request", side_effect=authenticate), mock.patch.object(
+            app.commerce_agent, "ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch.object(app.commerce_agent, "start_listing_analysis_job", return_value={
+            "jobId": "job-1", "status": "queued", "kind": "listing_analysis",
+        }) as start:
+            response = self.client.post(
+                "/api/analysis/start",
+                data={"file": (io.BytesIO(b"photo"), "photo.jpg", "image/jpeg")},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(start.call_args.args[1], "seller-id")
+        self.assertEqual(response.get_json()["result"]["jobId"], "job-1")
+
+    def test_listing_analysis_poll_hides_unowned_job(self):
+        def authenticate():
+            app.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        with mock.patch.object(app, "authenticate_request", side_effect=authenticate), mock.patch.object(
+            app.commerce_agent, "ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch.object(app.commerce_agent, "active_import_job", return_value=None):
+            response = self.client.get("/api/analysis/jobs/not-owned")
+        self.assertEqual(response.status_code, 404)
+
     def test_analyze_rejects_unsupported_file(self):
         response = self.client.post(
             "/analyze",
@@ -213,6 +243,35 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("api.z.ai", calls[0])
 
+    def test_background_listing_plan_forces_groq_and_keeps_openrouter_as_fallback(self):
+        with env(
+            PRIMARY_VISION_PROVIDER="nvidia",
+            HOSTED_PROVIDER_ORDER="groq,openrouter,nvidia",
+            GROQ_API_KEY="groq-key",
+            OPENROUTER_API_KEY="openrouter-key",
+            NVIDIA_NIM_API_KEY="nvidia-key",
+        ):
+            plan = providers._provider_plan({"provider_override": "groq", "background_worker": True})
+            fallback = providers._provider_plan({"provider_override": "groq", "background_worker": True, "try_alternate": True})
+        self.assertEqual(plan["selected"], "groq")
+        self.assertEqual(plan["alternate"], "openrouter")
+        self.assertEqual(fallback["selected"], "openrouter")
+
+    def test_nvidia_audit_returns_only_structured_evidence(self):
+        audit_json = json.dumps({
+            "observations": [{"field": "Color", "value": "Red", "evidence": "Red fabric"}],
+            "visibleFlaws": ["Small tear by hem"],
+            "tagText": ["Size M"],
+        })
+        with env(NVIDIA_NIM_API_KEY="nv", NVIDIA_CATEGORY_MODEL="vision-model"):
+            with mock.patch.object(providers, "_nvidia", return_value=audit_json) as nvidia:
+                result = providers.audit_listing_with_nvidia([self.image], {"brand": "Nike"}, 4)
+        self.assertEqual(result["observations"][0]["field"], "Color")
+        self.assertEqual(result["visibleFlaws"], ["Small tear by hem"])
+        self.assertEqual(result["tagText"], ["Size M"])
+        self.assertIn("Groq listing for comparison", nvidia.call_args.args[1]["audit_prompt"])
+        self.assertTrue(nvidia.call_args.args[1]["nvidia_audit_only"])
+
     def test_groq_mock_success_uses_compressed_multimodal_non_thinking_request(self):
         with env(PRIMARY_VISION_PROVIDER="groq", GROQ_API_KEY="groq-key"):
             with mock.patch.object(providers.requests, "post", return_value=FakeResponse(payload=provider_payload())) as post:
@@ -223,10 +282,10 @@ class MergePipelineTests(unittest.TestCase):
         payload = post.call_args.kwargs["json"]
         self.assertEqual(headers["Authorization"], "Bearer groq-key")
         self.assertNotIn("groq-key", json.dumps(payload))
-        self.assertEqual(payload["model"], "qwen/qwen3.6-27b")
-        self.assertEqual(payload["temperature"], 0.7)
-        self.assertEqual(payload["reasoning_effort"], "none")
-        self.assertEqual(payload["reasoning_format"], "hidden")
+        self.assertEqual(payload["model"], providers.GROQ_DEFAULT_MODEL)
+        self.assertEqual(payload["temperature"], 0.1)
+        self.assertNotIn("reasoning_effort", payload)
+        self.assertNotIn("reasoning_format", payload)
         self.assertNotIn("response_format", payload)
         self.assertEqual(payload["max_completion_tokens"], 900)
         content = payload["messages"][0]["content"]
@@ -244,7 +303,7 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(result["provider"], "groq")
         self.assertEqual(post.call_count, 2)
         self.assertEqual(post.call_args_list[0].kwargs["json"]["model"], "retired-model")
-        self.assertEqual(post.call_args_list[1].kwargs["json"]["model"], "qwen/qwen3.8-27b")
+        self.assertEqual(post.call_args_list[1].kwargs["json"]["model"], providers.GROQ_FALLBACK_MODEL)
 
     def test_groq_429_honors_retry_after_once(self):
         payload = {"error": {"code": "rate_limit_exceeded", "message": "too many requests"}}
@@ -895,7 +954,7 @@ class MergePipelineTests(unittest.TestCase):
         ), mock.patch("app.commerce_agent.ebay_mutations_enabled", return_value=True), mock.patch(
             "app.create_ebay_draft", return_value={"status": "draft_created", "offerId": "offer-1", "published": False}
         ) as create:
-            response = self.client.post("/api/ebay/drafts", json={"item": {"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}})
+            response = self.client.post("/api/ebay/drafts", json={"item": {"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "reviewAcknowledged": True}})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["result"]["offerId"], "offer-1")
         self.assertFalse(response.get_json()["result"]["published"])
@@ -1185,8 +1244,8 @@ class MergePipelineTests(unittest.TestCase):
             "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
         ), mock.patch("app.commerce_agent.ebay_mutations_enabled", return_value=True), mock.patch(
             "app.upload_seller_hub_draft_csv", return_value={"status": "submitted", "taskId": "task-123"}
-        ) as upload:
-            response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}]})
+        ) as upload, mock.patch.object(app.commerce_agent, "validate_listing", return_value={"status": "unavailable"}):
+            response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Levi's Jacket", "brand": "Levi's", "price": 24.99, "cat": "57988", "pic": "https://example.test/jacket.jpg", "reviewAcknowledged": True}]})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["result"]["taskId"], "task-123")
         upload.assert_called_once()
@@ -1200,11 +1259,40 @@ class MergePipelineTests(unittest.TestCase):
             "app.authenticate_request", side_effect=authenticated
         ), mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}), mock.patch(
             "app.upload_seller_hub_draft_csv", return_value={"status": "submitted", "taskId": "task-draft"}
-        ) as upload:
-            response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Levi's Jacket", "price": 24.99, "cat": "57988"}]})
+        ) as upload, mock.patch.object(app.commerce_agent, "validate_listing", return_value={"status": "unavailable"}):
+            response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Levi's Jacket", "brand": "Levi's", "price": 24.99, "cat": "57988", "pic": "https://example.test/jacket.jpg", "reviewAcknowledged": True}]})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["result"]["taskId"], "task-draft")
         upload.assert_called_once()
+
+    def test_draft_feed_requires_review_acknowledgement(self):
+        def authenticated():
+            app.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch("app.upload_seller_hub_draft_csv") as upload:
+            response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Test", "price": 10}]})
+        self.assertEqual(response.status_code, 400)
+        upload.assert_not_called()
+
+    def test_draft_feed_rejects_rule_failures_before_upload(self):
+        def authenticated():
+            app.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch("app.upload_seller_hub_draft_csv") as upload, mock.patch.object(
+            app.commerce_agent, "validate_listing", return_value={"status": "unavailable"}
+        ):
+            response = self.client.post("/api/ebay/draft-feed", json={"items": [{
+                "title": "Short", "brand": "Nike", "price": 0, "reviewAcknowledged": True,
+            }]})
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(response.get_json()["needsReview"])
+        upload.assert_not_called()
 
     def test_offer_verify_and_publish_endpoints_are_removed(self):
         self.assertEqual(self.client.get("/api/ebay/offers/offer-123").status_code, 404)

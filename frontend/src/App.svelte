@@ -29,6 +29,8 @@
     let stagingInput;
     let item = load("hht_current_item", emptyItem);
     let queue = load("hht_queue", []);
+    let analysisJobs = load("hht_analysis_jobs", []);
+    const analysisSourceFiles = new Map();
     let seller = load("hht_seller_defaults", defaultSeller);
     let analysisHints = load("hht_analysis_hints", { brand: "", model: "", itemType: "", category: "", searchTerms: "" });
     let autoDraftEnabled = loadFlag("hht_auto_draft_enabled");
@@ -74,12 +76,17 @@
     $: titleLength = (item.title || "").length;
     $: queueTotal = queue.reduce((sum, next) => sum + (Number.parseFloat(next.price) || 0), 0);
     $: queueAverage = queue.length ? queueTotal / queue.length : 0;
+    $: analysisTimingSamples = analysisJobs.map((job) => job.result?.analysisTimings).filter((timing) => timing && timing.firstPassSeconds !== undefined && timing.totalSeconds !== undefined && !timing.cacheHit);
+    $: analysisMedianFirstPass = median(analysisTimingSamples.map((timing) => Number(timing.firstPassSeconds)));
+    $: analysisMedianTotal = median(analysisTimingSamples.map((timing) => Number(timing.totalSeconds)));
     $: persist("hht_queue", queue);
+    $: persist("hht_analysis_jobs", analysisJobs);
     $: persist("hht_seller_defaults", seller);
     $: persist("hht_analysis_hints", analysisHints);
     $: persist("hht_auto_draft_enabled", autoDraftEnabled);
     $: persist("hht_current_item", item);
     $: reviewNotes = sellerReviewNotes(item);
+    $: itemReviewFindings = getReviewFindings(item);
     $: visibleCategoryFields = categoryFields.filter((field) => !canonicalAspectKeys[aspectKey(field.name)]);
     $: ebaySpecificFields = [
         ...canonicalEbayFields.map((base) => categoryFields.find((field) => aspectKey(field.name) === aspectKey(base.name)) || base),
@@ -88,11 +95,15 @@
     $: selectedStagingPhotos = stagingPhotos.filter((photo) => selectedPhotoIds.includes(photo.id) && !photo.processed);
 
     onMount(() => {
-        if (!supabase) return;
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-            setTimeout(() => refreshPhotoStorage(session), 0);
-        });
-        return () => subscription.unsubscribe();
+        for (const job of analysisJobs.filter((entry) => ["queued", "running", "auditing"].includes(entry.status))) {
+            void monitorListingAnalysis(job.jobId, []);
+        }
+        if (supabase) {
+            const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+                setTimeout(() => refreshPhotoStorage(session), 0);
+            });
+            return () => subscription.unsubscribe();
+        }
     });
 
     async function refreshPhotoStorage(sessionOrEvent) {
@@ -130,6 +141,13 @@
         } catch {
             return false;
         }
+    }
+
+    function median(values) {
+        const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
+        if (!sorted.length) return null;
+        const middle = Math.floor(sorted.length / 2);
+        return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
     }
 
     function dismissOnboarding() {
@@ -243,19 +261,29 @@
         }
         loading = true;
         try {
-            const usesHostedUpload = engine === "hosted" || engine === "nvidia";
+            const usesHostedUpload = engine === "hosted";
             status = usesHostedUpload ? "Compressing and uploading photos..." : "Starting browser-local model...";
             const hostedFiles = usesHostedUpload ? await compactHostedFiles(analysisFiles) : analysisFiles;
             status = usesHostedUpload ? "Uploading compressed photos for secure analysis..." : status;
-            let result;
             if (engine === "hosted") {
-                result = await analyzeImages(hostedFiles, seller, { ...options, analysisHints });
-            } else if (engine === "nvidia") {
-                const started = await startNvidiaAnalysis(hostedFiles, seller, analysisHints);
-                result = await waitForNvidiaJob(started.jobId);
-            } else {
-                result = await localAnalyze();
+                const started = await analyzeImages(hostedFiles, seller, { ...options, analysisHints });
+                const analysisJob = {
+                    jobId: started.jobId,
+                    status: started.status || "queued",
+                    progress: 0,
+                    label: analysisFiles.map((file) => file.name).join(", "),
+                    result: null,
+                    startedAt: new Date().toISOString(),
+                };
+                analysisSourceFiles.set(started.jobId, analysisFiles);
+                analysisJobs = [analysisJob, ...analysisJobs.filter((job) => job.jobId !== started.jobId)].slice(0, 30);
+                status = "Analysis queued. You can continue grouping photos while each item processes.";
+                void monitorListingAnalysis(started.jobId, analysisFiles);
+                return;
             }
+            let result;
+            result = await localAnalyze();
+            result = { ...result, photoCount: analysisFiles.length };
             let storageNotice = "";
             if (photoStorage.configured && hostedFiles.length) {
                 try {
@@ -268,6 +296,7 @@
                 }
             }
             item = normalizeForForm(result);
+            if (item.cat) void loadCategoryFields(item.cat);
             status = result.demo ? "Demo result loaded. Review required." : `${options.isRerun ? "Re-analysis" : "Analysis"} complete via ${result.provider || engine}.${storageNotice} Review required.`;
             tab = "edit";
         } catch (err) {
@@ -285,24 +314,61 @@
         }
     }
 
-    async function waitForNvidiaJob(jobId) {
-        if (!jobId) throw new Error("NVIDIA analysis did not return a job ID.");
-        const expiresAt = Date.now() + 150000;
+    async function monitorListingAnalysis(jobId, sourceFiles = []) {
+        const expiresAt = Date.now() + 120000;
+        let storedPhotos = false;
         while (Date.now() < expiresAt) {
-            const job = await commerceJob(jobId);
-            if (job.status === "completed") return job.result || {};
-            if (job.status === "failed") {
-                const failure = new Error(job.error || "NVIDIA analysis failed in the worker.");
-                failure.providerFailures = job.result?.providerFailures || [];
-                failure.retryAfterSeconds = job.result?.retryAfterSeconds || null;
-                throw failure;
+            try {
+                const job = await listingAnalysisJob(jobId);
+                const previous = analysisJobs.find((entry) => entry.jobId === jobId)?.result || {};
+                let updated = job.result?.listing || previous;
+                if (previous.pic && !updated.pic) updated = { ...updated, pic: previous.pic, photoAssets: previous.photoAssets, photoStorageStatus: previous.photoStorageStatus, photoStorageRequired: previous.photoStorageRequired };
+                if (updated && !storedPhotos && sourceFiles.length && photoStorage.configured) {
+                    storedPhotos = true;
+                    updated = { ...updated, photoStorageStatus: "pending", photoStorageRequired: true };
+                    void persistAnalysisPhotos(jobId, sourceFiles);
+                }
+                const withJobId = updated ? { ...updated, analysisJobId: jobId } : updated;
+                analysisJobs = analysisJobs.map((entry) => entry.jobId === jobId ? {
+                    ...entry,
+                    status: job.status === "completed" ? "complete" : job.status === "failed" ? "failed" : updated ? "auditing" : job.status,
+                    progress: job.progress || entry.progress,
+                    result: withJobId || entry.result,
+                    error: job.error || "",
+                } : entry);
+                if (item.analysisJobId === jobId && withJobId) item = normalizeForForm(withJobId);
+                if (job.status === "failed" || job.status === "completed") return;
+            } catch {
+                return;
             }
-            status = job.status === "running"
-                ? "NVIDIA is analyzing the product in the background..."
-                : "NVIDIA analysis is queued. It will continue even if this page closes.";
-            await new Promise((resolve) => setTimeout(resolve, 2000));
+            await new Promise((resolve) => setTimeout(resolve, 1500));
         }
-        throw new Error("NVIDIA analysis is still running. Please return to Analyze shortly; the worker job remains safely queued.");
+    }
+
+    async function persistAnalysisPhotos(jobId, sourceFiles) {
+        try {
+            const stored = await uploadListingPhotos(sourceFiles, "unassigned");
+            const urls = (stored.assets || []).map((asset) => asset.ebayUrl).filter((url) => url.startsWith("https://"));
+            analysisJobs = analysisJobs.map((entry) => entry.jobId === jobId && entry.result
+                ? { ...entry, result: { ...entry.result, pic: urls.join(" "), photoAssets: stored.assets, photoStorageStatus: urls.length ? "stored" : "unavailable" } }
+                : entry);
+            if (item.analysisJobId === jobId && urls.length) item = { ...item, pic: urls.join(" "), photoAssets: stored.assets, photoStorageStatus: "stored" };
+        } catch {
+            analysisJobs = analysisJobs.map((entry) => entry.jobId === jobId && entry.result
+                ? { ...entry, result: { ...entry.result, photoStorageStatus: "unavailable" } }
+                : entry);
+            if (item.analysisJobId === jobId) item = { ...item, photoStorageStatus: "unavailable" };
+        }
+    }
+
+    function openAnalysisResult(job) {
+        if (!job?.result) return;
+        item = normalizeForForm(job.result);
+        previews.forEach((preview) => URL.revokeObjectURL(preview.url));
+        files = analysisSourceFiles.get(job.jobId) || [];
+        previews = files.map((file) => ({ name: file.name, url: URL.createObjectURL(file) }));
+        if (item.cat) void loadCategoryFields(item.cat);
+        tab = "edit";
     }
 
     async function localAnalyze() {
@@ -330,7 +396,7 @@
 
     async function compactHostedFiles(sourceFiles) {
         const resized = [];
-        for (const file of sourceFiles.slice(0, 3)) {
+        for (const file of sourceFiles.slice(0, 5)) {
             resized.push(await resizeImage(file));
         }
         return resized;
@@ -342,7 +408,7 @@
             reader.onload = () => {
                 const image = new Image();
                 image.onload = () => {
-                    const max = 1600;
+                    const max = 1280;
                     const scale = Math.min(1, max / Math.max(image.width, image.height));
                     const canvas = document.createElement("canvas");
                     canvas.width = Math.max(1, Math.round(image.width * scale));
@@ -499,13 +565,20 @@
             return;
         }
         categoryLoading = true;
+        categoryFields = [];
         try {
             const result = await ebayCategoryAspects(id);
-            categoryFields = result.fields || [];
-            categoryNotice = result.message || "";
+            if (item.cat === id) {
+                categoryFields = result.fields || [];
+                item = { ...item, categoryRequiredAspects: result.requiredAspects || [] };
+                categoryNotice = result.message || "";
+            }
         } catch (err) {
             categoryFields = [];
-            categoryNotice = err.message || "eBay category fields are unavailable.";
+            if (item.cat === id) {
+                item = { ...item, categoryRequiredAspects: [] };
+                categoryNotice = err.message || "eBay category fields are unavailable.";
+            }
         } finally {
             categoryLoading = false;
         }
@@ -568,6 +641,9 @@
     function firstInvalidQueuedItem(source = queue) {
         for (let index = 0; index < source.length; index += 1) {
             const reviewed = reviewedCandidate(source[index]);
+            if (reviewed.reviewAcknowledged !== true) {
+                return { index, reviewed, message: "Open this item in Review and acknowledge its Needs review list before sending it to eBay." };
+            }
             const validation = validateItem(reviewed);
             if (validation) return { index, reviewed, message: validation };
         }
@@ -597,7 +673,7 @@
             tab = "queue";
             return;
         }
-        queue = [...queue, { ...reviewed, approved: true, approvedAt: new Date().toISOString() }];
+        queue = [...queue, { ...reviewed, reviewAcknowledged: true, approved: true, approvedAt: new Date().toISOString() }];
         item = { ...emptyItem };
         status = "Item added to queue.";
         tab = "queue";
@@ -605,12 +681,67 @@
     }
 
     function validateItem(candidate) {
+        if (candidate.photoStorageRequired && candidate.photoStorageStatus === "pending") return "Wait for signed photo URLs to finish before queueing this hosted listing.";
+        if (candidate.photoStorageRequired && !String(candidate.pic || "").split(/[\s,]+/).some((url) => url.startsWith("https://"))) return "This hosted listing needs a signed HTTPS photo URL before it can be queued.";
         if (!candidate.title || candidate.title.length > 80) return "Title is required and must be 80 characters or fewer.";
-        if (!candidate.price || Number.parseFloat(candidate.price) <= 0) return "Enter a positive fixed price.";
+        if (!(Number.parseFloat(candidate.price) > 0)) return "Enter a positive fixed price.";
+        if (!(Number(candidate.photoCount) > 0 || String(candidate.pic || "").trim())) return "Attach at least one item photo before queueing.";
         if (!candidate.cat) return "Choose a supplied eBay category before queueing.";
         if (!candidate.brand) return "Brand is required. Use Not visible or No Brand if needed.";
-        if (["3000", "5000", "6000"].includes(candidate.cid) && !candidate.cnote) return "Add a condition note for used condition codes.";
+        if (candidate.brand !== "Not visible" && !String(candidate.title || "").toLowerCase().includes(String(candidate.brand).toLowerCase())) return "Include the selected brand in the listing title or correct the brand.";
+        const inconsistentSpecific = specificConsistencyFindings(candidate)[0];
+        if (inconsistentSpecific) return inconsistentSpecific;
+        if (["3000", "4000", "5000", "6000"].includes(String(candidate.cid)) && !candidate.cnote) return "Add a condition note for used condition codes.";
+        const required = candidate.categoryRequiredAspects || [];
+        const missing = required.find((name) => {
+            const key = canonicalAspectKeys[aspectKey(name)];
+            const value = key ? candidate[key] : candidate.itemSpecifics?.[name];
+            return !String(value || "").trim() || /^not visible$/i.test(String(value || "").trim());
+        });
+        if (missing) return `Complete the Taxonomy-required ${missing} specific before queueing.`;
         return "";
+    }
+
+    function getReviewFindings(candidate) {
+        const findings = [...(candidate.needsReview || []).map((entry) => entry.reason || `${entry.field}: review needed` )];
+        if (candidate.auditStatus === "running") findings.push("NVIDIA's second-pass audit is still running; it may add findings after you queue this draft.");
+        if (!candidate.title || candidate.title.length > 80) findings.push("Title must contain 1 to 80 characters.");
+        if (!(Number.parseFloat(candidate.price) > 0)) findings.push("Price must be greater than zero.");
+        if (!(Number(candidate.photoCount) > 0 || String(candidate.pic || "").trim())) findings.push("No item photo is attached to this listing.");
+        if (candidate.photoStorageRequired && candidate.photoStorageStatus === "pending") findings.push("Signed photo URL generation is still running.");
+        if (candidate.photoStorageRequired && !String(candidate.pic || "").split(/[\s,]+/).some((url) => url.startsWith("https://"))) findings.push("A signed HTTPS photo URL is required before sending this hosted listing.");
+        if (candidate.brand && candidate.brand !== "Not visible" && !String(candidate.title || "").toLowerCase().includes(String(candidate.brand).toLowerCase())) {
+            findings.push("Brand is not present in the title.");
+        }
+        findings.push(...specificConsistencyFindings(candidate));
+        if (["3000", "5000", "6000"].includes(String(candidate.cid)) && !String(candidate.cnote || "").trim()) {
+            findings.push("Add a condition description for this used item.");
+        }
+        const required = candidate.categoryRequiredAspects || [];
+        for (const name of required) {
+            const key = canonicalAspectKeys[aspectKey(name)];
+            const value = key ? candidate[key] : candidate.itemSpecifics?.[name];
+            if (!String(value || "").trim() || /^not visible$/i.test(String(value || "").trim())) findings.push(`Missing required eBay specific: ${name}.`);
+        }
+        if (candidate.cat && candidate.categoryRequiredAspects === undefined) findings.push("eBay Taxonomy-required specifics have not been checked.");
+        if (candidate.rulesCheck?.findings?.length) findings.push(...candidate.rulesCheck.findings.map((entry) => entry.message));
+        return [...new Set(findings)];
+    }
+
+    function specificConsistencyFindings(candidate) {
+        const fields = {
+            Brand: "brand", Size: "size", Color: "color", Department: "dept", Type: "type",
+            Style: "style", Material: "mat", Pattern: "pat", Vintage: "vin", "Made In": "madeIn",
+        };
+        const specifics = candidate.itemSpecifics || {};
+        return Object.entries(fields).flatMap(([label, key]) => {
+            const name = Object.keys(specifics).find((entry) => entry.toLowerCase() === label.toLowerCase());
+            if (!name) return [];
+            const specificValues = Array.isArray(specifics[name]) ? specifics[name] : [specifics[name]];
+            const canonical = String(candidate[key] || "").trim();
+            if (!canonical || /^not visible$/i.test(canonical) || specificValues.some((value) => String(value).trim().toLowerCase() === canonical.toLowerCase())) return [];
+            return [`${label} conflicts with the listing field.`];
+        });
     }
 
     function editQueued(index) {
@@ -620,6 +751,10 @@
     }
 
     function approveQueued(index) {
+        if (queue[index]?.reviewAcknowledged !== true) {
+            error = "Open this item and review its Needs review findings before approving it for eBay.";
+            return;
+        }
         queue = queue.map((entry, entryIndex) => entryIndex === index
             ? { ...entry, approved: true, approvedAt: new Date().toISOString() }
             : entry);
@@ -919,18 +1054,31 @@
             <label class="field">
                 <span>Analysis engine</span>
                 <select bind:value={engine}>
-                    <option value="hosted">Hosted vision with automatic fallback</option>
-                    <option value="nvidia">NVIDIA vision worker (reliable background analysis)</option>
+                    <option value="hosted">Groq first pass + NVIDIA audit</option>
                     <option value="local">Browser-local SmolVLM experimental</option>
                 </select>
             </label>
             <p class="help">
                 {engine === "hosted"
-                    ? "Photos go to this Heroku app. It uses the primary provider and automatically retries with the configured alternate provider if the primary is temporarily unavailable."
-                    : engine === "nvidia"
-                        ? "Photos are queued to the NVIDIA worker instead of holding this page open. The result returns here when ready; eBay is never changed automatically."
-                        : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
+                    ? "Hosted analysis is queued and returns the Groq result as soon as it is ready. NVIDIA checks for missed fields and visible flaws in parallel; neither provider directly changes eBay."
+                    : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
             </p>
+            {#if analysisJobs.length}
+                <div class="wide notice info">
+                    <strong>Item analysis jobs</strong>
+                    {#if analysisMedianFirstPass !== null}<p>Observed median (uncached): Groq first pass {analysisMedianFirstPass.toFixed(2)}s · full audit {analysisMedianTotal.toFixed(2)}s across {analysisTimingSamples.length} item{analysisTimingSamples.length === 1 ? "" : "s"}. No pre-change baseline is available in this browser.</p>{/if}
+                    {#each analysisJobs as job}
+                        <div class="queue-row">
+                            <div><strong>{job.label || "Listing item"}</strong><span>{job.status} · {job.progress || 0}%</span>
+                                {#if job.error}<small>{job.error}</small>{/if}
+                                {#if job.result?.auditStatus === "running"}<small>Groq result available; NVIDIA audit is still running.</small>{/if}
+                                {#if job.result?.needsReview?.length}<small>Needs review: {job.result.needsReview.map((entry) => entry.reason || entry.field).join("; ")}</small>{/if}
+                            </div>
+                            {#if job.result}<button type="button" on:click={() => openAnalysisResult(job)}>Review result</button>{/if}
+                        </div>
+                    {/each}
+                </div>
+            {/if}
             <div class="wide notice info analysis-guidance">
                 <strong>Guide the analysis (optional)</strong>
                 <p>Enter a clue when the first result is wrong. These are hypotheses for the vision model to verify—not automatic facts.</p>
@@ -1024,6 +1172,18 @@
     {/if}
 
     {#if tab === "edit"}
+        <div class="wide notice warn">
+            <strong>Needs review ({itemReviewFindings.length})</strong>
+            {#if item.auditStatus === "running"}<p>NVIDIA is checking for missed fields, label text, and visible flaws in the background.</p>{/if}
+            {#if itemReviewFindings.length}
+                {#each itemReviewFindings as finding}<p>{finding}</p>{/each}
+            {:else}
+                <p>No deterministic issues found. Confirm the values against the photos before adding this item to the queue.</p>
+            {/if}
+            {#if item.provenance}
+                <p class="help">Field evidence: {Object.entries(item.provenance).filter(([field]) => ["brand", "model", "size", "color", "type", "mat", "madeIn"].includes(field)).map(([field, source]) => `${field}: ${source}`).join(" · ")}</p>
+            {/if}
+        </div>
         {#if reviewNotes.length}
             <div class="notice warn">
                 <strong>Seller review required</strong>
