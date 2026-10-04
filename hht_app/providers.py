@@ -15,6 +15,7 @@ from PIL import Image, UnidentifiedImageError
 from .ebay_pricing import enrich_with_ebay_active_pricing
 from .evidence import normalize_evidence
 from .schema import normalize_listing, parse_model_json
+from .title_optimizer import optimize_title
 
 
 def _register_heic_support() -> bool:
@@ -188,6 +189,15 @@ def analyze_images(images: list[UploadedImage], context: dict[str, Any] | None =
                     retryable=False,
                 ) from exc
             result = enrich_with_ebay_active_pricing(normalize_listing(parsed), timeout=min(5.0, _request_timeout(context)))
+            title_plan = optimize_title(result, category_name=str(result.get("categoryName") or ""))
+            if title_plan.get("title"):
+                result["titleOriginal"] = result.get("title")
+                result["title"] = title_plan["title"]
+                result["titleOptimized"] = True
+            else:
+                result["titleOptimized"] = False
+            result["titleCandidates"] = title_plan.get("candidates", {})
+            result["titleSeoMetadata"] = title_plan.get("seoMetadata", {})
             result["attributeEvidence"] = normalize_evidence(
                 parsed,
                 source=f"vision:{selected}",

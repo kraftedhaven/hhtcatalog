@@ -995,6 +995,23 @@
                 {#if item.analysisHintFields?.length}<p class="help">Seller clues used for this result: {item.analysisHintFields.join(", ")}. Confirm them against the photos before export.</p>{/if}
             </div>
             <label class="field wide"><span>Title <em>{titleLength}/80</em></span><input bind:value={item.title} maxlength="80" /></label>
+            {#if item.titleCandidates && Object.keys(item.titleCandidates).length}
+                <div class="wide notice info">
+                    <strong>Title options (SEO-safe)</strong>
+                    <p class="help">These suggestions are generated from the extracted listing attributes and capped at 80 characters. Pick one to apply it to the Title field, then verify every detail against the photos.</p>
+                    {#if item.titleSeoMetadata}
+                        <p class="help">Confirmed-keyword coverage: {Math.round(Number(item.titleSeoMetadata?.keywordCoverage || 0) * 100)}%. Source: {item.titleSeoMetadata?.source || ""}</p>
+                    {/if}
+                    <div class="category-suggestions" aria-label="Suggested title candidates">
+                        {#each Object.entries(item.titleCandidates) as [key, candidate]}
+                            <button type="button" on:click={() => item = applyClientRules({ ...item, title: candidate.title })}>
+                                <strong>{candidate.title}</strong>
+                                <span>{candidate.length}/80 · {candidate.confidence} confidence · {key.replace(/_/g, " ")}</span>
+                            </button>
+                        {/each}
+                    </div>
+                </div>
+            {/if}
             <label class="field"><span>Price</span><input bind:value={item.price} inputmode="decimal" /></label>
             <label class="field"><span>SKU / Custom label</span><input bind:value={item.sku} placeholder="Optional unique item code" /></label>
             <label class="field"><span>Quantity</span><input bind:value={item.quantity} inputmode="numeric" placeholder="1" /></label>
