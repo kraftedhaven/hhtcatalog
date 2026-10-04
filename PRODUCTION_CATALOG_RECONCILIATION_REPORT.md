@@ -1,7 +1,7 @@
 # HHT Commerce Agent — Production Reconciliation and Enrichment Report
 
-**Date:** 2026-09-21  
-**Deployment:** `da4fc06` — *Exclude stale local records from active review queue*  
+**Date:** 2026-09-21
+**Deployment:** `da4fc06` — *Exclude stale local records from active review queue*
 **Mode:** Recommendation-only; no eBay listing update, offer publication, or price mutation was performed.
 
 ## Completed production work
@@ -17,7 +17,7 @@ The dashboard now distinguishes between a category that needs seller confirmatio
 ## Live verification
 
 | Verification | Result |
-|---|---:|
+| --- | --- |
 | Public health endpoint | Healthy |
 | Active listings returned by eBay | 504 |
 | Local historical records retained | 520 |
@@ -33,7 +33,7 @@ The 19-record pilot confirmed that `GetItem` returns the authoritative eBay cate
 ## Validation
 
 | Check | Result |
-|---|---|
+| --- | --- |
 | Python regression suite | 139 tests passed |
 | Frontend production build | Passed |
 | Frontend listing-model tests | 6 passed |
@@ -43,10 +43,14 @@ The 19-record pilot confirmed that `GetItem` returns the authoritative eBay cate
 ## Operational workflow
 
 1. Open the **Commerce Agent** tab and press **Analyze Active Listings** when you need a refreshed active catalog. This action is read-only.
-2. Use the filters to make a 10–20 item pilot set, then select **Enrich selected (read-only)**. This retrieves official `GetItem` details for that bounded group and fills category/item-specific evidence locally.
-3. Review the category recommendation, live Taxonomy message, evidence table, title candidate, and pricing source. The listing editor’s category search/dropdown and dynamic eBay fields are available for seller corrections.
-4. Use **Approve only** for evidence-backed, low-risk changes. Approval remains local; it sends nothing to eBay.
-5. Use **Apply approved change** only after review. That is the separate action that can call the eBay offer-update flow. Publishing remains separately confirmed.
+
+1. Use the filters to make a 10–20 item pilot set, then select **Enrich selected (read-only)**. This retrieves official `GetItem` details for that bounded group and fills category/item-specific evidence locally.
+
+1. Review the category recommendation, live Taxonomy message, evidence table, title candidate, and pricing source. The listing editor’s category search/dropdown and dynamic eBay fields are available for seller corrections.
+
+1. Use **Approve only** for evidence-backed, low-risk changes. Approval remains local; it sends nothing to eBay.
+
+1. Use **Apply approved change** only after review. That is the separate action that can call the eBay offer-update flow. Publishing remains separately confirmed.
 
 ## Current limitation and next scaling step
 
@@ -57,5 +61,7 @@ For full-catalog enrichment, scale the existing worker process and process bound
 ## eBay documentation consulted
 
 - [GetMyeBaySelling reference](https://developer.ebay.com/devzone/xml/docs/reference/ebay/getmyebayselling.html)
+
 - [Trading API request-field and OutputSelector guidance](https://developer.ebay.com/api-docs/user-guides/static/make-a-call/tapi-input-data.html)
+
 - [Trading API field index](https://developer.ebay.com/devzone/xml/docs/reference/ebay/fieldindex.html)

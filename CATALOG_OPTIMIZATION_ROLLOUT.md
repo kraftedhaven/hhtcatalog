@@ -23,11 +23,16 @@ Set `NVIDIA_NIM_BASE_URL`, `NVIDIA_NIM_API_KEY`, and `NVIDIA_CATEGORY_MODEL` to 
 ## Pilot
 
 1. Import 10–20 representative listings, including one high-value designer item, one category with missing specifics, one ordinary active listing, and one item with a known model.
-2. Run audit and inspect evidence, taxonomy status, title candidate, pricing source, demand confidence, and risk.
-3. Approve recommendations without applying them. Confirm the approval record is created and no eBay call occurs.
-4. Apply only two low-risk title/specifics changes after seller review.
-5. Compare the resulting eBay records and document false positives, missing attributes, and title quality.
-6. Expand in batches of 50–100 only after the pilot passes.
+
+1. Run audit and inspect evidence, taxonomy status, title candidate, pricing source, demand confidence, and risk.
+
+1. Approve recommendations without applying them. Confirm the approval record is created and no eBay call occurs.
+
+1. Apply only two low-risk title/specifics changes after seller review.
+
+1. Compare the resulting eBay records and document false positives, missing attributes, and title quality.
+
+1. Expand in batches of 50–100 only after the pilot passes.
 
 ## Cloudflare
 
