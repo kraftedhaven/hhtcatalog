@@ -332,15 +332,20 @@ def _draft_condition(condition_id: Any) -> str:
     return "NEW" if _text(condition_id) in {"1000", "1500"} else "USED"
 
 
-def _normalize_item_specifics(value: Any) -> dict[str, str]:
+def _normalize_item_specifics(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    cleaned: dict[str, str] = {}
+    cleaned: dict[str, Any] = {}
     for key, raw in value.items():
         label = _text(key)[:80]
-        item_value = _text(raw)[:65]
-        if label and item_value and item_value.casefold() not in {"not visible", "n/a", "none"}:
-            cleaned[label] = item_value
+        raw_values = raw if isinstance(raw, list) else [raw]
+        values = []
+        for entry in raw_values:
+            item_value = _text(entry)[:65]
+            if item_value and item_value.casefold() not in {"not visible", "n/a", "none"} and item_value not in values:
+                values.append(item_value)
+        if label and values:
+            cleaned[label] = values if isinstance(raw, list) else values[0]
     return cleaned
 
 

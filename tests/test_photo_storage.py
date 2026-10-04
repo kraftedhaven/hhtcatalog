@@ -113,7 +113,7 @@ class PhotoStorageTests(unittest.TestCase):
         with mock.patch("app.authenticate_request", side_effect=authenticate), mock.patch(
             "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller"}
         ), mock.patch("app.store_photo", side_effect=store):
-            response = app.test_client().post(
+            response = flask_app.test_client().post(
                 "/api/photos",
                 data={"file": [(io.BytesIO(b"one"), "saved.jpg"), (io.BytesIO(b"two"), "failed.jpg")]},
                 content_type="multipart/form-data",
@@ -123,6 +123,7 @@ class PhotoStorageTests(unittest.TestCase):
         self.assertEqual(body["count"], 1)
         self.assertEqual([entry["status"] for entry in body["files"]], ["stored", "error"])
         self.assertEqual(body["assets"][0]["assetId"], "saved")
+        self.assertEqual(body["failures"][0]["error"], "Photo could not be saved.")
         self.assertEqual(body["failures"][0]["category"], "storage")
 
     def test_rejects_unsupported_type_before_provider_call(self):

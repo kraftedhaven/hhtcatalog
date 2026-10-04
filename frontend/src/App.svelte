@@ -63,6 +63,13 @@
         "size type": "st", vintage: "vin", "made in": "madeIn", "country/region of manufacture": "madeIn",
         "serial number": "serialNumber", measurements: "measurements", condition: "cnote"
     };
+    const canonicalEbayFields = [
+        ["Brand", "brand"], ["Model", "model"], ["Size", "size"], ["Color", "color"],
+        ["Department", "dept"], ["Type", "type"], ["Style", "style"], ["Theme", "theme"],
+        ["Material", "mat"], ["Pattern", "pat"], ["Sleeve Length", "slv"], ["Neckline", "nk"],
+        ["Season", "sea"], ["Occasion", "occ"], ["Size Type", "st"], ["Vintage", "vin"],
+        ["Made In", "madeIn"], ["Serial Number", "serialNumber"], ["Measurements", "measurements"]
+    ].map(([name, key]) => ({ name, key, required: false, recommended: false, values: [], multiSelect: false }));
 
     $: titleLength = (item.title || "").length;
     $: queueTotal = queue.reduce((sum, next) => sum + (Number.parseFloat(next.price) || 0), 0);
@@ -74,6 +81,10 @@
     $: persist("hht_current_item", item);
     $: reviewNotes = sellerReviewNotes(item);
     $: visibleCategoryFields = categoryFields.filter((field) => !canonicalAspectKeys[aspectKey(field.name)]);
+    $: ebaySpecificFields = [
+        ...canonicalEbayFields.map((base) => categoryFields.find((field) => aspectKey(field.name) === aspectKey(base.name)) || base),
+        ...visibleCategoryFields,
+    ];
     $: selectedStagingPhotos = stagingPhotos.filter((photo) => selectedPhotoIds.includes(photo.id) && !photo.processed);
 
     onMount(() => {
@@ -517,6 +528,13 @@
         return key ? item[key] || "" : item.itemSpecifics?.[name] || "";
     }
 
+    function categoryFieldValues(name) {
+        return String(categoryFieldValue(name) || "")
+            .split("|")
+            .map((value) => value.trim())
+            .filter(Boolean);
+    }
+
     function aspectKey(name) {
         return String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
     }
@@ -528,6 +546,13 @@
             return;
         }
         item = { ...item, itemSpecifics: { ...(item.itemSpecifics || {}), [name]: value } };
+    }
+
+    function toggleCategoryFieldValue(name, value, checked) {
+        const next = new Set(categoryFieldValues(name));
+        if (checked) next.add(value);
+        else next.delete(value);
+        updateCategoryField(name, Array.from(next).join(" | "));
     }
 
     function reviewedCandidate(source = item) {
@@ -1039,53 +1064,41 @@
                     </div>
                 {/if}
             </div>
-            <label class="field wide"><span>Condition Note</span><input bind:value={item.cnote} /></label>
-            <label class="field"><span>Brand</span><input bind:value={item.brand} /></label>
-            <label class="field"><span>Model</span><input bind:value={item.model} /></label>
-            <label class="field"><span>Size</span><input bind:value={item.size} /></label>
-            <label class="field"><span>Color</span><input bind:value={item.color} /></label>
-            <label class="field"><span>Department</span><input bind:value={item.dept} /></label>
-            <label class="field"><span>Type</span><input bind:value={item.type} on:change={() => item = applyClientRules(item)} /></label>
-            <label class="field"><span>Style</span><input bind:value={item.style} /></label>
-            <label class="field"><span>Theme</span><input bind:value={item.theme} /></label>
-            <label class="field"><span>Material</span><input bind:value={item.mat} /></label>
-            <label class="field"><span>Pattern</span><input bind:value={item.pat} /></label>
-            <label class="field"><span>Sleeve Length</span><input bind:value={item.slv} /></label>
-            <label class="field"><span>Neckline</span><input bind:value={item.nk} /></label>
-            <label class="field"><span>Season</span><input bind:value={item.sea} /></label>
-            <label class="field"><span>Occasion</span><input bind:value={item.occ} /></label>
-            <label class="field"><span>Size Type</span><input bind:value={item.st} /></label>
-            <label class="field"><span>Vintage</span><select bind:value={item.vin} on:change={() => item = applyClientRules(item)}><option value="No">No</option><option value="Yes (pre-1999)">Yes (pre-1999)</option></select></label>
-            <label class="field"><span>Made In label</span><input bind:value={item.madeIn} /></label>
-            <label class="field"><span>Interior patch / serial</span><input bind:value={item.serialNumber} /></label>
-            <label class="field wide"><span>Measurements</span><input bind:value={item.measurements} /></label>
+            <section class="wide dynamic-aspects ebay-specifics" aria-label="eBay item specifics editor">
+                <div class="category-head">
+                    <div>
+                        <strong>eBay item specifics</strong>
+                        <p>These are the only item-detail fields you need to complete. Common fields are mapped into the selected eBay category, and category-specific required fields appear automatically.</p>
+                    </div>
+                    {#if categoryFields.length}<span>{categoryFields.filter((field) => field.required).length} required for this category</span>{/if}
+                </div>
+                <div class="form aspect-grid">
+                    {#each ebaySpecificFields as field}
+                        <div class="field">
+                            <span>{field.name} {#if field.required}<em class="required">Required</em>{:else if field.recommended}<em>Recommended</em>{/if}</span>
+                            {#if field.multiSelect && field.values?.length}
+                                <div class="multi-select-options">
+                                    {#each field.values as value}
+                                        <label><input type="checkbox" checked={categoryFieldValues(field.name).includes(value)} on:change={(event) => toggleCategoryFieldValue(field.name, value, event.currentTarget.checked)} /> <span>{value}</span></label>
+                                    {/each}
+                                </div>
+                                <small>Choose all that apply.</small>
+                            {:else if field.values?.length && field.values.length <= 40}
+                                <select value={categoryFieldValue(field.name)} on:change={(event) => updateCategoryField(field.name, event.currentTarget.value)}>
+                                    <option value="">Select or leave blank</option>
+                                    {#each field.values as value}<option value={value}>{value}</option>{/each}
+                                </select>
+                            {:else}
+                                <input value={categoryFieldValue(field.name)} on:input={(event) => updateCategoryField(field.name, event.currentTarget.value)} placeholder="Enter a seller-confirmed value" />
+                            {/if}
+                        </div>
+                    {/each}
+                </div>
+                {#if !categoryFields.length && item.cat}<p class="help">Choose or search for the category above to load its live required and recommended aspects.</p>{/if}
+            </section>
             <label class="field wide"><span>PicURL</span><input bind:value={item.pic} placeholder="[SELLER TO ADD IMAGE URLS]" /></label>
             <label class="field wide"><span>Description HTML</span><textarea bind:value={item.desc} rows="8"></textarea></label>
             <label class="field wide"><span>Seller notes</span><textarea bind:value={item.notes} rows="4"></textarea></label>
-            {#if categoryFields.length}
-                <section class="wide dynamic-aspects" aria-label="Current eBay category-specific fields">
-                    <h3>Additional eBay fields for {item.categoryName || `category ${item.cat}`}</h3>
-                    <p>Your common fields above are the single source of truth for brand, model, size, color, material, condition, and similar values. Only category-specific fields not already represented are shown here.</p>
-                    {#if visibleCategoryFields.length === 0}<p class="help">No additional category-specific fields are needed beyond the fields above.</p>{/if}
-                    <div class="form aspect-grid">
-                        {#each visibleCategoryFields as field}
-                            <label class="field">
-                                <span>{field.name} {#if field.required}<em class="required">Required</em>{:else if field.recommended}<em>Recommended</em>{/if}</span>
-                                {#if field.values?.length && field.values.length <= 40}
-                                    <select value={categoryFieldValue(field.name)} on:change={(event) => updateCategoryField(field.name, event.currentTarget.value)}>
-                                        <option value="">Select or leave blank</option>
-                                        {#each field.values as value}<option value={value}>{value}</option>{/each}
-                                    </select>
-                                {:else}
-                                    <input value={categoryFieldValue(field.name)} on:input={(event) => updateCategoryField(field.name, event.currentTarget.value)} placeholder={field.multiSelect ? "Use a seller-confirmed value" : "Enter a seller-confirmed value"} />
-                                {/if}
-                            </label>
-                        {/each}
-                    </div>
-                </section>
-            {:else if item.cat}
-                <p class="help wide">Choose “Find eBay categories” or reselect the category to load eBay’s live required item specifics.</p>
-            {/if}
             <div class="actions wide">
                 <button type="button" on:click={() => item.desc = description(item)}>Generate description</button>
                 <button class="primary" type="button" on:click={addToQueue}>Add reviewed item to queue</button>

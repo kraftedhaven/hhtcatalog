@@ -52,7 +52,7 @@ def store_photo(*, seller_id: str, filename: str, mime_type: str, data: bytes, l
     if not seller_id:
         raise PhotoStorageError("Seller ownership is required for photo storage.", 403, "ownership")
     if mime_type not in ALLOWED_TYPES:
-        raise PhotoStorageError("Unsupported image type. Use JPEG, PNG, WebP, or GIF.", 415, "invalid_type")
+        raise PhotoStorageError("Unsupported image type. Use JPEG, PNG, WebP, GIF, HEIC, or HEIF.", 415, "invalid_type")
     if not data or len(data) > MAX_ORIGINAL_BYTES:
         raise PhotoStorageError("Photo is empty or exceeds the configured size limit.", 413, "payload_too_large")
     provider = storage_provider()
