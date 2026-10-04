@@ -18,6 +18,10 @@ class PhotoStorageTests(unittest.TestCase):
             _derive_public_endpoint("https://s3.private.us-east.cloud-object-storage.appdomain.cloud"),
             "https://s3.us-east.cloud-object-storage.appdomain.cloud",
         )
+        self.assertEqual(
+            _derive_public_endpoint("https://s3.private.us-east.cloud-object-storage.appdomain.cloud/bucket"),
+            "https://s3.us-east.cloud-object-storage.appdomain.cloud/bucket",
+        )
 
     def test_photo_storage_status_requires_authentication(self):
         with mock.patch.dict(os.environ, {"SUPABASE_URL": "https://example.supabase.co"}):

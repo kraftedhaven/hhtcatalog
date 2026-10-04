@@ -217,7 +217,7 @@ def _ibm_endpoint(*, public: bool = False) -> str:
         return _derive_public_endpoint(os.environ.get("IBM_COS_ENDPOINT", "").strip())
     upload = os.environ.get("IBM_COS_UPLOAD_ENDPOINT", "").strip()
     if upload:
-        return upload
+        return _derive_public_endpoint(upload)
     return _derive_public_endpoint(os.environ.get("IBM_COS_ENDPOINT", "").strip())
 
 
