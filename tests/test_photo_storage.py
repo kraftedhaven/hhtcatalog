@@ -7,12 +7,18 @@ from flask import g
 from PIL import Image
 
 import hht_app.photo_storage as photo_storage
-from hht_app.photo_storage import PhotoStorageError, _compress, storage_status, store_photo
+from hht_app.photo_storage import PhotoStorageError, _compress, _derive_public_endpoint, storage_status, store_photo
 from app import app as flask_app
 import app as app_module
 
 
 class PhotoStorageTests(unittest.TestCase):
+    def test_private_ibm_endpoint_derives_public_endpoint(self):
+        self.assertEqual(
+            _derive_public_endpoint("https://s3.private.us-east.cloud-object-storage.appdomain.cloud"),
+            "https://s3.us-east.cloud-object-storage.appdomain.cloud",
+        )
+
     def test_photo_storage_status_requires_authentication(self):
         with mock.patch.dict(os.environ, {"SUPABASE_URL": "https://example.supabase.co"}):
             response = flask_app.test_client().get("/api/photos/storage")

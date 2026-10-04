@@ -8,9 +8,11 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from PIL import Image, ImageOps
@@ -19,10 +21,11 @@ from .commerce_agent import connect, init_db
 
 
 class PhotoStorageError(RuntimeError):
-    def __init__(self, message: str, status_code: int = 503, category: str = "storage"):
+    def __init__(self, message: str, status_code: int = 503, category: str = "storage", detail: str = ""):
         super().__init__(message)
         self.status_code = status_code
         self.category = category
+        self.detail = detail
 
 
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"}
@@ -37,7 +40,11 @@ def storage_provider() -> str:
 def storage_status() -> dict[str, Any]:
     provider = storage_provider()
     configured = _provider_configured(provider)
-    return {"provider": provider, "configured": configured, "maxBytes": MAX_ORIGINAL_BYTES, "maxDimension": MAX_DIMENSION}
+    result = {"provider": provider, "configured": configured, "maxBytes": MAX_ORIGINAL_BYTES, "maxDimension": MAX_DIMENSION}
+    if provider == "ibm_cos":
+        result["publicEndpointConfigured"] = bool(_ibm_endpoint(public=True))
+        result["publicEndpointSource"] = _ibm_endpoint_source()
+    return result
 
 
 def _provider_configured(provider: str) -> bool:
@@ -188,33 +195,92 @@ def _ibm_client():
         raise PhotoStorageError("IBM Cloud Object Storage support requires boto3 in the deployed worker.", 503, "configuration") from exc
     return boto3.client(
         "s3",
-        endpoint_url=os.environ["IBM_COS_ENDPOINT"].rstrip("/"),
+        endpoint_url=_ibm_endpoint().rstrip("/"),
         aws_access_key_id=os.environ["IBM_COS_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["IBM_COS_SECRET_ACCESS_KEY"],
         region_name=os.environ.get("IBM_COS_REGION", "us-standard"),
+        config=__import__("botocore.config", fromlist=["Config"]).Config(
+            connect_timeout=int(os.environ.get("IBM_COS_CONNECT_TIMEOUT_SECONDS", "5")),
+            read_timeout=int(os.environ.get("IBM_COS_READ_TIMEOUT_SECONDS", "20")),
+            retries={"max_attempts": 2, "mode": "standard"},
+            signature_version="s3v4",
+        ),
     )
+
+
+def _ibm_endpoint(*, public: bool = False) -> str:
+    """Use a public endpoint for eBay URLs; private endpoints are not eBay-fetchable."""
+    if public:
+        explicit = os.environ.get("IBM_COS_PUBLIC_ENDPOINT", "").strip()
+        if explicit:
+            return explicit
+        return _derive_public_endpoint(os.environ.get("IBM_COS_ENDPOINT", "").strip())
+    upload = os.environ.get("IBM_COS_UPLOAD_ENDPOINT", "").strip()
+    if upload:
+        return upload
+    return _derive_public_endpoint(os.environ.get("IBM_COS_ENDPOINT", "").strip())
+
+
+def _derive_public_endpoint(endpoint: str) -> str:
+    if not endpoint:
+        return ""
+    parts = urlsplit(endpoint)
+    host = parts.hostname or ""
+    labels = host.split(".")
+    if len(labels) > 1 and labels[0].lower() == "s3" and labels[1].lower() == "private":
+        del labels[1]
+        host = ".".join(labels)
+        netloc = host + (f":{parts.port}" if parts.port else "")
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    return endpoint
+
+
+def _ibm_endpoint_source() -> str:
+    if os.environ.get("IBM_COS_PUBLIC_ENDPOINT"):
+        return "explicit"
+    endpoint = os.environ.get("IBM_COS_ENDPOINT", "")
+    return "derived_public" if _derive_public_endpoint(endpoint) != endpoint else "base"
+
+
+def _safe_provider_detail(exc: Exception) -> str:
+    detail = str(exc).replace("\n", " ").strip()
+    detail = re.sub(r"(AWS_SECRET_ACCESS_KEY|aws_secret_access_key|Authorization|X-Amz-Credential)[^,; ]*", "[redacted]", detail, flags=re.I)
+    return detail[:240]
 
 
 def _ibm_upload(key: str, data: bytes, content_type: str) -> None:
     try:
         _ibm_client().put_object(Bucket=os.environ["IBM_COS_BUCKET"], Key=key, Body=data, ContentType=content_type)
     except Exception as exc:
-        raise PhotoStorageError("IBM Cloud Object Storage rejected the photo upload.", 502, "upload") from exc
+        raise PhotoStorageError("IBM Cloud Object Storage rejected the photo upload.", 502, "upload", _safe_provider_detail(exc)) from exc
 
 
 def _ibm_delete(key: str) -> None:
     try:
         _ibm_client().delete_object(Bucket=os.environ["IBM_COS_BUCKET"], Key=key)
     except Exception as exc:
-        raise PhotoStorageError("IBM Cloud Object Storage could not remove a partial photo upload.", 502, "cleanup") from exc
+        raise PhotoStorageError("IBM Cloud Object Storage could not remove a partial photo upload.", 502, "cleanup", _safe_provider_detail(exc)) from exc
 
 
 def _ibm_signed_url(key: str) -> str:
     expires = int(os.environ.get("PHOTO_URL_TTL_SECONDS", "3600"))
     try:
-        return str(_ibm_client().generate_presigned_url("get_object", Params={"Bucket": os.environ["IBM_COS_BUCKET"], "Key": key}, ExpiresIn=expires))
+        client = _ibm_client()
+        public_endpoint = _ibm_endpoint(public=True)
+        if public_endpoint and public_endpoint.rstrip("/") != _ibm_endpoint().rstrip("/"):
+            import boto3
+            from botocore.config import Config
+            client = boto3.client(
+                "s3",
+                endpoint_url=public_endpoint.rstrip("/"),
+                aws_access_key_id=os.environ["IBM_COS_ACCESS_KEY_ID"],
+                aws_secret_access_key=os.environ["IBM_COS_SECRET_ACCESS_KEY"],
+                region_name=os.environ.get("IBM_COS_REGION", "us-standard"),
+                config=Config(signature_version="s3v4"),
+            )
+        return str(client.generate_presigned_url("get_object", Params={"Bucket": os.environ["IBM_COS_BUCKET"], "Key": key}, ExpiresIn=expires))
     except Exception as exc:
-        raise PhotoStorageError("IBM Cloud Object Storage could not create a signed photo URL.", 502, "signing") from exc
+        raise PhotoStorageError("IBM Cloud Object Storage could not create a signed photo URL.", 502, "signing", _safe_provider_detail(exc)) from exc
 
 
 def _url_expiry() -> datetime:

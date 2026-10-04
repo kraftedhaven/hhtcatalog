@@ -221,7 +221,10 @@ def photo_upload():
             assets.append(asset)
             results.append({"filename": filename, "status": "stored", "asset": asset})
         except PhotoStorageError as exc:
-            app.logger.warning("Photo storage failure category=%s status=%s", exc.category, exc.status_code)
+            app.logger.warning(
+                "Photo storage failure request_id=%s category=%s status=%s detail=%s",
+                request.headers.get("X-Request-ID", ""), exc.category, exc.status_code, exc.detail or "none",
+            )
             failure = {"filename": filename, "error": "Photo could not be saved.", "category": "storage"}
             failures.append(failure)
             results.append({"filename": filename, "status": "error", **failure})
