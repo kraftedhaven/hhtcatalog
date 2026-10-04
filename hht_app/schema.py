@@ -33,11 +33,15 @@ HEADERS = [
     "CountryCode", "PostalCode", *[f"C:{label}" for label, _ in EBAY_ITEM_SPECIFICS],
 ]
 
+DRAFT_ACTION_HEADER = "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)"
+EBAY_DRAFT_INFO_ROWS = [
+    ["#INFO", "Version=0.0.2", "Template= eBay-draft-listings-template_US"],
+    ["#INFO Action and Category ID are required fields. 1) Set Action to Draft 2) Please find the category ID for your listings here: https://pages.ebay.com/sellerinformation/news/categorychanges.html"],
+    ["#INFO After you've successfully uploaded your draft from the Seller Hub Reports tab, complete your drafts to active listings here: https://www.ebay.com/sh/lst/drafts"],
+    ["#INFO"],
+]
 EBAY_DRAFT_COLUMNS = [
-    # Seller Hub Reports draft templates use the plain Action header. The
-    # decorated Action(SiteID=...) header belongs to legacy File Exchange and
-    # triggers BAF.Error.5 in Seller Hub draft-feed processing.
-    "Action",
+    DRAFT_ACTION_HEADER,
     "Custom label (SKU)",
     "Category ID",
     "Title",
@@ -264,7 +268,7 @@ def build_ebay_draft_csv_row(item: dict[str, Any], sku: str = "") -> dict[str, A
     listing = normalize_listing(item)
     price = _price(listing.get("price"))
     return {
-        "Action": "Draft",
+        DRAFT_ACTION_HEADER: "Draft",
         "Custom label (SKU)": _draft_sku(item, listing, sku),
         "Category ID": _text(listing.get("cat")),
         "Title": _text(listing.get("title")),
@@ -290,6 +294,9 @@ def _draft_sku(item: dict[str, Any], listing: dict[str, Any], explicit: str = ""
 
 def csv_from_draft_row(csv_row: dict[str, Any]) -> str:
     output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    for info_row in EBAY_DRAFT_INFO_ROWS:
+        writer.writerow(info_row + [""] * (len(EBAY_DRAFT_COLUMNS) - len(info_row)))
     writer = csv.DictWriter(output, fieldnames=EBAY_DRAFT_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     writer.writerow({column: csv_row.get(column, "") for column in EBAY_DRAFT_COLUMNS})
@@ -298,6 +305,9 @@ def csv_from_draft_row(csv_row: dict[str, Any]) -> str:
 
 def export_ebay_draft_csv(items: list[dict[str, Any]]) -> str:
     output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    for info_row in EBAY_DRAFT_INFO_ROWS:
+        writer.writerow(info_row + [""] * (len(EBAY_DRAFT_COLUMNS) - len(info_row)))
     writer = csv.DictWriter(output, fieldnames=EBAY_DRAFT_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for item in deduplicate_draft_items(items):

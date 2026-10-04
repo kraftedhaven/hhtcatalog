@@ -21,7 +21,7 @@ from hht_app.ebay_pricing import (
     enrich_with_ebay_active_pricing,
 )
 from hht_app.providers import UploadedImage
-from hht_app.schema import EBAY_DRAFT_COLUMNS, EBAY_ITEM_SPECIFICS, HEADERS, SCHEMA_KEYS, build_ebay_draft_csv_row, csv_from_draft_row, export_ebay_csv, export_ebay_draft_csv, fit_title, normalize_listing
+from hht_app.schema import DRAFT_ACTION_HEADER, EBAY_DRAFT_COLUMNS, EBAY_ITEM_SPECIFICS, HEADERS, SCHEMA_KEYS, build_ebay_draft_csv_row, csv_from_draft_row, export_ebay_csv, export_ebay_draft_csv, fit_title, normalize_listing
 
 
 class FakeResponse:
@@ -1105,7 +1105,9 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(calls[1][2]["data"]["name"], "file")
         self.assertEqual(calls[1][2]["data"]["type"], "form-data")
         uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
-        self.assertEqual(next(csv.DictReader(io.StringIO(uploaded_csv)))["Action"], "Draft")
+        rows = list(csv.reader(io.StringIO(uploaded_csv)))
+        self.assertEqual(rows[4][0], DRAFT_ACTION_HEADER)
+        self.assertEqual(rows[5][0], "Draft")
 
     def test_seller_hub_draft_feed_ignores_stale_fx_draft_setting(self):
         with env(EBAY_SELLER_HUB_DRAFT_FEED_TYPE="FX_DRAFT"):
@@ -1134,9 +1136,9 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(result["itemCount"], 5)
         self.assertEqual(result["feedType"], "FX_LISTING")
         uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
-        rows = list(csv.DictReader(io.StringIO(uploaded_csv)))
-        self.assertEqual(len(rows), 5)
-        self.assertEqual({row["Action"] for row in rows}, {"Draft"})
+        rows = list(csv.reader(io.StringIO(uploaded_csv)))
+        self.assertEqual(len(rows[5:]), 5)
+        self.assertEqual({row[0] for row in rows[5:]}, {"Draft"})
 
     def test_seller_hub_draft_feed_deduplicates_by_sku_before_upload(self):
         calls = []
@@ -1466,13 +1468,14 @@ class MergePipelineTests(unittest.TestCase):
         }
         row = build_ebay_draft_csv_row(item)
         text = csv_from_draft_row(row)
-        rows = list(csv.DictReader(io.StringIO(text)))
-        self.assertEqual(list(csv.reader(io.StringIO(text)))[0], EBAY_DRAFT_COLUMNS)
-        self.assertEqual(rows[0]["Action"], "Draft")
-        self.assertEqual(rows[0]["Custom label (SKU)"], "LEVIS-123")
-        self.assertEqual(rows[0]["Category ID"], "57988")
-        self.assertEqual(rows[0]["Condition ID"], "USED")
-        self.assertEqual(rows[0]["Format"], "FixedPrice")
+        rows = list(csv.reader(io.StringIO(text)))
+        self.assertEqual(rows[4], EBAY_DRAFT_COLUMNS)
+        row = dict(zip(rows[4], rows[5]))
+        self.assertEqual(row[DRAFT_ACTION_HEADER], "Draft")
+        self.assertEqual(row["Custom label (SKU)"], "LEVIS-123")
+        self.assertEqual(row["Category ID"], "57988")
+        self.assertEqual(row["Condition ID"], "USED")
+        self.assertEqual(row["Format"], "FixedPrice")
         self.assertEqual(len(HEADERS), 35)
 
     def test_draft_csv_uses_only_seller_hub_template_compatible_values(self):
@@ -1480,7 +1483,8 @@ class MergePipelineTests(unittest.TestCase):
             "sku": "COACH-1", "title": "Coach Bag", "price": 99.99, "cat": "169291",
             "cid": "4000", "pic": "[SELLER TO ADD IMAGE URLS]", "brand": "Coach", "type": "Handbag",
         }])
-        row = next(csv.DictReader(io.StringIO(text)))
+        rows = list(csv.reader(io.StringIO(text)))
+        row = dict(zip(rows[4], rows[5]))
         self.assertEqual(row["Condition ID"], "USED")
         self.assertEqual(row["Item photo URL"], "")
         self.assertEqual(row["UPC"], "")
@@ -1492,15 +1496,16 @@ class MergePipelineTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
-        self.assertEqual(rows[0], EBAY_DRAFT_COLUMNS)
-        self.assertEqual(len(rows[1]), 11)
+        self.assertEqual(rows[4], EBAY_DRAFT_COLUMNS)
+        self.assertEqual(len(rows[5]), 11)
 
     def test_draft_csv_generates_sku_when_seller_leaves_it_blank(self):
         text = export_ebay_draft_csv([{
             "title": "Vintage Kids Hat", "price": 18.50, "cat": "52365",
             "brand": "No Brand", "type": "Hat", "pic": "https://example.com/hat.jpg",
         }])
-        row = next(csv.DictReader(io.StringIO(text)))
+        rows = list(csv.reader(io.StringIO(text)))
+        row = dict(zip(rows[4], rows[5]))
         self.assertRegex(row["Custom label (SKU)"], r"^HHT-[A-F0-9]{12}$")
 
     def test_normalize_listing_keeps_live_taxonomy_category_ids(self):
