@@ -1,7 +1,7 @@
 <script>
     import { onMount } from "svelte";
     import "./app.css";
-    import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayOAuthStart, ebayOAuthStatus, photoStorageStatus, sendDraftFeed, startNvidiaAnalysis, uploadListingPhotos } from "$lib/api";
+    import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayFeedTask, ebayOAuthStart, ebayOAuthStatus, photoStorageStatus, sendDraftFeed, startNvidiaAnalysis, uploadListingPhotos } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
     import AuthGate from "$lib/components/AuthGate.svelte";
@@ -722,12 +722,35 @@
                 ? { ...entry, ebayFeedTaskId: result.taskId, ebayDraftStatus: result.status }
                 : entry);
             status = `${automatic ? "Auto-sent" : "Submitted"} ${result.itemCount} approved item${result.itemCount === 1 ? "" : "s"} to eBay Seller Hub Drafts. Task ${result.taskId}. Live listings were not published.`;
+            if (result.taskId) await monitorEbayFeedTask(result.taskId, submitted);
         } catch (err) {
             error = friendlyEbayError(err);
         } finally {
             draftLoading = false;
             autoDraftInFlight = false;
         }
+    }
+
+    async function monitorEbayFeedTask(taskId, submitted) {
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 1000 : 3000));
+            const task = await ebayFeedTask(taskId);
+            const terminal = ["COMPLETED", "COMPLETED_WITH_ERROR", "FAILED"].includes(String(task?.status || "").toUpperCase());
+            if (!terminal) continue;
+            const details = task.resultDetails || null;
+            queue = queue.map((entry) => submitted.has(queueIdentity(entry))
+                ? { ...entry, ebayDraftStatus: task.status, ebayFeedResultDetails: details }
+                : entry);
+            const summary = task.uploadSummary || {};
+            if (details?.errors?.length) {
+                status = `eBay finished task ${taskId}: ${summary.successCount || 0} accepted, ${summary.failureCount || details.errors.length} failed.`;
+                error = details.errors.slice(0, 3).map((row) => `${row.code || "eBay error"}: ${row.message}`).join(" | ");
+            } else {
+                status = `eBay finished task ${taskId}: ${summary.successCount || 0} accepted, ${summary.failureCount || 0} failed.`;
+            }
+            return;
+        }
+        status = `eBay task ${taskId} is still processing. Use Refresh or check Seller Hub Reports for the final result.`;
     }
 
     async function checkEbayConnection() {
@@ -1123,6 +1146,14 @@
                 {#each queue as queued, index}
                     <div class="queue-row">
                         <div><strong>{queued.title}</strong><span>{queued.brand} / {queued.size} / ${Number(queued.price || 0).toFixed(2)} · {queued.approved ? "Approved" : "Needs approval"}{queued.ebayFeedTaskId ? ` / feed task ${queued.ebayFeedTaskId} (${queued.ebayDraftStatus || "submitted"})` : ""}</span></div>
+                        {#if queued.ebayFeedResultDetails?.errors?.length}
+                            <div class="notice error">
+                                {#each queued.ebayFeedResultDetails.errors.slice(0, 2) as feedError}
+                                    <strong>{feedError.code || "eBay feed error"}</strong>: {feedError.message}
+                                    {#if feedError.customLabel}<span> · SKU {feedError.customLabel}</span>{/if}
+                                {/each}
+                            </div>
+                        {/if}
                         {#if !queued.approved}<button type="button" on:click={() => approveQueued(index)}>Approve</button>{/if}
                         <button type="button" on:click={() => editQueued(index)}>Edit</button>
                         <button type="button" on:click={() => queue = queue.filter((_, i) => i !== index)}>Remove</button>

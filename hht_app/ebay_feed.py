@@ -1,8 +1,12 @@
 """Seller Hub feed upload helpers for draft CSV queue submissions."""
 from __future__ import annotations
 
+import csv
+import gzip
+import io
 import os
 import re
+import zipfile
 from datetime import datetime, timezone
 from typing import Any
 
@@ -121,6 +125,58 @@ def get_feed_result_file(task_id: str, *, token: str | None = None, timeout: flo
     if match:
         filename = match.group(1).strip()
     return response.content, content_type, filename
+
+
+def summarize_feed_result(content: bytes, content_type: str = "") -> dict[str, Any]:
+    """Return safe, UI-ready row errors from an eBay feed result file."""
+    raw = content
+    try:
+        if raw[:2] == b"\x1f\x8b" or "gzip" in content_type.lower():
+            raw = gzip.decompress(raw)
+        elif raw[:2] == b"PK" or "zip" in content_type.lower():
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                names = archive.namelist()
+                if names:
+                    raw = archive.read(names[0])
+    except (OSError, zipfile.BadZipFile) as exc:
+        return {"error": "Unable to decode eBay's result file.", "details": str(exc)[:200]}
+
+    text = raw.decode("utf-8-sig", errors="replace")
+    try:
+        rows = list(csv.DictReader(io.StringIO(text)))
+    except csv.Error:
+        rows = []
+    if not rows:
+        return {"errorCount": 0, "errors": [], "rawPreview": text[:500]}
+
+    errors: list[dict[str, Any]] = []
+    for row in rows:
+        status = str(row.get("Status") or "").strip()
+        code = str(row.get("ErrorCode") or row.get("Code") or "").strip()
+        message = str(row.get("ErrorMessage") or row.get("Message") or "").strip()
+        if status.lower() == "failure" or code or message:
+            errors.append({
+                "lineNumber": str(row.get("Line Number") or "").strip(),
+                "action": str(row.get("Action") or "").strip(),
+                "status": status,
+                "code": code,
+                "message": message,
+                "customLabel": str(row.get("CustomLabel") or row.get("Custom label (SKU)") or "").strip(),
+                "itemId": str(row.get("ItemID") or "").strip(),
+            })
+    return {"errorCount": len(errors), "errors": errors, "rowCount": len(rows)}
+
+
+def get_feed_task_details(task_id: str, *, token: str | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+    """Fetch task status and attach detailed eBay errors when processing is complete."""
+    task = get_feed_task(task_id, token=token, timeout=timeout)
+    status = str(task.get("status") or "").upper()
+    summary = task.get("uploadSummary") or {}
+    failures = int(summary.get("failureCount") or 0)
+    if status in {"COMPLETED", "COMPLETED_WITH_ERROR"} and failures:
+        content, content_type, _ = get_feed_result_file(task_id, token=token, timeout=timeout)
+        task["resultDetails"] = summarize_feed_result(content, content_type)
+    return task
 
 
 def _create_task(token: str, timeout: float) -> str:

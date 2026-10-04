@@ -8,7 +8,7 @@ from flask_cors import CORS
 
 from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, reauthorization_required, required_user_scopes, seller_access_token
 from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft, update_ebay_offer
-from hht_app.ebay_feed import EbayFeedError, get_feed_result_file, get_feed_task, seller_hub_feed_type, upload_seller_hub_draft_csv
+from hht_app.ebay_feed import EbayFeedError, get_feed_result_file, get_feed_task_details, seller_hub_feed_type, upload_seller_hub_draft_csv
 from hht_app.ebay_taxonomy import category_aspects, suggest_category
 from hht_app import commerce_agent
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
@@ -417,7 +417,7 @@ def ebay_draft_feed():
 @app.route("/api/ebay/feed/tasks/<task_id>", methods=["GET"])
 def ebay_feed_task(task_id):
     try:
-        result = get_feed_task(task_id)
+        result = get_feed_task_details(task_id)
     except EbayFeedError as exc:
         return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
     return jsonify({"result": result})
