@@ -1495,6 +1495,14 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(rows[0], EBAY_DRAFT_COLUMNS)
         self.assertEqual(len(rows[1]), 11)
 
+    def test_draft_csv_generates_sku_when_seller_leaves_it_blank(self):
+        text = export_ebay_draft_csv([{
+            "title": "Vintage Kids Hat", "price": 18.50, "cat": "52365",
+            "brand": "No Brand", "type": "Hat", "pic": "https://example.com/hat.jpg",
+        }])
+        row = next(csv.DictReader(io.StringIO(text)))
+        self.assertRegex(row["Custom label (SKU)"], r"^HHT-[A-F0-9]{12}$")
+
     def test_normalize_listing_keeps_live_taxonomy_category_ids(self):
         normalized = normalize_listing({"title": "Kids Baseball Hat", "cat": "52365", "brand": "No Brand", "type": "Hat"})
         self.assertEqual(normalized["cat"], "52365")

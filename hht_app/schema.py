@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import html
 import io
 import re
@@ -264,7 +265,7 @@ def build_ebay_draft_csv_row(item: dict[str, Any], sku: str = "") -> dict[str, A
     price = _price(listing.get("price"))
     return {
         "Action": "Draft",
-        "Custom label (SKU)": _text(sku or item.get("sku") or item.get("customLabel")),
+        "Custom label (SKU)": _draft_sku(item, listing, sku),
         "Category ID": _text(listing.get("cat")),
         "Title": _text(listing.get("title")),
         "UPC": _text(item.get("upc")),
@@ -275,6 +276,16 @@ def build_ebay_draft_csv_row(item: dict[str, Any], sku: str = "") -> dict[str, A
         "Description": _text(listing.get("desc")),
         "Format": "FixedPrice",
     }
+
+
+def _draft_sku(item: dict[str, Any], listing: dict[str, Any], explicit: str = "") -> str:
+    """Return the seller SKU or create a stable HHT custom label for the feed."""
+    existing = _text(explicit or item.get("sku") or item.get("customLabel"))
+    if existing:
+        return re.sub(r"[^A-Za-z0-9._-]+", "-", existing).strip("-")[:50]
+    identity = "|".join(_text(item.get(field) or listing.get(field)) for field in ("title", "cat", "price", "pic"))
+    digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:12].upper()
+    return f"HHT-{digest}"
 
 
 def csv_from_draft_row(csv_row: dict[str, Any]) -> str:
