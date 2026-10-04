@@ -32,10 +32,10 @@ HEIC_SUPPORT_ENABLED = _register_heic_support()
 
 ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
-GROQ_DEFAULT_MODEL = "qwen/qwen3.6-27b"
-GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
-NVIDIA_DEFAULT_VISION_MODEL = "z-ai/glm-5.3-flash"
-NVIDIA_FAST_FALLBACK_VISION_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+GROQ_DEFAULT_MODEL = "llama-3.2-11b-vision-preview"
+GROQ_FALLBACK_MODEL = "llama-3.2-90b-vision-preview"
+NVIDIA_DEFAULT_VISION_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+NVIDIA_FAST_FALLBACK_VISION_MODEL = "z-ai/glm-5.3-flash"
 MAX_PROVIDER_IMAGES = 5
 MAX_ZAI_IMAGES = 3
 MAX_ZAI_REQUEST_BYTES = 7 * 1024 * 1024
@@ -421,16 +421,12 @@ def _groq_once(model: str, content: list[dict[str, Any]], context: dict[str, Any
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
-        "temperature": 0.7 if model.startswith("qwen/") else 0.1,
+        "temperature": 0.1,
         "max_completion_tokens": 900,
     }
-    if model.startswith("qwen/"):
-        # Groq's JSON-object validator can reject otherwise valid vision calls with
-        # json_validate_failed. The prompt plus parse_model_json below remain the
-        # contract for listing extraction, without turning a model formatting miss
-        # into an upstream 400 before the model can answer.
-        payload["reasoning_effort"] = "none"
-        payload["reasoning_format"] = "hidden"
+    if model.startswith("llama-3.2") and "vision" in model:
+        # Llama vision models work well with low temperature for structured extraction
+        pass
     _reject_oversized_payload("groq", model, content, MAX_GROQ_REQUEST_BYTES)
     return _post_openai_compatible("groq", model, "https://api.groq.com/openai/v1/chat/completions", os.environ["GROQ_API_KEY"], payload, context)
 
@@ -442,7 +438,7 @@ def _nvidia(images: list[UploadedImage], context: dict[str, Any]) -> str:
     if not model:
         raise ProviderError("NVIDIA category model is not configured.", 503, provider="nvidia", category="configuration")
     content = [{"type": "text", "text": _prompt(context)}]
-    content.extend({"type": "image_url", "image_url": {"url": _compressed_data_url(image, max_edge=896, quality=72)}} for image in images[:3])
+    content.extend({"type": "image_url", "image_url": {"url": _compressed_data_url(image, max_edge=640, quality=70)}} for image in images[:2])
     last_error: ProviderError | None = None
     for index, model in enumerate(models):
         payload = _nvidia_payload(model, content)
@@ -476,7 +472,7 @@ def _nvidia_payload(model: str, content: list[dict[str, Any]]) -> dict[str, Any]
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.1,
-        "max_completion_tokens": 1000,
+        "max_completion_tokens": 700,
         "stream": False,
     }
     if model.startswith("z-ai/glm"):
