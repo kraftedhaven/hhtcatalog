@@ -5,12 +5,13 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
 from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_pricing import DEFAULT_MARKETPLACE_ID
-from .schema import deduplicate_draft_items, export_ebay_draft_csv
+from .schema import deduplicate_draft_items, draft_photo_urls, export_ebay_draft_csv
 
 
 DEFAULT_TIMEOUT_SECONDS = 15.0
@@ -18,7 +19,9 @@ DEFAULT_TIMEOUT_SECONDS = 15.0
 # Draft action. FX_DRAFT is not a supported Sell Feed API task type.
 DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE = "FX_LISTING"
 SELLER_HUB_SCHEMA_VERSION = "1.0"
-MIN_DRAFT_UPLOAD_ITEMS = 5
+DEFAULT_MIN_DRAFT_UPLOAD_ITEMS = 5
+MIN_DRAFT_UPLOAD_ITEMS = 3
+PHOTO_URL_TIMEOUT_SECONDS = 5.0
 
 
 class EbayFeedError(RuntimeError):
@@ -49,16 +52,18 @@ def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DE
     if not isinstance(items, list) or not items:
         raise EbayFeedError(400, "invalid_request", "Queue must include at least one reviewed item.", operation="create_task")
     unique_items = deduplicate_draft_items(items)
-    if len(unique_items) < MIN_DRAFT_UPLOAD_ITEMS:
+    min_items = draft_min_items()
+    if len(unique_items) < min_items:
         duplicate_note = " after removing duplicates" if len(unique_items) != len(items) else ""
         raise EbayFeedError(
             400,
             "invalid_request",
-            f"Seller Hub draft upload requires at least {MIN_DRAFT_UPLOAD_ITEMS} unique reviewed items; received {len(unique_items)}{duplicate_note}.",
+            f"Seller Hub draft upload requires at least {min_items} unique reviewed items; received {len(unique_items)}{duplicate_note}.",
             operation="create_task",
         )
     if _environment() == "sandbox":
         raise EbayFeedError(503, "configuration", f"Seller Hub {_draft_feed_type()} feed uploads are production-only; eBay does not support this Seller Hub upload flow in sandbox.", operation="create_task")
+    validate_draft_photo_urls(unique_items)
     csv_text = export_ebay_draft_csv(unique_items)
     token = _seller_token(timeout)
     task_id = _create_task(token, timeout)
@@ -79,6 +84,76 @@ def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DE
         "task": task,
         "nextStep": "Open Seller Hub Reports or poll this task for processing results. This Seller Hub draft feed is intended for draft CSV files, not direct live publishing.",
     }
+
+
+def draft_min_items() -> int:
+    configured = os.environ.get("EBAY_DRAFT_MIN_ITEMS", "").strip()
+    if configured == "3":
+        return 3
+    if not configured:
+        return DEFAULT_MIN_DRAFT_UPLOAD_ITEMS
+    try:
+        parsed = int(configured)
+    except ValueError:
+        return DEFAULT_MIN_DRAFT_UPLOAD_ITEMS
+    return max(MIN_DRAFT_UPLOAD_ITEMS, parsed)
+
+
+def validate_draft_photo_urls(items: list[dict[str, Any]], timeout: float = PHOTO_URL_TIMEOUT_SECONDS) -> None:
+    seen: set[str] = set()
+    for index, item in enumerate(items, start=1):
+        for url in draft_photo_urls(item):
+            if url in seen:
+                continue
+            seen.add(url)
+            _validate_image_url(url, index, timeout)
+
+
+def _validate_image_url(url: str, item_index: int, timeout: float) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise EbayFeedError(
+            400,
+            "seller_review_required",
+            f"Seller Hub draft photo review required: item {item_index} has a photo URL that is not HTTPS.",
+            operation="validate_photo_url",
+        )
+    try:
+        response = requests.get(url, stream=True, timeout=timeout)
+    except requests.Timeout as exc:
+        raise EbayFeedError(
+            400,
+            "seller_review_required",
+            f"Seller Hub draft photo review required: item {item_index} has an unreachable photo URL.",
+            operation="validate_photo_url",
+        ) from exc
+    except requests.RequestException as exc:
+        raise EbayFeedError(
+            400,
+            "seller_review_required",
+            f"Seller Hub draft photo review required: item {item_index} has an unreachable photo URL.",
+            operation="validate_photo_url",
+        ) from exc
+    try:
+        content_type = response.headers.get("Content-Type", "") if hasattr(response, "headers") else ""
+        if response.status_code != 200:
+            raise EbayFeedError(
+                400,
+                "seller_review_required",
+                f"Seller Hub draft photo review required: item {item_index} has a photo URL that did not return HTTP 200.",
+                operation="validate_photo_url",
+            )
+        if not content_type.lower().startswith("image/"):
+            raise EbayFeedError(
+                400,
+                "seller_review_required",
+                f"Seller Hub draft photo review required: item {item_index} has a photo URL that is not an image.",
+                operation="validate_photo_url",
+            )
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
 
 
 def get_feed_task(task_id: str, *, token: str | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:

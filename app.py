@@ -8,7 +8,7 @@ from flask_cors import CORS
 
 from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_authorization_code, reauthorization_required, required_user_scopes, seller_access_token
 from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft, update_ebay_offer
-from hht_app.ebay_feed import EbayFeedError, get_feed_result_file, get_feed_task, seller_hub_feed_type, upload_seller_hub_draft_csv
+from hht_app.ebay_feed import EbayFeedError, draft_min_items, get_feed_result_file, get_feed_task, seller_hub_feed_type, upload_seller_hub_draft_csv, validate_draft_photo_urls
 from hht_app.ebay_taxonomy import category_aspects, suggest_category
 from hht_app import commerce_agent
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
@@ -35,6 +35,10 @@ CORS(
 )
 
 PUBLIC_AUTH_PATHS = {"/", "/health", "/api/ebay/oauth/start", "/api/ebay/oauth/callback"}
+
+
+def ebay_drafts_enabled() -> bool:
+    return os.environ.get("EBAY_DRAFTS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _requires_seller_auth() -> bool:
@@ -91,6 +95,7 @@ def health():
         "demo_mode": demo_mode(),
         "csv_columns": len(HEADERS),
         "seller_hub_feed_type": seller_hub_feed_type(),
+        "seller_hub_draft_min_items": draft_min_items(),
         "photo_storage": storage_status(),
     })
 
@@ -258,7 +263,10 @@ def export_draft_csv():
     if not isinstance(items, list):
         return jsonify({"error": "Request body must include an items array."}), 400
     try:
+        validate_draft_photo_urls(items)
         csv_text = export_ebay_draft_csv(items)
+    except EbayFeedError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
     return Response(
@@ -399,13 +407,23 @@ def ebay_offer_publish_removed(_removed):
 
 @app.route("/api/ebay/draft-feed", methods=["POST"])
 def ebay_draft_feed():
+    if not ebay_drafts_enabled():
+        return jsonify({"error": "Seller Hub draft feed submissions are disabled pending controlled-pilot authorization."}), 403
     # Seller Hub draft-feed submission is intentionally separate from live
     # listing mutations. It creates unpublished draft-processing jobs; the
-    # global flag must not block this approval-only FX_LISTING workflow.
+    # live mutation flag must not block or enable this approval-only
+    # FX_LISTING workflow.
     body = request.get_json(silent=True) or {}
     items = body.get("items") or body.get("queue") or []
     if not isinstance(items, list):
         return jsonify({"error": "Request body must include an items array."}), 400
+    scope_status = commerce_agent.ebay_scope_status()
+    if scope_status.get("grantedScopesStatus") != "verified":
+        return jsonify({
+            "error": "Seller Hub draft submission requires verified eBay OAuth scope proofs. Reauthorize eBay, then run the scope probe before submitting drafts.",
+            "grantedScopesStatus": scope_status.get("grantedScopesStatus", "unknown"),
+            "requiresReauthorization": True,
+        }), 403
     try:
         result = upload_seller_hub_draft_csv(items)
     except EbayFeedError as exc:

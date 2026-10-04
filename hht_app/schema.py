@@ -294,6 +294,23 @@ def export_ebay_draft_csv(items: list[dict[str, Any]]) -> str:
     return output.getvalue()
 
 
+def draft_photo_urls(item: dict[str, Any]) -> list[str]:
+    listing = normalize_listing(item)
+    urls = _split_draft_urls(listing.get("pic"))
+    assets = item.get("photoAssets") or item.get("photos") or []
+    if isinstance(assets, list):
+        for asset in assets:
+            if isinstance(asset, dict):
+                urls.extend(_split_draft_urls(asset.get("ebayUrl")))
+    result: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result[:24]
+
+
 def deduplicate_draft_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep one CSV row per stable listing identity, preserving queue order."""
     result: list[dict[str, Any]] = []
@@ -323,8 +340,11 @@ def _draft_item_identity(item: dict[str, Any]) -> str:
 
 def _draft_image_urls(value: Any) -> str:
     """Seller Hub accepts public URLs or blanks; application placeholders are invalid."""
-    urls = [part.strip() for part in re.split(r"[\s,]+", _text(value)) if part.strip().startswith(("https://", "http://"))]
-    return "|".join(urls[:24])
+    return "|".join(_split_draft_urls(value)[:24])
+
+
+def _split_draft_urls(value: Any) -> list[str]:
+    return [part.strip() for part in re.split(r"[\s,|]+", _text(value)) if part.strip().startswith(("https://", "http://"))]
 
 
 def _draft_condition(condition_id: Any) -> str:

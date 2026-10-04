@@ -7,6 +7,8 @@
 
     const emptyItem = EMPTY_ITEM;
     const breakGroundEnabled = String(import.meta.env.VITE_BREAKGROUND_ENABLED || "false").toLowerCase() === "true";
+    const configuredDraftMinItems = Number.parseInt(import.meta.env.VITE_EBAY_DRAFT_MIN_ITEMS || "5", 10);
+    const sellerHubDraftMinItems = configuredDraftMinItems === 3 ? 3 : 5;
     const defaultSeller = {
         location: "Kettering, Ohio",
         postalCode: "45429",
@@ -637,9 +639,9 @@
     }
 
     function scheduleAutoDraftUpload() {
-        if (!autoDraftEnabled || autoDraftInFlight || draftLoading || approvedDraftQueue().length < 5) return;
+        if (!autoDraftEnabled || autoDraftInFlight || draftLoading || approvedDraftQueue().length < sellerHubDraftMinItems) return;
         setTimeout(() => {
-            if (autoDraftEnabled && !autoDraftInFlight && !draftLoading && approvedDraftQueue().length >= 5) {
+            if (autoDraftEnabled && !autoDraftInFlight && !draftLoading && approvedDraftQueue().length >= sellerHubDraftMinItems) {
                 sendDraftQueue({ automatic: true });
             }
         }, 0);
@@ -686,11 +688,11 @@
     async function sendDraftQueue({ automatic = false } = {}) {
         const candidates = approvedDraftQueue();
         if (!candidates.length) {
-            error = "Approve at least five reviewed items before sending Seller Hub drafts.";
+            error = `Approve at least ${sellerHubDraftMinItems} reviewed items before sending Seller Hub drafts.`;
             return;
         }
-        if (candidates.length < 5) {
-            error = `Seller Hub draft upload requires at least 5 approved unique items; ${candidates.length} are ready.`;
+        if (candidates.length < sellerHubDraftMinItems) {
+            error = `Seller Hub draft upload requires at least ${sellerHubDraftMinItems} approved unique items; ${candidates.length} are ready.`;
             return;
         }
         const invalid = firstInvalidQueuedItem(candidates);
@@ -879,7 +881,7 @@
             {#if breakGroundEnabled && !onboardingDismissed}
                 <div class="wide notice info onboarding-card">
                     <div class="section-heading"><div><strong>HHT quick start</strong><p>Group photos, analyze, review the eBay-aligned fields, then add only approved items to the Seller Hub draft queue.</p></div><button type="button" on:click={dismissOnboarding}>Dismiss</button></div>
-                    <div class="onboarding-steps"><span class:complete={stagingPhotos.length > 0}>1. Group photos</span><span class:complete={item.title && item.cat && item.price}>2. Review listing</span><span class:complete={queue.length > 0}>3. Save to queue</span><span class:complete={queue.filter((entry) => entry.approved).length >= 5}>4. Send 5 approved drafts</span></div>
+                    <div class="onboarding-steps"><span class:complete={stagingPhotos.length > 0}>1. Group photos</span><span class:complete={item.title && item.cat && item.price}>2. Review listing</span><span class:complete={queue.length > 0}>3. Save to queue</span><span class:complete={queue.filter((entry) => entry.approved).length >= sellerHubDraftMinItems}>4. Send {sellerHubDraftMinItems} approved drafts</span></div>
                     <p class="help">BreakGround guidance is optional and the checklist is displayed locally; no checklist events are currently transmitted.</p>
                 </div>
             {/if}
@@ -1087,8 +1089,8 @@
                 <div><strong>${queueAverage.toFixed(2)}</strong><span>Average</span></div>
             </div>
             <div class="notice info">
-                <strong>{Math.min(approvedDraftQueue().length, 5)} of 5 approved items ready for Seller Hub Drafts</strong>
-                <p>{approvedDraftQueue().length >= 5 ? "Your approved batch is ready. It will send automatically only when Auto-send is enabled; otherwise use Send approved drafts now." : `Approve ${5 - approvedDraftQueue().length} more unique reviewed item${5 - approvedDraftQueue().length === 1 ? "" : "s"} before sending to eBay.`}</p>
+                <strong>{Math.min(approvedDraftQueue().length, sellerHubDraftMinItems)} of {sellerHubDraftMinItems} approved items ready for Seller Hub Drafts</strong>
+                <p>{approvedDraftQueue().length >= sellerHubDraftMinItems ? "Your approved batch is ready. It will send automatically only when Auto-send is enabled; otherwise use Send approved drafts now." : `Approve ${sellerHubDraftMinItems - approvedDraftQueue().length} more unique reviewed item${sellerHubDraftMinItems - approvedDraftQueue().length === 1 ? "" : "s"} before sending to eBay.`}</p>
             </div>
             {#if !queue.length}
                 <p class="empty">Analyze an item, review the fields, then add it here.</p>
@@ -1102,7 +1104,7 @@
                     </div>
                 {/each}
                 <div class="actions">
-                    <button class="primary" disabled={draftLoading || approvedDraftQueue().length < 5} on:click={() => sendDraftQueue()}>{draftLoading ? "Sending..." : "Send approved drafts now (5+ items)"}</button>
+                    <button class="primary" disabled={draftLoading || approvedDraftQueue().length < sellerHubDraftMinItems} on:click={() => sendDraftQueue()}>{draftLoading ? "Sending..." : `Send approved drafts now (${sellerHubDraftMinItems}+ items)`}</button>
                     {#if queue.some((entry) => entry.ebayFeedTaskId)}
                         <button type="button" on:click={retryFailedDraftBatch}>Retry confirmed failed batch</button>
                     {/if}
