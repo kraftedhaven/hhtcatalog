@@ -347,7 +347,10 @@ def _has_remaining_alternate(plan: dict[str, Any], context: dict[str, Any]) -> b
 def _provider_plan(context: dict[str, Any] | None = None):
     context = context or {}
     try_alternate = bool(context.get("try_alternate"))
-    selected = os.environ.get("PRIMARY_VISION_PROVIDER", "").strip().lower()
+    selected = str(
+        context.get("provider_override")
+        or os.environ.get("PRIMARY_VISION_PROVIDER", "")
+    ).strip().lower()
     callers = {
         "zai": ("ZAI_API_KEY", _zai),
         "openrouter": ("OPENROUTER_API_KEY", _openrouter),
@@ -381,10 +384,14 @@ def _provider_plan(context: dict[str, Any] | None = None):
         )
     else:
         primary = configured[0]
-    # Prefer an explicitly configured image-capable provider over generic/free
-    # OpenRouter routing. The free OpenRouter model may be text-only even when
-    # its API key is present, which is not suitable for Analyze image uploads.
-    alternate_priority = ("nvidia", "openrouter", "groq") if context.get("background_worker") else ("openrouter", "groq")
+    # An explicit provider override is used for ordinary listing analysis and
+    # keeps the dependable Groq -> OpenRouter chain. Without an override, the
+    # broader background worker order keeps NVIDIA available as the first image
+    # failover for heavy workloads and audits.
+    if context.get("provider_override"):
+        alternate_priority = ("openrouter", "groq")
+    else:
+        alternate_priority = ("nvidia", "openrouter", "groq") if context.get("background_worker") else ("openrouter", "groq")
     alternates = [name for name in alternate_priority if name in configured and name != primary]
     fallback_index = int(context.get("fallback_index", -1 if not try_alternate else 0))
     chosen = alternates[fallback_index] if (try_alternate and alternates and fallback_index < len(alternates)) else primary
