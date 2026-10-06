@@ -269,7 +269,7 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(result["observations"][0]["field"], "Color")
         self.assertEqual(result["visibleFlaws"], ["Small tear by hem"])
         self.assertEqual(result["tagText"], ["Size M"])
-        self.assertIn("Groq listing for comparison", nvidia.call_args.args[1]["audit_prompt"])
+        self.assertIn("Compare against this first-pass listing", nvidia.call_args.args[1]["audit_prompt"])
         self.assertTrue(nvidia.call_args.args[1]["nvidia_audit_only"])
 
     def test_groq_mock_success_uses_compressed_multimodal_non_thinking_request(self):
@@ -1223,7 +1223,9 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(result["itemCount"], 5)
         self.assertEqual(result["duplicateCount"], 1)
         uploaded_csv = calls[1][2]["files"]["file"][1].decode("utf-8")
-        self.assertEqual(len(list(csv.DictReader(io.StringIO(uploaded_csv)))), 5)
+        uploaded_rows = list(csv.reader(io.StringIO(uploaded_csv)))
+        draft_rows = [row for row in uploaded_rows if row and row[0] == "Draft"]
+        self.assertEqual(len(draft_rows), 5)
 
     def test_seller_hub_draft_feed_rejects_sandbox(self):
         with env(EBAY_ENVIRONMENT="sandbox"):
