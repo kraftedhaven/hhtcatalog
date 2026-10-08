@@ -8,6 +8,7 @@
     import { supabase } from "$lib/supabase";
 
     const emptyItem = EMPTY_ITEM;
+    const draftMinItems = 3;
     const breakGroundEnabled = String(import.meta.env.VITE_BREAKGROUND_ENABLED || "false").toLowerCase() === "true";
     const defaultSeller = {
         location: "Kettering, Ohio",
@@ -782,9 +783,9 @@
     }
 
     function scheduleAutoDraftUpload() {
-        if (!autoDraftEnabled || autoDraftInFlight || draftLoading || approvedDraftQueue().length < 5) return;
+        if (!autoDraftEnabled || autoDraftInFlight || draftLoading || approvedDraftQueue().length < draftMinItems) return;
         setTimeout(() => {
-            if (autoDraftEnabled && !autoDraftInFlight && !draftLoading && approvedDraftQueue().length >= 5) {
+            if (autoDraftEnabled && !autoDraftInFlight && !draftLoading && approvedDraftQueue().length >= draftMinItems) {
                 sendDraftQueue({ automatic: true });
             }
         }, 0);
@@ -831,11 +832,11 @@
     async function sendDraftQueue({ automatic = false } = {}) {
         const candidates = approvedDraftQueue();
         if (!candidates.length) {
-            error = "Approve at least five reviewed items before sending Seller Hub drafts.";
+            error = `Approve at least ${draftMinItems} reviewed items before sending Seller Hub drafts.`;
             return;
         }
-        if (candidates.length < 5) {
-            error = `Seller Hub draft upload requires at least 5 approved unique items; ${candidates.length} are ready.`;
+        if (candidates.length < draftMinItems) {
+            error = `Seller Hub draft upload requires at least ${draftMinItems} approved unique items; ${candidates.length} are ready.`;
             return;
         }
         const invalid = firstInvalidQueuedItem(candidates);
@@ -1297,8 +1298,8 @@
                 <div><strong>${queueAverage.toFixed(2)}</strong><span>Average</span></div>
             </div>
             <div class="notice info">
-                <strong>{Math.min(approvedDraftQueue().length, 5)} of 5 approved items ready for Seller Hub Drafts</strong>
-                <p>{approvedDraftQueue().length >= 5 ? "Your approved batch is ready. It will send automatically only when Auto-send is enabled; otherwise use Send approved drafts now." : `Approve ${5 - approvedDraftQueue().length} more unique reviewed item${5 - approvedDraftQueue().length === 1 ? "" : "s"} before sending to eBay.`}</p>
+                <strong>{Math.min(approvedDraftQueue().length, draftMinItems)} of {draftMinItems} approved items ready for Seller Hub Drafts</strong>
+                <p>{approvedDraftQueue().length >= draftMinItems ? "Your approved batch is ready. It will send automatically only when Auto-send is enabled; otherwise use Send approved drafts now." : `Approve ${draftMinItems - approvedDraftQueue().length} more unique reviewed item${draftMinItems - approvedDraftQueue().length === 1 ? "" : "s"} before sending to eBay.`}</p>
             </div>
             {#if !queue.length}
                 <p class="empty">Analyze an item, review the fields, then add it here.</p>
@@ -1320,7 +1321,7 @@
                     </div>
                 {/each}
                 <div class="actions">
-                    <button class="primary" disabled={draftLoading || approvedDraftQueue().length < 5} on:click={() => sendDraftQueue()}>{draftLoading ? "Sending..." : "Send approved drafts now (5+ items)"}</button>
+                    <button class="primary" disabled={draftLoading || approvedDraftQueue().length < draftMinItems} on:click={() => sendDraftQueue()}>{draftLoading ? "Sending..." : `Send approved drafts now (${draftMinItems}+ items)`}</button>
                     {#if queue.some((entry) => entry.ebayFeedTaskId)}
                         <button type="button" on:click={retryFailedDraftBatch}>Retry confirmed failed batch</button>
                     {/if}
@@ -1358,7 +1359,7 @@
             </div>
             <label class="field wide checkbox-field">
                 <input type="checkbox" bind:checked={autoDraftEnabled} on:change={scheduleAutoDraftUpload} />
-                <span><strong>Auto-send approved items to eBay Drafts</strong><small>Off by default. When enabled, HHT sends a batch automatically only after five unique reviewed and approved items are ready. It creates drafts only; it never publishes live listings.</small></span>
+                <span><strong>Auto-send approved items to eBay Drafts</strong><small>Off by default. When enabled, HHT sends a batch automatically only after {draftMinItems} unique reviewed and approved items are ready. It creates drafts only; it never publishes live listings.</small></span>
             </label>
             <label class="field"><span>Location</span><input bind:value={seller.location} /></label>
             <label class="field"><span>Postal Code</span><input bind:value={seller.postalCode} /></label>

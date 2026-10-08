@@ -22,7 +22,15 @@ DEFAULT_TIMEOUT_SECONDS = 15.0
 # Draft action. FX_DRAFT is not a supported Sell Feed API task type.
 DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE = "FX_LISTING"
 SELLER_HUB_SCHEMA_VERSION = "1.0"
-MIN_DRAFT_UPLOAD_ITEMS = 5
+DEFAULT_MIN_DRAFT_UPLOAD_ITEMS = 3
+
+
+def _min_draft_upload_items() -> int:
+    """Return the configured minimum, bounded to a safe pilot range."""
+    try:
+        return min(50, max(3, int(os.environ.get("EBAY_DRAFT_MIN_ITEMS", str(DEFAULT_MIN_DRAFT_UPLOAD_ITEMS)))))
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_DRAFT_UPLOAD_ITEMS
 
 
 class EbayFeedError(RuntimeError):
@@ -53,12 +61,13 @@ def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DE
     if not isinstance(items, list) or not items:
         raise EbayFeedError(400, "invalid_request", "Queue must include at least one reviewed item.", operation="create_task")
     unique_items = deduplicate_draft_items(items)
-    if len(unique_items) < MIN_DRAFT_UPLOAD_ITEMS:
+    minimum_items = _min_draft_upload_items()
+    if len(unique_items) < minimum_items:
         duplicate_note = " after removing duplicates" if len(unique_items) != len(items) else ""
         raise EbayFeedError(
             400,
             "invalid_request",
-            f"Seller Hub draft upload requires at least {MIN_DRAFT_UPLOAD_ITEMS} unique reviewed items; received {len(unique_items)}{duplicate_note}.",
+            f"Seller Hub draft upload requires at least {minimum_items} unique reviewed items; received {len(unique_items)}{duplicate_note}.",
             operation="create_task",
         )
     if _environment() == "sandbox":
