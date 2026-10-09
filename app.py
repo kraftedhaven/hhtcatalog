@@ -25,6 +25,7 @@ MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10"))
 INLINE_ANALYSIS_ENABLED = os.environ.get("ANALYSIS_INLINE_FALLBACK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 INLINE_ANALYSIS_WORKERS = min(4, max(1, int(os.environ.get("ANALYSIS_INLINE_WORKERS", "2"))))
 INLINE_ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=INLINE_ANALYSIS_WORKERS, thread_name_prefix="inline-analysis")
+DIRECT_ANALYSIS_ENABLED = os.environ.get("ANALYSIS_DIRECT_MODE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 HEIC_IMAGE_TYPES = {"image/heic", "image/heif"}
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", *HEIC_IMAGE_TYPES}
 
@@ -146,11 +147,22 @@ def analysis_start():
             str(g.seller_id),
             _seller_defaults_from_form(),
         )
-        # Emergency read-only fallback for deployments where worker.1 is not
-        # running. The database claim in run_job() prevents duplicate work if
-        # the normal worker claims the same row first. This path never calls
-        # eBay and remains disabled unless explicitly enabled in Heroku.
-        if INLINE_ANALYSIS_ENABLED and result.get("jobId"):
+        if DIRECT_ANALYSIS_ENABLED and result.get("jobId"):
+            # Emergency read-only path for a deployment whose detached worker
+            # threads are not progressing. run_job() uses the same atomic
+            # database claim as worker.1, so a concurrent worker cannot
+            # duplicate the analysis. This path never calls eBay.
+            completed = commerce_agent.run_job(str(result["jobId"])) or {}
+            result.update({
+                "status": completed.get("status", "completed"),
+                "progress": completed.get("progress", 100),
+                "executionRoute": "direct_request",
+            })
+        elif INLINE_ANALYSIS_ENABLED and result.get("jobId"):
+            # Emergency read-only fallback for deployments where worker.1 is
+            # not running. The database claim in run_job() prevents duplicate
+            # work if the normal worker claims the same row first. This path
+            # never calls eBay and remains disabled unless explicitly enabled.
             INLINE_ANALYSIS_EXECUTOR.submit(commerce_agent.run_job, str(result["jobId"]))
             result["executionRoute"] = "inline_fallback"
         return jsonify({"result": result}), 202
