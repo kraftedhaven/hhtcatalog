@@ -2,6 +2,7 @@ import mimetypes
 import os
 import html
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from flask import Flask, Response, g, jsonify, request, send_from_directory
@@ -21,6 +22,9 @@ from hht_app.supabase_auth import authenticate_request
 
 PORT = int(os.environ.get("PORT", 8080))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10"))
+INLINE_ANALYSIS_ENABLED = os.environ.get("ANALYSIS_INLINE_FALLBACK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+INLINE_ANALYSIS_WORKERS = min(4, max(1, int(os.environ.get("ANALYSIS_INLINE_WORKERS", "2"))))
+INLINE_ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=INLINE_ANALYSIS_WORKERS, thread_name_prefix="inline-analysis")
 HEIC_IMAGE_TYPES = {"image/heic", "image/heif"}
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", *HEIC_IMAGE_TYPES}
 
@@ -142,6 +146,13 @@ def analysis_start():
             str(g.seller_id),
             _seller_defaults_from_form(),
         )
+        # Emergency read-only fallback for deployments where worker.1 is not
+        # running. The database claim in run_job() prevents duplicate work if
+        # the normal worker claims the same row first. This path never calls
+        # eBay and remains disabled unless explicitly enabled in Heroku.
+        if INLINE_ANALYSIS_ENABLED and result.get("jobId"):
+            INLINE_ANALYSIS_EXECUTOR.submit(commerce_agent.run_job, str(result["jobId"]))
+            result["executionRoute"] = "inline_fallback"
         return jsonify({"result": result}), 202
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
