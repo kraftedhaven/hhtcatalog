@@ -56,8 +56,9 @@ ZAI_IMAGE_QUALITY = 72
 ZAI_IMAGE_RETRY_QUALITY = 64
 ZAI_REQUEST_LOCK = threading.Lock()
 # Hosted providers are attempted only when selected explicitly or through the
-# one-shot alternate action. Z.AI stays opt-in while its account limits settle.
-DEFAULT_HOSTED_PROVIDER_ORDER = ("groq", "openrouter", "nvidia")
+# one-shot alternate action. Keep OpenRouter out of the automatic production
+# path unless an operator deliberately selects it.
+DEFAULT_HOSTED_PROVIDER_ORDER = ("groq", "nvidia")
 PROVIDER_CALLERS = frozenset({"zai", "openrouter", "groq", "nvidia"})
 DEFAULT_PROVIDER_COOLDOWN_SECONDS = 90
 PROVIDER_COOLDOWNS: dict[str, float] = {}
@@ -375,10 +376,12 @@ def _provider_plan(context: dict[str, Any] | None = None):
             category="configuration",
         )
     configured = _configured_provider_order(callers)
+    if selected != "openrouter":
+        configured = [name for name in configured if name != "openrouter"]
     # NVIDIA can legitimately require longer image inference than a Heroku web
-    # request safely allows. Standard browser analysis therefore uses Groq and
-    # OpenRouter; the dedicated NVIDIA worker route selects NVIDIA explicitly
-    # and persists the request before any long-running inference begins.
+    # request safely allows. Standard browser analysis therefore uses Groq; the
+    # dedicated NVIDIA worker route selects NVIDIA explicitly and persists the
+    # request before any long-running inference begins.
     if context.get("web_request") and selected != "nvidia":
         configured = [name for name in configured if name != "nvidia"]
     if not configured:
@@ -393,7 +396,7 @@ def _provider_plan(context: dict[str, Any] | None = None):
                 retryable=False,
             )
         primary = override
-        alternates = [name for name in ("openrouter",) if name in configured and name != primary]
+        alternates = [name for name in ("nvidia",) if name in configured and name != primary]
         fallback_index = int(context.get("fallback_index", -1 if not try_alternate else 0))
         chosen = alternates[fallback_index] if try_alternate and fallback_index < len(alternates) else primary
         return {
@@ -417,16 +420,15 @@ def _provider_plan(context: dict[str, Any] | None = None):
         )
     else:
         primary = configured[0]
-    # Prefer an explicitly configured image-capable provider over generic/free
-    # OpenRouter routing. The free OpenRouter model may be text-only even when
-    # its API key is present, which is not suitable for Analyze image uploads.
-    alternate_priority = ("nvidia", "openrouter", "groq") if context.get("background_worker") else ("openrouter", "groq")
+    # Prefer first-party/owned provider paths. OpenRouter is intentionally
+    # excluded from automatic failover unless selected as the primary provider.
+    alternate_priority = ("nvidia", "groq") if context.get("background_worker") else ("groq",)
     alternates = [name for name in alternate_priority if name in configured and name != primary]
     fallback_index = int(context.get("fallback_index", -1 if not try_alternate else 0))
     chosen = alternates[fallback_index] if (try_alternate and alternates and fallback_index < len(alternates)) else primary
     if try_alternate and not alternates:
         raise ProviderError(
-            "No alternate hosted provider is configured. Configure both OpenRouter and Groq to enable one-click failover.",
+            "No alternate hosted provider is configured. Configure Groq and NVIDIA to enable one-click failover.",
             503,
             category="configuration",
             retryable=False,

@@ -11,6 +11,7 @@ class AnalysisContractTests(unittest.TestCase):
         self.assertFalse(readiness["eBayMutationAllowed"])
         self.assertNotIn("breakground", PROVIDER_CALLERS)
         self.assertNotIn("breakground", DEFAULT_HOSTED_PROVIDER_ORDER)
+        self.assertNotIn("openrouter", DEFAULT_HOSTED_PROVIDER_ORDER)
         self.assertIn("api_url_or_sdk", readiness["requiredContract"])
 
     def test_canonical_run_is_review_only_for_supported_providers(self):
