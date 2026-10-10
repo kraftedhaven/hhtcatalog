@@ -393,7 +393,10 @@ def _provider_plan(context: dict[str, Any] | None = None):
                 retryable=False,
             )
         primary = override
-        alternates = [name for name in ("openrouter",) if name in configured and name != primary]
+        fallback_order = [value.strip().lower() for value in os.environ.get("VISION_PROVIDER_FALLBACK_ORDER", "nvidia,openrouter,groq").split(",") if value.strip()]
+        if context.get("web_request") and selected != "nvidia":
+            fallback_order = [name for name in fallback_order if name != "nvidia"]
+        alternates = [name for name in fallback_order if name in configured and name != primary]
         fallback_index = int(context.get("fallback_index", -1 if not try_alternate else 0))
         chosen = alternates[fallback_index] if try_alternate and fallback_index < len(alternates) else primary
         return {
@@ -420,13 +423,16 @@ def _provider_plan(context: dict[str, Any] | None = None):
     # Prefer an explicitly configured image-capable provider over generic/free
     # OpenRouter routing. The free OpenRouter model may be text-only even when
     # its API key is present, which is not suitable for Analyze image uploads.
-    alternate_priority = ("nvidia", "openrouter", "groq") if context.get("background_worker") else ("openrouter", "groq")
+    configured_fallback_order = [value.strip().lower() for value in os.environ.get("VISION_PROVIDER_FALLBACK_ORDER", "nvidia,openrouter,groq").split(",") if value.strip()]
+    if context.get("web_request") and selected != "nvidia":
+        configured_fallback_order = [name for name in configured_fallback_order if name != "nvidia"]
+    alternate_priority = tuple(configured_fallback_order)
     alternates = [name for name in alternate_priority if name in configured and name != primary]
     fallback_index = int(context.get("fallback_index", -1 if not try_alternate else 0))
     chosen = alternates[fallback_index] if (try_alternate and alternates and fallback_index < len(alternates)) else primary
     if try_alternate and not alternates:
         raise ProviderError(
-            "No alternate hosted provider is configured. Configure both OpenRouter and Groq to enable one-click failover.",
+            "No alternate hosted provider is configured. Configure the fallback providers in VISION_PROVIDER_FALLBACK_ORDER.",
             503,
             category="configuration",
             retryable=False,

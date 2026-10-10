@@ -1057,13 +1057,13 @@
             <label class="field">
                 <span>Analysis engine</span>
                 <select bind:value={engine}>
-                    <option value="hosted">Groq first pass + NVIDIA audit</option>
+                    <option value="hosted">Automatic batch: Groq → NVIDIA → OpenRouter</option>
                     <option value="local">Browser-local SmolVLM experimental</option>
                 </select>
             </label>
             <p class="help">
                 {engine === "hosted"
-                    ? "Hosted analysis is queued and returns the Groq result as soon as it is ready. NVIDIA checks for missed fields and visible flaws in parallel; neither provider directly changes eBay."
+                    ? "Add many photos to the staging grid, select one item group at a time, and keep grouping while submitted items process. HHT tries Groq first, then automatically uses configured NVIDIA and OpenRouter fallbacks when Groq is unavailable. Providers only create reviewable drafts; none changes eBay."
                     : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
             </p>
             {#if analysisJobs.length}

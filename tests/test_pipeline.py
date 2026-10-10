@@ -243,7 +243,7 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("api.z.ai", calls[0])
 
-    def test_background_listing_plan_forces_groq_and_keeps_openrouter_as_fallback(self):
+    def test_background_listing_plan_forces_groq_and_uses_configured_fallback_order(self):
         with env(
             PRIMARY_VISION_PROVIDER="nvidia",
             HOSTED_PROVIDER_ORDER="groq,openrouter,nvidia",
@@ -254,8 +254,8 @@ class MergePipelineTests(unittest.TestCase):
             plan = providers._provider_plan({"provider_override": "groq", "background_worker": True})
             fallback = providers._provider_plan({"provider_override": "groq", "background_worker": True, "try_alternate": True})
         self.assertEqual(plan["selected"], "groq")
-        self.assertEqual(plan["alternate"], "openrouter")
-        self.assertEqual(fallback["selected"], "openrouter")
+        self.assertEqual(plan["alternate"], "nvidia")
+        self.assertEqual(fallback["selected"], "nvidia")
 
     def test_nvidia_audit_returns_only_structured_evidence(self):
         audit_json = json.dumps({
