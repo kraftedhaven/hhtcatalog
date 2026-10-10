@@ -25,7 +25,10 @@ MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10"))
 INLINE_ANALYSIS_ENABLED = os.environ.get("ANALYSIS_INLINE_FALLBACK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 INLINE_ANALYSIS_WORKERS = min(4, max(1, int(os.environ.get("ANALYSIS_INLINE_WORKERS", "2"))))
 INLINE_ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=INLINE_ANALYSIS_WORKERS, thread_name_prefix="inline-analysis")
-DIRECT_ANALYSIS_ENABLED = os.environ.get("ANALYSIS_DIRECT_MODE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+# New-photo analysis must not silently sit behind a detached worker. It is
+# read-only and uses the same seller-scoped job record; the worker remains an
+# optional fallback for deployments that explicitly disable direct mode.
+DIRECT_ANALYSIS_ENABLED = os.environ.get("ANALYSIS_DIRECT_MODE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 HEIC_IMAGE_TYPES = {"image/heic", "image/heif"}
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", *HEIC_IMAGE_TYPES}
 

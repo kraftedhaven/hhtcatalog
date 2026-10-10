@@ -1021,7 +1021,13 @@ def approve_rotation_actions(
 
 
 def start_active_import_job() -> dict[str, Any]:
-    return _start_background_job("active_import", {})
+    result = _start_background_job("active_import", {}, run_in_web_thread=False)
+    # Active import is read-only. Execute it in the request by default so a
+    # missing/stalled worker cannot leave the seller at queued 0%.
+    if os.environ.get("COMMERCE_IMPORT_DIRECT_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}:
+        completed = run_job(str(result["jobId"])) or {}
+        result.update({"status": completed.get("status", "completed"), "progress": completed.get("progress", 100), "executionRoute": "direct_request"})
+    return result
 
 
 def start_performance_sync_job(days: int = 30, listing_ids: list[str] | None = None) -> dict[str, Any]:
