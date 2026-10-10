@@ -1509,6 +1509,45 @@ def queued_job_ids(
     return [str(row["id"]) for row in rows]
 
 
+def requeue_stale_jobs(max_age_seconds: int = 900) -> int:
+    """Return interrupted read-only jobs to the queue after a worker crash.
+
+    Jobs are claimed with a queued->running compare-and-set. If the process dies
+    after claiming one, this recovery prevents a permanent running/0% or running/
+    partial state. It never touches eBay mutation jobs.
+    """
+    init_db()
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(300, int(max_age_seconds)))
+    recovered = 0
+    with connect() as db:
+        rows = db.execute(
+            "SELECT id, kind, updated_at FROM commerce_jobs WHERE status='running'"
+        ).fetchall()
+        for row in rows:
+            if str(row["kind"]) not in {
+                "listing_analysis", "nvidia_vision", "nvidia_vision_batch",
+                "active_import", "performance_sync", "fulfillment_sync",
+                "enrichment", "full_enrichment", "audit",
+            }:
+                continue
+            try:
+                updated = datetime.fromisoformat(str(row["updated_at"]).replace("Z", "+00:00"))
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            if updated > cutoff:
+                continue
+            changed = db.execute(
+                "UPDATE commerce_jobs SET status='queued', progress=0, updated_at=?, error=? "
+                "WHERE id=? AND status='running'",
+                (utc_now(), "Worker restarted before completion; job requeued automatically.", str(row["id"])),
+            )
+            if getattr(changed, "rowcount", 1) == 1:
+                recovered += 1
+    return recovered
+
+
 def _listing_provenance(listing: dict[str, Any]) -> dict[str, str]:
     metadata = {"attributeEvidence", "analysisHints", "analysisHintFields", "titleCandidates", "titleSeoMetadata", "providerFailures", "photoAssets"}
     return {

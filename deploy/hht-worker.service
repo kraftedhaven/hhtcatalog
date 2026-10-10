@@ -1,0 +1,24 @@
+[Unit]
+Description=HHT Commerce Agent persistent batch worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hhtworker
+Group=hhtworker
+WorkingDirectory=/opt/hhtcatalog
+EnvironmentFile=-/etc/hht-catalog/worker.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/hhtcatalog/.venv/bin/python worker.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/hhtcatalog
+
+[Install]
+WantedBy=multi-user.target
