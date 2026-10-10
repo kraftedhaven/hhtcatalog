@@ -364,7 +364,9 @@
 
     function openAnalysisResult(job) {
         if (!job?.result) return;
-        item = normalizeForForm(job.result);
+        // Job results wrap the generated listing as { listing, auditStatus,
+        // timings }. The form needs the canonical listing, not that wrapper.
+        item = normalizeForForm(job.result.listing || job.result);
         previews.forEach((preview) => URL.revokeObjectURL(preview.url));
         files = analysisSourceFiles.get(job.jobId) || [];
         previews = files.map((file) => ({ name: file.name, url: URL.createObjectURL(file) }));

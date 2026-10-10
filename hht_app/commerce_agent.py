@@ -750,7 +750,10 @@ def import_active_listings() -> dict[str, Any]:
                 ownership = classify_listing_ownership(normalized)
                 normalized["ownershipClassification"] = ownership
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now))
-                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=?, ownership_classification=? WHERE sku=? AND marketplace=?", (str(normalized.get("status") or "active"), normalized.get("listingStartTime"), int(_metric_number(normalized.get("quantitySold"))), _metric_optional_number(normalized.get("watchCount")), ownership, sku, _marketplace()))
+                # eBay may omit WatchCount. The production listings column is
+                # non-null, so store zero while preserving the raw omission in
+                # data_json for later review.
+                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=?, ownership_classification=? WHERE sku=? AND marketplace=?", (str(normalized.get("status") or "active"), normalized.get("listingStartTime"), int(_metric_number(normalized.get("quantitySold"))), int(_metric_number(normalized.get("watchCount"))), ownership, sku, _marketplace()))
                 active_skus.add(sku)
                 imported += 1
         if page >= int(result.get("totalPages") or 1) or not items:

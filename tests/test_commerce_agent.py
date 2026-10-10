@@ -411,6 +411,15 @@ class CommerceAgentTests(unittest.TestCase):
         self.assertEqual(stale["lifecycle"], "Not returned by latest active eBay import")
         self.assertEqual(stale["lifecycleStatus"], "inactive_unknown")
 
+    def test_active_import_uses_zero_when_ebay_omits_watch_count(self):
+        page = {"items": [{"listingId": "L-WATCH", "sku": "WATCH-SKU", "title": "No watch metric", "price": 19.99}], "totalEntries": 1, "totalPages": 1}
+        with mock.patch.object(commerce_agent, "fetch_active_listings", return_value=page):
+            result = commerce_agent.import_active_listings()
+        self.assertEqual(result["imported"], 1)
+        with commerce_agent.connect() as db:
+            row = db.execute("SELECT watch_count FROM listings WHERE sku=?", ("WATCH-SKU",)).fetchone()
+        self.assertEqual(row["watch_count"], 0)
+
     def test_listing_capacity_distinguishes_configured_from_verified(self):
         old = os.environ.get("EBAY_LISTING_CAPACITY")
         os.environ["EBAY_LISTING_CAPACITY"] = "1000"
