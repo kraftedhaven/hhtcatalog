@@ -410,7 +410,9 @@
 
     function openAnalysisResult(job) {
         if (!job?.result) return;
-        item = normalizeForForm(job.result);
+        // Job results wrap the generated listing as { listing, auditStatus,
+        // timings }. The form needs the canonical listing, not that wrapper.
+        item = normalizeForForm(job.result.listing || job.result);
         previews.forEach((preview) => URL.revokeObjectURL(preview.url));
         files = analysisSourceFiles.get(job.jobId) || [];
         previews = files.map((file) => ({ name: file.name, url: URL.createObjectURL(file) }));
@@ -1101,13 +1103,13 @@
             <label class="field">
                 <span>Analysis engine</span>
                 <select bind:value={engine}>
-                    <option value="hosted">Groq first pass + NVIDIA audit</option>
+                    <option value="hosted">Automatic batch: Groq → NVIDIA → OpenRouter</option>
                     <option value="local">Browser-local SmolVLM experimental</option>
                 </select>
             </label>
             <p class="help">
                 {engine === "hosted"
-                    ? "Hosted analysis is queued and returns the Groq result as soon as it is ready. NVIDIA checks for missed fields and visible flaws in parallel; neither provider directly changes eBay."
+                    ? "Add many photos to the staging grid, select one item group at a time, and keep grouping while submitted items process. HHT tries Groq first, then automatically uses configured NVIDIA and OpenRouter fallbacks when Groq is unavailable. Providers only create reviewable drafts; none changes eBay."
                     : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
             </p>
             {#if analysisJobs.length}

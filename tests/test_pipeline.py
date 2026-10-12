@@ -243,7 +243,7 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("api.z.ai", calls[0])
 
-    def test_background_listing_plan_forces_groq_and_uses_nvidia_fallback(self):
+    def test_background_listing_plan_forces_groq_and_uses_configured_fallback_order(self):
         with env(
             PRIMARY_VISION_PROVIDER="nvidia",
             HOSTED_PROVIDER_ORDER="groq,openrouter,nvidia",
@@ -256,19 +256,6 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(plan["selected"], "groq")
         self.assertEqual(plan["alternate"], "nvidia")
         self.assertEqual(fallback["selected"], "nvidia")
-        self.assertNotIn("openrouter", plan["configured"])
-
-    def test_openrouter_is_not_automatic_even_when_stale_order_configured(self):
-        with env(
-            HOSTED_PROVIDER_ORDER="openrouter,groq,nvidia",
-            GROQ_API_KEY="groq-key",
-            OPENROUTER_API_KEY="openrouter-key",
-            NVIDIA_NIM_API_KEY="nvidia-key",
-        ):
-            plan = providers._provider_plan({"background_worker": True})
-        self.assertEqual(plan["selected"], "groq")
-        self.assertEqual(plan["alternate"], "nvidia")
-        self.assertNotIn("openrouter", plan["configured"])
 
     def test_nvidia_audit_returns_only_structured_evidence(self):
         audit_json = json.dumps({
@@ -625,7 +612,7 @@ class MergePipelineTests(unittest.TestCase):
     def test_production_provider_order_prefers_nvidia_for_image_failover(self):
         with env(GROQ_API_KEY="gr", OPENROUTER_API_KEY="or", NVIDIA_NIM_API_KEY="nv"):
             plan = providers._provider_plan({"background_worker": True})
-        self.assertEqual(plan["configured"], ["groq", "nvidia"])
+        self.assertEqual(plan["configured"], ["groq", "openrouter", "nvidia"])
         self.assertEqual(plan["primary"], "groq")
         self.assertEqual(plan["alternate"], "nvidia")
 
@@ -655,11 +642,13 @@ class MergePipelineTests(unittest.TestCase):
         self.assertGreaterEqual(body["retry_after_seconds"], 1)
         self.assertGreaterEqual(providers._cooldown_remaining_seconds("openrouter"), 1)
 
-    def test_stale_openrouter_order_uses_groq_without_automatic_openrouter_retry(self):
+    def test_provider_automatically_falls_back_then_allows_explicit_retry(self):
         calls = []
 
         def fake_post(url, **_kwargs):
             calls.append(url)
+            if "openrouter.ai" in url:
+                return FakeResponse(status_code=429, payload={"error": {"message": "rate limit"}}, headers={"Retry-After": "9"})
             return FakeResponse(payload=provider_payload("Patagonia Fleece"))
 
         with env(OPENROUTER_API_KEY="or", GROQ_API_KEY="gr", HOSTED_PROVIDER_ORDER="openrouter,groq"):
@@ -669,14 +658,21 @@ class MergePipelineTests(unittest.TestCase):
                     data={"file": (io.BytesIO(b"fake"), "photo.jpg")},
                     content_type="multipart/form-data",
                 )
+                second = self.client.post(
+                    "/analyze",
+                    data={"file": (io.BytesIO(b"fake"), "photo.jpg"), "tryAlternate": "1"},
+                    content_type="multipart/form-data",
+                )
         first_body = first.get_json()
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first_body["result"]["provider"], "groq")
-        self.assertEqual(len(calls), 1)
-        self.assertIn("api.groq.com", calls[0])
-        self.assertFalse(any("openrouter.ai" in url for url in calls))
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.get_json()["result"]["provider"], "groq")
+        self.assertEqual(len(calls), 3)
+        self.assertIn("openrouter.ai", calls[0])
+        self.assertIn("api.groq.com", calls[1])
 
-    def test_browser_analysis_skips_nvidia_and_does_not_fall_to_openrouter(self):
+    def test_browser_analysis_skips_nvidia_and_falls_from_groq_to_openrouter(self):
         calls = []
 
         def fake_post(url, **_kwargs):
@@ -699,8 +695,8 @@ class MergePipelineTests(unittest.TestCase):
                     data={"file": (io.BytesIO(b"fake"), "photo.jpg")},
                     content_type="multipart/form-data",
                 )
-        self.assertEqual(response.status_code, 429)
-        self.assertFalse(any("openrouter.ai" in url for url in calls))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["result"]["provider"], "openrouter")
         self.assertFalse(any("nvidia.example" in url for url in calls))
 
     def test_successful_fallback_preserves_sanitized_prior_failure(self):
@@ -709,7 +705,7 @@ class MergePipelineTests(unittest.TestCase):
             NVIDIA_NIM_API_KEY="nv",
             NVIDIA_NIM_BASE_URL="https://nvidia.example/v1",
             NVIDIA_CATEGORY_MODEL="vision-model",
-            GROQ_API_KEY="gr",
+            OPENROUTER_API_KEY="or",
         ):
             def fake_post(url, **_kwargs):
                 if "nvidia.example" in url:
@@ -717,7 +713,7 @@ class MergePipelineTests(unittest.TestCase):
                 return FakeResponse(payload=provider_payload("Patagonia Fleece"))
             with mock.patch.object(providers.requests, "post", side_effect=fake_post):
                 result = providers.analyze_images([self.image], {"deadline": providers.time.monotonic() + 20})
-        self.assertEqual(result["provider"], "groq")
+        self.assertEqual(result["provider"], "openrouter")
         self.assertEqual(result["providerFailures"][0]["provider"], "nvidia")
         self.assertNotIn("capacity", str(result["providerFailures"]))
 
@@ -745,7 +741,7 @@ class MergePipelineTests(unittest.TestCase):
                     content_type="multipart/form-data",
                 )
         self.assertEqual(response.status_code, 429)
-        self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_count, 3)
 
     def test_analyze_rejects_more_than_five_images(self):
         data = {"file": [(io.BytesIO(b"fake"), f"photo-{index}.jpg") for index in range(6)]}

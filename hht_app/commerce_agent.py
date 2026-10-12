@@ -750,7 +750,10 @@ def import_active_listings() -> dict[str, Any]:
                 ownership = classify_listing_ownership(normalized)
                 normalized["ownershipClassification"] = ownership
                 db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now))
-                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=?, ownership_classification=? WHERE sku=? AND marketplace=?", (str(normalized.get("status") or "active"), normalized.get("listingStartTime"), int(_metric_number(normalized.get("quantitySold"))), _metric_optional_number(normalized.get("watchCount")), ownership, sku, _marketplace()))
+                # eBay may omit WatchCount. The production listings column is
+                # non-null, so store zero while preserving the raw omission in
+                # data_json for later review.
+                db.execute("UPDATE listings SET lifecycle_status=?, listing_start_time=?, quantity_sold=?, watch_count=?, ownership_classification=? WHERE sku=? AND marketplace=?", (str(normalized.get("status") or "active"), normalized.get("listingStartTime"), int(_metric_number(normalized.get("quantitySold"))), int(_metric_number(normalized.get("watchCount"))), ownership, sku, _marketplace()))
                 active_skus.add(sku)
                 imported += 1
         if page >= int(result.get("totalPages") or 1) or not items:
@@ -1018,7 +1021,13 @@ def approve_rotation_actions(
 
 
 def start_active_import_job() -> dict[str, Any]:
-    return _start_background_job("active_import", {})
+    result = _start_background_job("active_import", {}, run_in_web_thread=False)
+    # Active import is read-only. Execute it in the request by default so a
+    # missing/stalled worker cannot leave the seller at queued 0%.
+    if os.environ.get("COMMERCE_IMPORT_DIRECT_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}:
+        completed = run_job(str(result["jobId"])) or {}
+        result.update({"status": completed.get("status", "completed"), "progress": completed.get("progress", 100), "executionRoute": "direct_request"})
+    return result
 
 
 def start_performance_sync_job(days: int = 30, listing_ids: list[str] | None = None) -> dict[str, Any]:
@@ -1498,6 +1507,45 @@ def queued_job_ids(
             tuple(params),
         ).fetchall()
     return [str(row["id"]) for row in rows]
+
+
+def requeue_stale_jobs(max_age_seconds: int = 900) -> int:
+    """Return interrupted read-only jobs to the queue after a worker crash.
+
+    Jobs are claimed with a queued->running compare-and-set. If the process dies
+    after claiming one, this recovery prevents a permanent running/0% or running/
+    partial state. It never touches eBay mutation jobs.
+    """
+    init_db()
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(300, int(max_age_seconds)))
+    recovered = 0
+    with connect() as db:
+        rows = db.execute(
+            "SELECT id, kind, updated_at FROM commerce_jobs WHERE status='running'"
+        ).fetchall()
+        for row in rows:
+            if str(row["kind"]) not in {
+                "listing_analysis", "nvidia_vision", "nvidia_vision_batch",
+                "active_import", "performance_sync", "fulfillment_sync",
+                "enrichment", "full_enrichment", "audit",
+            }:
+                continue
+            try:
+                updated = datetime.fromisoformat(str(row["updated_at"]).replace("Z", "+00:00"))
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            if updated > cutoff:
+                continue
+            changed = db.execute(
+                "UPDATE commerce_jobs SET status='queued', progress=0, updated_at=?, error=? "
+                "WHERE id=? AND status='running'",
+                (utc_now(), "Worker restarted before completion; job requeued automatically.", str(row["id"])),
+            )
+            if getattr(changed, "rowcount", 1) == 1:
+                recovered += 1
+    return recovered
 
 
 def _listing_provenance(listing: dict[str, Any]) -> dict[str, str]:

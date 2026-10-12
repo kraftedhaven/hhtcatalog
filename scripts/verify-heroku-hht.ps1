@@ -122,14 +122,15 @@ try {
 
     if ($ShowOptional) {
         Write-Host "Optional variables:" -ForegroundColor DarkCyan
-        foreach ($name in $optional) {
+        $optionalRows = foreach ($name in $optional) {
             $exists = $null -ne $config.PSObject.Properties[$name]
             $value = if ($exists) { [string]$config.$name } else { "" }
             [PSCustomObject]@{
                 Variable = $name
                 Status   = if (-not $exists) { "MISSING" } elseif ([string]::IsNullOrWhiteSpace($value)) { "BLANK" } else { "PRESENT" }
             }
-        } | Format-Table -AutoSize
+        }
+        $optionalRows | Format-Table -AutoSize
     }
 
     Write-Section "Safety checks"
