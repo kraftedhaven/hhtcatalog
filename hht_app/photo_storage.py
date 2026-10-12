@@ -31,6 +31,7 @@ class PhotoStorageError(RuntimeError):
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"}
 MAX_ORIGINAL_BYTES = int(os.environ.get("PHOTO_MAX_BYTES", str(12 * 1024 * 1024)))
 MAX_DIMENSION = int(os.environ.get("PHOTO_MAX_DIMENSION", "1800"))
+DEFAULT_PHOTO_URL_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def storage_provider() -> str:
@@ -173,7 +174,7 @@ def _supabase_delete(key: str) -> None:
 
 
 def _supabase_signed_url(key: str) -> str:
-    expires = int(os.environ.get("PHOTO_URL_TTL_SECONDS", "3600"))
+    expires = _photo_url_ttl_seconds()
     url = f"{os.environ['SUPABASE_URL'].rstrip('/')}/storage/v1/object/sign/{os.environ['PHOTO_STORAGE_BUCKET'].strip('/')}/{key}"
     try:
         response = requests.post(url, headers=_supabase_headers("application/json"), json={"expiresIn": expires}, timeout=10)
@@ -263,7 +264,7 @@ def _ibm_delete(key: str) -> None:
 
 
 def _ibm_signed_url(key: str) -> str:
-    expires = int(os.environ.get("PHOTO_URL_TTL_SECONDS", "3600"))
+    expires = _photo_url_ttl_seconds()
     try:
         client = _ibm_client()
         public_endpoint = _ibm_endpoint(public=True)
@@ -284,7 +285,14 @@ def _ibm_signed_url(key: str) -> str:
 
 
 def _url_expiry() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=int(os.environ.get("PHOTO_URL_TTL_SECONDS", "3600")))
+    return datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=_photo_url_ttl_seconds())
+
+
+def _photo_url_ttl_seconds() -> int:
+    try:
+        return max(3600, int(os.environ.get("PHOTO_URL_TTL_SECONDS", str(DEFAULT_PHOTO_URL_TTL_SECONDS))))
+    except (TypeError, ValueError):
+        return DEFAULT_PHOTO_URL_TTL_SECONDS
 
 
 def _safe_segment(value: str) -> str:

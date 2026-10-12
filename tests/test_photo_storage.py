@@ -7,7 +7,7 @@ from flask import g
 from PIL import Image
 
 import hht_app.photo_storage as photo_storage
-from hht_app.photo_storage import PhotoStorageError, _compress, _derive_public_endpoint, storage_status, store_photo
+from hht_app.photo_storage import PhotoStorageError, _compress, _derive_public_endpoint, _photo_url_ttl_seconds, storage_status, store_photo
 from app import app as flask_app
 import app as app_module
 
@@ -22,6 +22,12 @@ class PhotoStorageTests(unittest.TestCase):
             _derive_public_endpoint("https://s3.private.us-east.cloud-object-storage.appdomain.cloud/bucket"),
             "https://s3.us-east.cloud-object-storage.appdomain.cloud/bucket",
         )
+
+    def test_default_photo_url_ttl_survives_seller_hub_processing_window(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_photo_url_ttl_seconds(), 604800)
+        with mock.patch.dict(os.environ, {"PHOTO_URL_TTL_SECONDS": "120"}, clear=True):
+            self.assertEqual(_photo_url_ttl_seconds(), 3600)
 
     def test_photo_storage_status_requires_authentication(self):
         with mock.patch.dict(os.environ, {"SUPABASE_URL": "https://example.supabase.co"}):

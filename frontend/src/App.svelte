@@ -335,8 +335,8 @@
                 try {
                     const stored = await uploadListingPhotos(analysisFiles, item.sku || "unassigned");
                     const ebayUrls = (stored.assets || []).map((asset) => asset.ebayUrl).filter(Boolean);
-                    if (ebayUrls.length) result = { ...result, pic: ebayUrls.join(" "), photoAssets: stored.assets };
-                    storageNotice = ` ${ebayUrls.length} eBay-ready photo URL${ebayUrls.length === 1 ? "" : "s"} saved.${stored.failures?.length ? ` ${stored.failures.length} photo${stored.failures.length === 1 ? "" : "s"} could not be saved.` : ""}`;
+                    if (ebayUrls.length) result = { ...result, pic: ebayUrls.join(" "), photoAssets: stored.assets, photoStorageStatus: "stored", photoStorageNotice: photoStorageMessage(stored, ebayUrls.length) };
+                    storageNotice = ` ${photoStorageMessage(stored, ebayUrls.length)}`;
                 } catch (storageError) {
                     storageNotice = " Persistent photo storage was unavailable, so photos remain analysis-only.";
                 }
@@ -396,16 +396,31 @@
         try {
             const stored = await uploadListingPhotos(sourceFiles, "unassigned");
             const urls = (stored.assets || []).map((asset) => asset.ebayUrl).filter((url) => url.startsWith("https://"));
+            const photoPatch = {
+                pic: urls.join(" "),
+                photoAssets: stored.assets || [],
+                photoStorageStatus: urls.length ? "stored" : "unavailable",
+                photoStorageRequired: true,
+                photoStorageNotice: photoStorageMessage(stored, urls.length),
+            };
             analysisJobs = analysisJobs.map((entry) => entry.jobId === jobId && entry.result
-                ? { ...entry, result: { ...entry.result, pic: urls.join(" "), photoAssets: stored.assets, photoStorageStatus: urls.length ? "stored" : "unavailable" } }
+                ? { ...entry, result: { ...entry.result, ...photoPatch } }
                 : entry);
-            if (item.analysisJobId === jobId && urls.length) item = { ...item, pic: urls.join(" "), photoAssets: stored.assets, photoStorageStatus: "stored" };
+            if (item.analysisJobId === jobId) item = normalizeForForm({ ...item, ...photoPatch });
+            if (urls.length) status = photoPatch.photoStorageNotice;
         } catch {
             analysisJobs = analysisJobs.map((entry) => entry.jobId === jobId && entry.result
                 ? { ...entry, result: { ...entry.result, photoStorageStatus: "unavailable" } }
                 : entry);
             if (item.analysisJobId === jobId) item = { ...item, photoStorageStatus: "unavailable" };
         }
+    }
+
+    function photoStorageMessage(stored, urlCount) {
+        const provider = photoStorage.provider === "ibm_cos" ? "IBM COS" : photoStorage.provider || "photo storage";
+        const failures = stored.failures?.length || 0;
+        const saved = `${urlCount} eBay-ready ${provider} photo URL${urlCount === 1 ? "" : "s"} saved.`;
+        return failures ? `${saved} ${failures} photo${failures === 1 ? "" : "s"} could not be saved.` : saved;
     }
 
     function openAnalysisResult(job) {
