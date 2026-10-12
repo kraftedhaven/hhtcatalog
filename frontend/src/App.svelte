@@ -42,6 +42,7 @@
     let alternateProvider = "";
     let draftLoading = false;
     let autoDraftInFlight = false;
+    let failedJobsCount = 0;
     let restoreInput;
     let localPipeline = null;
     let categoryQuery = "";
@@ -96,6 +97,7 @@
     $: selectedStagingPhotos = stagingPhotos.filter((photo) => selectedPhotoIds.includes(photo.id) && !photo.processed);
 
     onMount(() => {
+        updateFailedJobsCount();
         for (const job of analysisJobs.filter((entry) => ["queued", "running", "auditing"].includes(entry.status))) {
             void monitorListingAnalysis(job.jobId, []);
         }
@@ -149,6 +151,48 @@
         if (!sorted.length) return null;
         const middle = Math.floor(sorted.length / 2);
         return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    }
+
+    function updateFailedJobsCount() {
+        failedJobsCount = analysisJobs.filter((job) => job.status === "failed").length;
+    }
+
+    function clearFailedJob(jobId) {
+        analysisJobs = analysisJobs.filter((job) => job.jobId !== jobId);
+        analysisSourceFiles.delete(jobId);
+        updateFailedJobsCount();
+        status = "Failed job cleared.";
+        error = "";
+    }
+
+    function clearAllFailedJobs() {
+        const failedIds = analysisJobs.filter((job) => job.status === "failed").map((job) => job.jobId);
+        if (!failedIds.length) {
+            error = "No failed jobs to clear.";
+            return;
+        }
+        const confirmed = window.confirm(`Clear ${failedIds.length} failed job${failedIds.length === 1 ? "" : "s"}?`);
+        if (!confirmed) return;
+        analysisJobs = analysisJobs.filter((job) => job.status !== "failed");
+        failedIds.forEach((id) => analysisSourceFiles.delete(id));
+        updateFailedJobsCount();
+        status = `Cleared ${failedIds.length} failed job${failedIds.length === 1 ? "" : "s"}.`;
+        error = "";
+    }
+
+    async function retryAnalysisJob(jobId) {
+        const job = analysisJobs.find((j) => j.jobId === jobId);
+        if (!job) return;
+        const sourceFiles = analysisSourceFiles.get(jobId) || [];
+        if (!sourceFiles.length) {
+            error = "Retry is not available for this job. The original photos were not preserved after browser refresh. Select photos again and start a fresh analysis.";
+            return;
+        }
+        error = "";
+        await analyze({ sourceFiles });
+        if (!error) {
+            clearFailedJob(jobId);
+        }
     }
 
     function dismissOnboarding() {
@@ -278,6 +322,7 @@
                 };
                 analysisSourceFiles.set(started.jobId, analysisFiles);
                 analysisJobs = [analysisJob, ...analysisJobs.filter((job) => job.jobId !== started.jobId)].slice(0, 30);
+                updateFailedJobsCount();
                 status = "Analysis queued. You can continue grouping photos while each item processes.";
                 void monitorListingAnalysis(started.jobId, analysisFiles);
                 return;
@@ -337,6 +382,7 @@
                     result: withJobId || entry.result,
                     error: job.error || "",
                 } : entry);
+                updateFailedJobsCount();
                 if (item.analysisJobId === jobId && withJobId) item = normalizeForForm(withJobId);
                 if (job.status === "failed" || job.status === "completed") return;
             } catch {
@@ -1076,8 +1122,20 @@
                                 {#if job.result?.needsReview?.length}<small>Needs review: {job.result.needsReview.map((entry) => entry.reason || entry.field).join("; ")}</small>{/if}
                             </div>
                             {#if job.result}<button type="button" on:click={() => openAnalysisResult(job)}>Review result</button>{/if}
+                            {#if job.status === "failed"}
+                                <button type="button" on:click={() => retryAnalysisJob(job.jobId)} disabled={loading}>Retry</button>
+                            {/if}
+                            {#if ["failed", "complete", "auditing"].includes(job.status)}
+                                <button type="button" on:click={() => clearFailedJob(job.jobId)}>Clear</button>
+                            {/if}
                         </div>
                     {/each}
+                    {#if failedJobsCount > 0}
+                        <div class="queue-row" style="margin-top: 12px; justify-content: space-between;">
+                            <span><strong>{failedJobsCount} failed job{failedJobsCount === 1 ? "" : "s"}</strong></span>
+                            <button type="button" on:click={clearAllFailedJobs}>Clear all failed</button>
+                        </div>
+                    {/if}
                 </div>
             {/if}
             <div class="wide notice info analysis-guidance">
