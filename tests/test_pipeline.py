@@ -46,7 +46,8 @@ def env(**values):
         "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_ENVIRONMENT", "EBAY_MARKETPLACE_ID", "EBAY_SITE_ID",
         "EBAY_REDIRECT_URI", "EBAY_RUNAME", "EBAY_REFRESH_TOKEN", "EBAY_USER_SCOPES", "EBAY_AUTH_STATE",
         "EBAY_MERCHANT_LOCATION_KEY", "EBAY_PAYMENT_POLICY_ID", "EBAY_FULFILLMENT_POLICY_ID",
-        "EBAY_RETURN_POLICY_ID", "EBAY_CURRENCY", "EBAY_LISTING_DURATION",
+        "EBAY_RETURN_POLICY_ID", "EBAY_CURRENCY", "EBAY_LISTING_DURATION", "EBAY_DRAFTS_ENABLED",
+        "EBAY_DRAFT_MIN_ITEMS", "EBAY_REFRESH_TOKEN_ISSUED_AT",
         "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_NIM_API_KEY", "NVIDIA_NIM_BASE_URL", "NVIDIA_CATEGORY_MODEL",
         "GROQ_API_KEY", "GROQ_MODEL", "DEMO_MODE"
     ]
@@ -1227,6 +1228,60 @@ class MergePipelineTests(unittest.TestCase):
         draft_rows = [row for row in uploaded_rows if row and row[0] == "Draft"]
         self.assertEqual(len(draft_rows), 5)
 
+    def test_seller_hub_draft_feed_rejects_invalid_photo_urls_before_task(self):
+        items = [
+            {"sku": f"PHOTO-{index}", "title": f"Item {index}", "price": 20, "cat": "57988", "pic": "https://cdn.example.com/ok.jpg"}
+            for index in range(5)
+        ]
+        cases = [
+            ("http://cdn.example.com/not-secure.jpg", None, "not HTTPS"),
+            ("https://cdn.example.com/not-image.txt", FakeResponse(status_code=200, headers={"Content-Type": "text/plain"}), "not an image"),
+            ("https://cdn.example.com/missing.jpg", FakeResponse(status_code=404, headers={"Content-Type": "image/jpeg"}), "HTTP 200"),
+        ]
+        for url, response, message in cases:
+            broken_items = [dict(item) for item in items]
+            broken_items[0]["pic"] = url
+            with env(EBAY_ENVIRONMENT="production"):
+                with mock.patch("hht_app.ebay_feed.seller_access_token") as token:
+                    with mock.patch("hht_app.ebay_feed.requests.request") as request:
+                        if response is None:
+                            context = mock.patch("hht_app.ebay_feed.requests.get")
+                        else:
+                            context = mock.patch("hht_app.ebay_feed.requests.get", return_value=response)
+                        with context as get:
+                            with self.assertRaises(ebay_feed.EbayFeedError) as ctx:
+                                ebay_feed.upload_seller_hub_draft_csv(broken_items)
+            self.assertEqual(ctx.exception.category, "seller_review_required")
+            self.assertIn(message, ctx.exception.safe_message)
+            self.assertNotIn(url, ctx.exception.safe_message)
+            if url.startswith("http://"):
+                get.assert_not_called()
+            token.assert_not_called()
+            request.assert_not_called()
+
+    def test_seller_hub_draft_feed_accepts_valid_https_image_url(self):
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if url.endswith("/sell/feed/v1/task") and method == "POST":
+                return FakeResponse(status_code=201, payload={"taskId": "task-photo"})
+            if url.endswith("/upload_file") and method == "POST":
+                return FakeResponse(status_code=202, payload={})
+            return FakeResponse(status_code=200, payload={"taskId": "task-photo", "status": "IN_PROCESS"})
+
+        items = [
+            {"sku": f"PHOTO-OK-{index}", "title": f"Item {index}", "price": 20, "cat": "57988", "pic": "https://cdn.example.com/ok.jpg"}
+            for index in range(5)
+        ]
+        with env(EBAY_ENVIRONMENT="production"):
+            with mock.patch("hht_app.ebay_feed.requests.get", return_value=FakeResponse(status_code=200, headers={"Content-Type": "image/jpeg"})) as get:
+                with mock.patch("hht_app.ebay_feed.seller_access_token", return_value="seller-token"):
+                    with mock.patch("hht_app.ebay_feed.requests.request", side_effect=fake_request):
+                        result = ebay_feed.upload_seller_hub_draft_csv(items)
+        self.assertEqual(result["taskId"], "task-photo")
+        self.assertEqual(get.call_count, 1)
+
     def test_seller_hub_draft_feed_rejects_sandbox(self):
         with env(EBAY_ENVIRONMENT="sandbox"):
             with self.assertRaises(ebay_feed.EbayFeedError) as ctx:
@@ -1242,9 +1297,9 @@ class MergePipelineTests(unittest.TestCase):
             app.g.supabase_user = {"sub": "seller-user"}
             return None
 
-        with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+        with env(EBAY_DRAFTS_ENABLED="true"), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
             "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
-        ), mock.patch("app.commerce_agent.ebay_mutations_enabled", return_value=True), mock.patch(
+        ), mock.patch("app.commerce_agent.ebay_scope_status", return_value={"grantedScopesStatus": "verified"}), mock.patch(
             "app.upload_seller_hub_draft_csv", return_value={"status": "submitted", "taskId": "task-123"}
         ) as upload, mock.patch.object(app.commerce_agent, "validate_listing", return_value={"status": "unavailable"}):
             response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Levi's Jacket", "brand": "Levi's", "price": 24.99, "cat": "57988", "pic": "https://example.test/jacket.jpg", "reviewAcknowledged": True}]})
@@ -1257,9 +1312,11 @@ class MergePipelineTests(unittest.TestCase):
             app.g.supabase_user = {"sub": "seller-user"}
             return None
 
-        with mock.patch.dict(os.environ, {"EBAY_MUTATIONS_ENABLED": "false"}), mock.patch(
+        with mock.patch.dict(os.environ, {"EBAY_DRAFTS_ENABLED": "true", "EBAY_MUTATIONS_ENABLED": "false"}), mock.patch(
             "app.authenticate_request", side_effect=authenticated
         ), mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}), mock.patch(
+            "app.commerce_agent.ebay_scope_status", return_value={"grantedScopesStatus": "verified"}
+        ), mock.patch(
             "app.upload_seller_hub_draft_csv", return_value={"status": "submitted", "taskId": "task-draft"}
         ) as upload, mock.patch.object(app.commerce_agent, "validate_listing", return_value={"status": "unavailable"}):
             response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Levi's Jacket", "brand": "Levi's", "price": 24.99, "cat": "57988", "pic": "https://example.test/jacket.jpg", "reviewAcknowledged": True}]})
@@ -1267,14 +1324,44 @@ class MergePipelineTests(unittest.TestCase):
         self.assertEqual(response.get_json()["result"]["taskId"], "task-draft")
         upload.assert_called_once()
 
+    def test_draft_feed_endpoint_requires_draft_flag_absent(self):
+        def authenticated():
+            app.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        with env(), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch("app.upload_seller_hub_draft_csv") as upload:
+            response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Test", "price": 10}]})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("disabled", response.get_json()["error"])
+        upload.assert_not_called()
+
+    def test_draft_feed_endpoint_requires_verified_scopes_before_task_call(self):
+        def authenticated():
+            app.g.supabase_user = {"sub": "seller-user"}
+            return None
+
+        with env(EBAY_DRAFTS_ENABLED="true"), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch("app.commerce_agent.ebay_scope_status", return_value={"grantedScopesStatus": "unknown"}), mock.patch(
+            "app.upload_seller_hub_draft_csv"
+        ) as upload:
+            response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Test", "price": 10}]})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()["grantedScopesStatus"], "unknown")
+        upload.assert_not_called()
+
     def test_draft_feed_requires_review_acknowledgement(self):
         def authenticated():
             app.g.supabase_user = {"sub": "seller-user"}
             return None
 
-        with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+        with env(EBAY_DRAFTS_ENABLED="true"), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
             "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
-        ), mock.patch("app.upload_seller_hub_draft_csv") as upload:
+        ), mock.patch("app.commerce_agent.ebay_scope_status", return_value={"grantedScopesStatus": "verified"}), mock.patch(
+            "app.upload_seller_hub_draft_csv"
+        ) as upload:
             response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Test", "price": 10}]})
         self.assertEqual(response.status_code, 400)
         upload.assert_not_called()
@@ -1284,9 +1371,11 @@ class MergePipelineTests(unittest.TestCase):
             app.g.supabase_user = {"sub": "seller-user"}
             return None
 
-        with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
+        with env(EBAY_DRAFTS_ENABLED="true"), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
             "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
-        ), mock.patch("app.upload_seller_hub_draft_csv") as upload, mock.patch.object(
+        ), mock.patch("app.commerce_agent.ebay_scope_status", return_value={"grantedScopesStatus": "verified"}), mock.patch(
+            "app.upload_seller_hub_draft_csv"
+        ) as upload, mock.patch.object(
             app.commerce_agent, "validate_listing", return_value={"status": "unavailable"}
         ):
             response = self.client.post("/api/ebay/draft-feed", json={"items": [{
