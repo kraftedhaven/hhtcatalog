@@ -1356,6 +1356,8 @@ def run_job(job_id: str) -> dict[str, Any] | None:
                 if listing is None:
                     listing = analyze_images(images, context)
                     cache_vision_result(cache_key, listing)
+                if not isinstance(listing.get("needsReview"), list):
+                    listing["needsReview"] = []
                 listing["photoCount"] = len(images)
                 listing["analysisStatus"] = "groq_ready"
                 listing["auditStatus"] = "running"
