@@ -1,4 +1,5 @@
 import os
+# pyrefly: ignore [missing-import]
 import psycopg
 
 url = os.environ.get("NEON_DATABASE_URL") or os.environ.get("DATABASE_URL")
