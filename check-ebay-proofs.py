@@ -1,9 +1,9 @@
-import pathlib
+import os
 import psycopg
 
-url = pathlib.Path(
-    r"C:\Users\korin\hhtcatalog-clean\.neon-url.tmp"
-).read_text().strip()
+url = os.environ.get("NEON_DATABASE_URL") or os.environ.get("DATABASE_URL")
+if not url:
+    raise SystemExit("No Neon database environment variable is available.")
 
 with psycopg.connect(url, connect_timeout=15) as conn:
     with conn.cursor() as cur:
@@ -16,10 +16,10 @@ with psycopg.connect(url, connect_timeout=15) as conn:
 
 print("eBay Scope Proofs in Neon PostgreSQL:")
 for r in rows:
-    err = r[5] if r[5] else "None"
     print(
         f"  Scope: {r[0]} | Status: {r[1]} | "
-        f"HTTP: {r[3]} | Checked: {r[4]} | Error: {err}"
+        f"HTTP: {r[3]} | Checked: {r[4]} | "
+        f"Error: {r[5] or 'None'}"
     )
 
 if not rows:
