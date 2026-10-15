@@ -23,7 +23,10 @@ with psycopg.connect(url, connect_timeout=15) as conn:
         print("\n-- queued/running jobs --")
         cur.execute("""
             SELECT id, kind, status, progress, created_at, updated_at,
-                   LEFT(COALESCE(error, ''), 240)
+                   CASE
+                       WHEN COALESCE(error, '') <> '' THEN 'present'
+                       ELSE 'none'
+                   END AS error
             FROM public.commerce_jobs
             WHERE status IN ('queued', 'running')
             ORDER BY created_at ASC;
