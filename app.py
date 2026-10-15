@@ -186,7 +186,9 @@ def analysis_job(job_id):
     if not job or job.get("kind") != "listing_analysis":
         return jsonify({"error": "Analysis job not found."}), 404
     result = {}
-    if int(job.get("progress") or 0) >= 65:
+    # Terminal jobs are safe to expose even if an older deployment persisted
+    # progress as zero; otherwise the UI shows completed 0% with no result.
+    if job.get("status") in {"completed", "failed"} or int(job.get("progress") or 0) >= 65:
         raw_result = job.get("result_json", "{}")
         try:
             import json
