@@ -186,6 +186,10 @@ export function ebayOAuthStatus() {
     return commerceRequest('/api/ebay/oauth/status');
 }
 
+export function ebayOAuthProbeScopes() {
+    return commerceRequest('/api/ebay/oauth/probe-scopes', { method: 'POST', body: '{}' });
+}
+
 export async function ebayOAuthStart() {
     const res = await authenticatedFetch(`${baseUrl()}/api/ebay/oauth/start`);
     return parseResponse(res);

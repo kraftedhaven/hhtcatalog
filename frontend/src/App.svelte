@@ -1,7 +1,7 @@
 <script>
     import { onMount } from "svelte";
     import "./app.css";
-    import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayFeedTask, ebayOAuthStart, ebayOAuthStatus, photoStorageStatus, sendDraftFeed, startNvidiaAnalysis, uploadListingPhotos } from "$lib/api";
+    import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayFeedTask, ebayOAuthProbeScopes, ebayOAuthStart, ebayOAuthStatus, photoStorageStatus, sendDraftFeed, startNvidiaAnalysis, uploadListingPhotos } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
     import AuthGate from "$lib/components/AuthGate.svelte";
@@ -967,6 +967,21 @@
         }
     }
 
+    async function verifyEbayScopes() {
+        error = "";
+        oauthLoading = true;
+        try {
+            const result = await ebayOAuthProbeScopes();
+            const proofs = (result.scopeProofs || []).map((proof) => `${proof.scope}: ${proof.status}`).join(", ");
+            oauthStatus = `Read-only eBay scope verification: ${result.grantedScopesStatus || "unknown"}.${proofs ? ` ${proofs}.` : ""}`;
+        } catch (err) {
+            oauthStatus = "";
+            error = err.message || "Unable to verify eBay OAuth scopes.";
+        } finally {
+            oauthLoading = false;
+        }
+    }
+
     async function loadPerformance() {
         performanceLoading = true;
         try {
@@ -1427,6 +1442,7 @@
                 <div class="actions">
                     <button type="button" disabled={oauthLoading} on:click={reconnectEbay}>{oauthLoading ? "Opening..." : "Reconnect eBay"}</button>
                     <button type="button" disabled={oauthLoading} on:click={checkEbayConnection}>Check connection</button>
+                    <button type="button" disabled={oauthLoading} on:click={verifyEbayScopes}>Verify scopes (read-only)</button>
                 </div>
             </div>
             <div class="wide notice info">
