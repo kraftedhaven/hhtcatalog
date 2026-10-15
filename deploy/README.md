@@ -1,6 +1,6 @@
 # Persistent HHT batch worker
 
-This worker is an optional durable execution lane for the existing HHT app. It uses the same Supabase PostgreSQL database as Heroku and never publishes or mutates eBay listings.
+This worker is an optional durable execution lane for the existing HHT app. It uses the same Neon PostgreSQL database as Heroku and never publishes or mutates eBay listings. Supabase remains the authentication provider; IBM Cloud Object Storage remains the production photo store.
 
 ## Install on the Cloud Sandbox VM
 
@@ -14,7 +14,7 @@ sudo HHT_BRANCH=main HHT_APP_DIR=/opt/hhtcatalog \
 The first run creates `/etc/hht-catalog/worker.env` and stops before starting the service. Edit that file on the VM, filling only the environment values below, then rerun the installer:
 
 ```text
-DATABASE_URL                 Supabase PostgreSQL connection URI; use sslmode=require
+DATABASE_URL                 Neon PostgreSQL connection URI; use sslmode=require
 GROQ_API_KEY                 existing Groq key
 NVIDIA_NIM_BASE_URL          NVIDIA OpenAI-compatible endpoint, if enabled
 NVIDIA_NIM_API_KEY           NVIDIA key, if enabled
@@ -23,7 +23,7 @@ OPENROUTER_API_KEY           OpenRouter key, if enabled
 OPENROUTER_MODEL             configured multimodal fallback model
 ```
 
-The worker must use the **Supabase Postgres URI**, not the Supabase publishable key or service-role key. Never put secrets in GitHub, this repository, or Heroku source files.
+The worker must use the **Neon Postgres URI**, not a Supabase publishable key or service-role key. Never put secrets in GitHub, this repository, or Heroku source files.
 
 ## Start and observe
 
@@ -50,7 +50,7 @@ EBAY_MUTATIONS_ENABLED=false
 EBAY_DRAFTS_ENABLED=false
 ```
 
-The worker claims jobs atomically in Supabase. If the VM or process dies after a claim, jobs still marked `running` for 15 minutes are returned to `queued` and retried. The worker has a hard concurrency ceiling of 16.
+The worker claims jobs atomically in Neon. If the VM or process dies after a claim, jobs still marked `running` for 15 minutes are returned to `queued` and retried. The worker has a hard concurrency ceiling of 16.
 
 ## Updating from the canonical repository
 

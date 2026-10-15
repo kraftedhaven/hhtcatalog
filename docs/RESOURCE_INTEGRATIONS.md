@@ -1,6 +1,6 @@
 # Optional Resource Integrations
 
-HHT keeps the normal production path unchanged: Groq handles normal analysis, NVIDIA handles heavy batches when configured, Supabase/PostgreSQL remains the application database, and eBay mutations remain seller-approved.
+HHT keeps the normal production path unchanged: Groq handles normal analysis, NVIDIA handles heavy batches when configured, Neon provides the application PostgreSQL database, Supabase provides authentication, IBM Cloud Object Storage hosts production photos, and eBay mutations remain seller-approved.
 
 ## IBM Cloud Object Storage
 

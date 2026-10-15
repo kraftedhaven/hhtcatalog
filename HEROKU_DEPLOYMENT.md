@@ -8,7 +8,7 @@
 - [x] Worker performs **no** automatic eBay mutations
 - [x] Health checks for API and worker readiness
 - [x] NVIDIA optional (profiles: ["nvidia"])
-- [x] SQLite local-dev only; Supabase (DATABASE_URL) for production
+- [x] SQLite local-dev only; Neon PostgreSQL (DATABASE_URL) for production
 - [x] Worker restart does not lose job status (shared volume + DB)
 - [x] No Azure, Appwrite, DigitalOcean, or Gemini services
 - [x] Worker failures logged without exposing secrets
@@ -54,7 +54,7 @@ docker compose down -v              # Remove volumes (database reset)
 ### Prerequisites
 - Heroku CLI installed
 - Heroku app: `hht-catalog`
-- Supabase PostgreSQL URL
+- Neon PostgreSQL URL (include `sslmode=require`)
 - GitHub connected to Heroku for auto-deploy
 
 ### Step 1: Configure Heroku Environment Variables
@@ -62,7 +62,7 @@ docker compose down -v              # Remove volumes (database reset)
 **Set config vars for production:**
 ```bash
 heroku config:set \
-  DATABASE_URL="postgresql://user:pass@db.supabase.co:5432/postgres" \
+  DATABASE_URL="postgresql://user:pass@ep-example.us-east-2.aws.neon.tech/neondb?sslmode=require" \
   EBAY_CLIENT_ID="your_client_id" \
   EBAY_CLIENT_SECRET="your_client_secret" \
   EBAY_REFRESH_TOKEN="your_refresh_token" \

@@ -65,7 +65,7 @@ Seller OAuth for future inventory/offer work uses `EBAY_REDIRECT_URI`, `EBAY_RUN
 
 The Commerce Agent is available from the **Commerce Agent** tab. It uses official eBay Inventory API calls to import existing inventory items and offers, stores normalized records and recommendation history in PostgreSQL when `DATABASE_URL` is present, and keeps the operating mode at `recommend` by default. The UI requires an explicit user approval before an action is sent through the existing eBay offer update flow. Auto-Optimize and Autonomous modes are represented as future modes but are not activated by this MVP.
 
-Set Heroku's `DATABASE_URL` Config Var to the Supabase PostgreSQL connection string. The application creates the Commerce Agent tables automatically on startup. If `DATABASE_URL` is absent, local development falls back to `COMMERCE_AGENT_DB=commerce_agent.sqlite3`; do not use that SQLite fallback for durable Heroku data because the Heroku dyno filesystem is ephemeral. No Heroku filesystem setting needs to be changed.
+Set Heroku's `DATABASE_URL` Config Var to the **Neon PostgreSQL** connection string, including `sslmode=require`. Supabase is used for authentication only; it is not the Commerce Agent database. The application creates the Commerce Agent tables automatically on startup. If `DATABASE_URL` is absent, local development falls back to `COMMERCE_AGENT_DB=commerce_agent.sqlite3`; do not use that SQLite fallback for durable Heroku data because the Heroku dyno filesystem is ephemeral. IBM Cloud Object Storage remains the production photo provider through `PHOTO_STORAGE_PROVIDER=ibm_cos`.
 
 Commerce Agent routes:
 

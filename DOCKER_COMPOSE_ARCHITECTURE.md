@@ -4,7 +4,7 @@
 
 This proposal extends the current single-container setup to a production-grade, multi-service architecture supporting:
 - **Stateless API** (Flask + Gunicorn)
-- **Persistent database** (PostgreSQL / Supabase-compatible)
+- **Persistent database** (Neon PostgreSQL)
 - **Job queue & worker** (Redis + Celery)
 - **Background analysis worker** (image analysis, eBay pricing)
 - **Optional GPU worker** (NVIDIA CUDA for computer vision)
@@ -65,7 +65,7 @@ services:
       GUNICORN_WORKERS: "2"
       GUNICORN_TIMEOUT: "120"
       
-      # Database (PostgreSQL / Supabase)
+      # Database (Neon PostgreSQL in production; local PostgreSQL/SQLite for development)
       DATABASE_URL: "postgresql://hht_user:hht_pass@postgres:5432/hht_db"
       
       # Redis (job queue & caching)

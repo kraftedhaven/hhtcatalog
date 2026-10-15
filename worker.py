@@ -1,7 +1,7 @@
 """Persistent read-only worker for HHT Commerce Agent jobs.
 
 The worker never publishes or mutates eBay listings. It claims seller-scoped
-jobs from Supabase/PostgreSQL, processes independent jobs concurrently, and
+jobs from Neon PostgreSQL, processes independent jobs concurrently, and
 requeues jobs interrupted by a process or VM restart.
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
 def run() -> None:
     interval = max(2, int(os.environ.get("WORKER_POLL_SECONDS", "5")))
-    # Hard ceiling protects provider quotas and Supabase from accidental fan-out.
+    # Hard ceiling protects provider quotas and Neon from accidental fan-out.
     concurrency = min(16, max(1, int(os.environ.get("WORKER_CONCURRENCY", "8"))))
     stale_after = max(300, int(os.environ.get("WORKER_STALE_AFTER_SECONDS", "900")))
     logging.info(

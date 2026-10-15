@@ -4,7 +4,7 @@
 
 This pipeline fills local HHT catalog evidence from the seller's **active eBay listings** while keeping eBay immutable. It reads active `ItemID` values from the imported catalog, retrieves official Trading API `GetItem` details, and stores the category, item specifics, description, pricing context, and evidence in the Commerce Agent database. It does **not** call `ReviseItem`, Inventory API update endpoints, offer publication endpoints, or any other eBay write operation.
 
-The existing Heroku container worker is the deployment runtime. It shares the existing Supabase `DATABASE_URL` with the web process, so no additional provider, runtime, or credential is required.
+The existing Heroku container worker is the deployment runtime. It shares the existing Neon `DATABASE_URL` with the web process, so no additional provider, runtime, or credential is required.
 
 ## Data lifecycle
 
@@ -13,7 +13,7 @@ The existing Heroku container worker is the deployment runtime. It shares the ex
 | Active import | `GetMyeBaySelling` identifies active listings and reconciles local lifecycle state | Read only |
 | Checkpoint seed | One local checkpoint is stored for every active listing with an ItemID | None |
 | Enrichment | `GetItem` runs in sequential chunks of at most 20 records | Read only |
-| Evidence storage | Official category and item specifics are stored in Supabase/local development SQLite | None |
+| Evidence storage | Official category and item specifics are stored in Neon/local development SQLite | None |
 | Audit refresh | New recommendations are generated from enriched evidence | None |
 | Seller review | Queue loads 25 recommendation cards per page | None |
 | Approval/apply | Remains a separate, existing seller-controlled workflow | Only after explicit seller action |

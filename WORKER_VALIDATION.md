@@ -143,7 +143,7 @@ heroku logs --tail --app hht-catalog
 ```bash
 ✓ All secrets via ${VAR:-} substitution
   - No credentials in images or compose file
-  - DATABASE_URL: Supabase PostgreSQL (production)
+  - DATABASE_URL: Neon PostgreSQL (production; sslmode=require)
   - DATABASE_URL: SQLite fallback (local)
 ```
 
@@ -158,7 +158,7 @@ heroku logs --tail --app hht-catalog
 │  web dyno (Gunicorn + Flask)    →  /health, /api/*     │
 │  worker dyno (python worker.py) →  background jobs     │
 │                                ↓                         │
-│  Supabase PostgreSQL ←────────────  durable state      │
+│  Neon PostgreSQL ←────────────────  durable state      │
 └────────────────────────────────────────────────────────┘
 
 ┌────────────────────────────────────────────────────────┐
@@ -188,9 +188,9 @@ heroku logs --tail --app hht-catalog
 
 ## 📝 Next Steps
 
-1. **Set Supabase DATABASE_URL in Heroku config**
+1. **Set Neon DATABASE_URL in Heroku config**
    ```bash
-   heroku config:set DATABASE_URL="postgresql://user:pass@db.supabase.co:5432/postgres" --app hht-catalog
+   heroku config:set DATABASE_URL="postgresql://user:pass@ep-example.us-east-2.aws.neon.tech/neondb?sslmode=require" --app hht-catalog
    ```
 
 2. **Deploy**
@@ -215,5 +215,5 @@ heroku logs --tail --app hht-catalog
 - Docker Compose: https://docs.docker.com/compose/
 - Heroku Procfile: https://devcenter.heroku.com/articles/procfile
 - Heroku Config Vars: https://devcenter.heroku.com/articles/config-vars
-- Supabase PostgreSQL: https://supabase.com/docs/guides/database
+- Neon PostgreSQL: https://neon.tech/docs/introduction
 - Flask + Gunicorn: https://flask.palletsprojects.com/

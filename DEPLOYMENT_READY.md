@@ -28,7 +28,7 @@ bash deploy-heroku.sh
 ```bash
 # 1. Configure Heroku environment
 heroku config:set \
-  DATABASE_URL="postgresql://user:pass@db.supabase.co:5432/postgres" \
+  DATABASE_URL="postgresql://user:pass@ep-example.us-east-2.aws.neon.tech/neondb?sslmode=require" \
   EBAY_CLIENT_ID="your_id" \
   EBAY_CLIENT_SECRET="your_secret" \
   EBAY_REFRESH_TOKEN="your_token" \
@@ -97,7 +97,7 @@ docker compose logs hht-worker          # ✅ "approval-only mode enabled"
 ## 🔐 Required Heroku Config Vars
 
 ```bash
-DATABASE_URL                    # Supabase PostgreSQL URI
+DATABASE_URL                    # Neon PostgreSQL URI (sslmode=require)
 EBAY_CLIENT_ID                  # eBay App ID
 EBAY_CLIENT_SECRET              # eBay App Secret
 EBAY_REFRESH_TOKEN              # eBay OAuth refresh token (lucasfitness11)

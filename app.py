@@ -536,7 +536,7 @@ def commerce_dashboard():
     try:
         return jsonify({"result": commerce_agent.dashboard(getattr(g, "seller_id", None))})
     except Exception:
-        return jsonify({"error": "Commerce Agent database is unavailable. Verify DATABASE_URL and Supabase connectivity."}), 503
+        return jsonify({"error": "Commerce Agent database is unavailable. Verify DATABASE_URL and database connectivity."}), 503
 
 
 @app.route("/api/commerce/listings", methods=["GET"])
@@ -819,7 +819,7 @@ def commerce_settings():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception:
-        return jsonify({"error": "Commerce Agent database is unavailable. Verify DATABASE_URL and Supabase connectivity."}), 503
+        return jsonify({"error": "Commerce Agent database is unavailable. Verify DATABASE_URL and database connectivity."}), 503
 
 
 @app.errorhandler(413)
