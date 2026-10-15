@@ -72,7 +72,7 @@ heroku config:set \
   EBAY_RETURN_POLICY_ID="your_return_policy" \
   EBAY_ENVIRONMENT="production" \
   GROQ_API_KEY="your_groq_key" \
-  GROQ_MODEL="qwen/qwen3.6-27b" \
+  GROQ_MODEL="meta-llama/llama-4-scout-17b-16e-instruct" \
   PRIMARY_VISION_PROVIDER="groq" \
   GUNICORN_WORKERS="3" \
   GUNICORN_TIMEOUT="120" \

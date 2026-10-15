@@ -88,7 +88,7 @@ services:
       # Vision providers (optional; mocked if not set)
       PRIMARY_VISION_PROVIDER: "cpu"  # or groq, zai, etc.
       GROQ_API_KEY: "${GROQ_API_KEY:-}"
-      GROQ_MODEL: "qwen/qwen3.6-27b"
+      GROQ_MODEL: "meta-llama/llama-4-scout-17b-16e-instruct"
       
       # Upload & limits
       LOCAL_UPLOAD_DIR: "/data/uploads"

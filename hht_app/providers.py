@@ -33,8 +33,8 @@ HEIC_SUPPORT_ENABLED = _register_heic_support()
 
 ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
-GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b"
-GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
+GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_FALLBACK_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 NVIDIA_DEFAULT_VISION_MODEL = "z-ai/glm-5.3-flash"
 NVIDIA_FAST_FALLBACK_VISION_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 MAX_PROVIDER_IMAGES = 5

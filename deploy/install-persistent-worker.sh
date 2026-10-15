@@ -37,8 +37,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
 # HHT persistent worker configuration. Fill values on the VM; never commit this file.
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=require
 GROQ_API_KEY=
-GROQ_MODEL=qwen/qwen3.8-27b
-GROQ_FALLBACK_MODEL=qwen/qwen3.8-27b
+GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+GROQ_FALLBACK_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
 NVIDIA_NIM_BASE_URL=https://integrate.api.nvidia.com/v1
 NVIDIA_NIM_API_KEY=
 NVIDIA_CATEGORY_MODEL=
