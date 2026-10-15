@@ -102,6 +102,7 @@
             void monitorListingAnalysis(job.jobId, []);
         }
         if (supabase) {
+            void supabase.auth.getSession().then(({ data: { session } }) => refreshPhotoStorage(session));
             const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
                 setTimeout(() => refreshPhotoStorage(session), 0);
             });
