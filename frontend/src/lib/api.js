@@ -70,9 +70,19 @@ export async function startNvidiaAnalysis(files, sellerDefaults = {}, analysisHi
 }
 
 export async function photoStorageStatus() {
-    const res = await authenticatedFetch(`${baseUrl()}/api/photos/storage`);
-    const body = await parseResponse(res);
-    return body.result || body;
+    try {
+        const res = await authenticatedFetch(`${baseUrl()}/api/photos/storage`);
+        const body = await parseResponse(res);
+        return body.result || body;
+    } catch (error) {
+        // /health exposes only non-secret capability flags. Use it to avoid a
+        // false "not configured" banner during auth/session initialization;
+        // photo uploads remain protected by authenticatedFetch.
+        const health = await fetch(`${baseUrl()}/health`);
+        const body = await parseResponse(health);
+        if (body?.photo_storage) return body.photo_storage;
+        throw error;
+    }
 }
 
 export async function uploadListingPhotos(files, listingKey = 'unassigned') {
