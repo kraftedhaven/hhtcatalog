@@ -1356,6 +1356,8 @@ def run_job(job_id: str) -> dict[str, Any] | None:
                 if listing is None:
                     listing = analyze_images(images, context)
                     cache_vision_result(cache_key, listing)
+                if not isinstance(listing.get("needsReview"), list):
+                    listing["needsReview"] = []
                 listing["photoCount"] = len(images)
                 listing["analysisStatus"] = "groq_ready"
                 listing["auditStatus"] = "running"
@@ -1648,6 +1650,8 @@ def check_listing_rules(
 
 
 def _update_job(job_id: str, status: str, progress: int, result: dict[str, Any], error: str) -> None:
+    if status in {"completed", "failed"}:
+        progress = 100
     with connect() as db:
         db.execute("UPDATE commerce_jobs SET status=?, progress=?, result_json=?, error=?, updated_at=? WHERE id=?", (status, progress, _json(result), error, utc_now(), job_id))
 
