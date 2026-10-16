@@ -5,6 +5,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+# pyrefly: ignore[missing-import]
 from flask import Flask, Response, g, jsonify, request, send_from_directory
 from flask_cors import CORS
 
@@ -12,7 +13,7 @@ from hht_app.ebay_auth import EbayAuthError, ebay_authorization_url, exchange_au
 from hht_app.ebay_drafts import EbayDraftError, create_ebay_draft, update_ebay_offer
 from hht_app.ebay_feed import EbayFeedError, get_feed_result_file, get_feed_task_details, seller_hub_feed_type, upload_seller_hub_draft_csv, validate_draft_photo_urls
 from hht_app.ebay_taxonomy import category_aspects, suggest_category
-from hht_app import commerce_agent
+from hht_app import commerce_agent, inventory_workspace
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
 from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
 from hht_app.photo_quality import assess_image
@@ -54,7 +55,7 @@ def _requires_seller_auth() -> bool:
     path = request.path
     if path in {"/bulk-analyze", "/api/nvidia/analyze/start"} or path.startswith("/api/analysis/"):
         return True
-    if path.startswith(("/api/commerce/", "/api/catalog/")):
+    if path.startswith(("/api/commerce/", "/api/catalog/", "/api/inventory/")) :
         return True
     if path.startswith("/api/photos/") or path == "/api/photos":
         return True
@@ -822,6 +823,228 @@ def commerce_settings():
         return jsonify({"error": str(exc)}), 400
     except Exception:
         return jsonify({"error": "Commerce Agent database is unavailable. Verify DATABASE_URL and database connectivity."}), 503
+
+
+# ---------------------------------------------------------------------------
+# Inventory Workspace API Routes
+# ---------------------------------------------------------------------------
+
+@app.route("/api/inventory/batches", methods=["GET", "POST"])
+def inventory_batches():
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        try:
+            batch = inventory_workspace.create_batch(
+                seller_id=str(seller_id),
+                name=body.get("name", ""),
+                grouping_mode=body.get("groupingMode", "auto"),
+            )
+            return jsonify({"result": batch}), 201
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+    try:
+        batches = inventory_workspace.list_batches(str(seller_id))
+        return jsonify({"result": batches})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/batches/<batch_id>", methods=["GET"])
+def inventory_batch_get(batch_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    try:
+        batch = inventory_workspace.get_batch(batch_id, str(seller_id))
+        return jsonify({"result": batch})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/batches/<batch_id>/photos", methods=["POST"])
+def inventory_batch_photos(batch_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    
+    files = request.files.getlist("files") or request.files.getlist("file")
+    photos_to_register = []
+    if files:
+        for file in files:
+            filename = file.filename or "photo.jpg"
+            data = file.read()
+            mime_type = file.mimetype or "image/jpeg"
+            try:
+                asset = store_photo(
+                    seller_id=str(seller_id),
+                    filename=filename,
+                    mime_type=mime_type,
+                    data=data,
+                    listing_key=f"batch_{batch_id[:8]}",
+                )
+                photos_to_register.append({
+                    "photoAssetId": asset.get("assetId"),
+                    "filename": filename,
+                    "previewUrl": asset.get("ebayUrl") or "",
+                    "storageUrl": asset.get("ebayUrl") or "",
+                })
+            except Exception as exc:
+                app.logger.warning("Photo storage failed during batch upload: %s", exc)
+                photos_to_register.append({
+                    "filename": filename,
+                    "previewUrl": "",
+                    "storageUrl": "",
+                })
+    else:
+        body = request.get_json(silent=True) or {}
+        photos_to_register = body.get("photos") or []
+
+    try:
+        registered = inventory_workspace.register_batch_photos(
+            batch_id, str(seller_id), photos_to_register
+        )
+        return jsonify({"result": {"count": len(registered), "photos": registered}}), 201
+    except (KeyError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/batches/<batch_id>/photos/groups", methods=["PUT"])
+def inventory_batch_grouping(batch_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    mode = body.get("mode", "auto")
+    custom_groups = body.get("customGroups")
+    try:
+        items = inventory_workspace.apply_photo_grouping(
+            batch_id, str(seller_id), mode=mode, custom_groups=custom_groups
+        )
+        return jsonify({"result": items})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/batches/<batch_id>/items", methods=["GET"])
+def inventory_batch_items(batch_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    try:
+        items = inventory_workspace.list_batch_items(batch_id, str(seller_id))
+        return jsonify({"result": items})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/batches/<batch_id>/analyze", methods=["POST"])
+def inventory_batch_analyze(batch_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    item_ids = body.get("itemIds")
+    try:
+        result = inventory_workspace.start_workspace_analysis(batch_id, str(seller_id), item_ids)
+        return jsonify({"result": result})
+    except (KeyError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/<item_id>", methods=["GET", "PATCH"])
+def inventory_item_detail(item_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    if request.method == "PATCH":
+        patch_data = request.get_json(silent=True) or {}
+        try:
+            item = inventory_workspace.patch_item(item_id, str(seller_id), patch_data)
+            return jsonify({"result": item})
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+    try:
+        item = inventory_workspace.get_item(item_id, str(seller_id))
+        return jsonify({"result": item})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/validate", methods=["POST"])
+def inventory_items_validate():
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    item_ids = body.get("itemIds") or []
+    if not isinstance(item_ids, list):
+        return jsonify({"error": "itemIds must be an array."}), 400
+    try:
+        result = inventory_workspace.validate_items(item_ids, str(seller_id))
+        return jsonify({"result": result})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/approve", methods=["POST"])
+def inventory_items_approve():
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    item_ids = body.get("itemIds") or []
+    if not isinstance(item_ids, list):
+        return jsonify({"error": "itemIds must be an array."}), 400
+    try:
+        result = inventory_workspace.approve_items(item_ids, str(seller_id))
+        return jsonify({"result": result})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/submit-drafts", methods=["POST"])
+def inventory_items_submit_drafts():
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    item_ids = body.get("itemIds") or []
+    if not isinstance(item_ids, list):
+        return jsonify({"error": "itemIds must be an array."}), 400
+    try:
+        result = inventory_workspace.submit_approved_drafts(item_ids, str(seller_id))
+        return jsonify({"result": result})
+    except EbayFeedError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/<item_id>/submission", methods=["GET"])
+def inventory_item_submission(item_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    try:
+        status = inventory_workspace.get_item_submission_status(item_id, str(seller_id))
+        return jsonify({"result": status})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.errorhandler(413)
