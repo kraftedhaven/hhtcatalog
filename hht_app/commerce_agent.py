@@ -23,7 +23,9 @@ from urllib.parse import quote
 import requests
 
 try:
+    # pyrefly: ignore[missing-import]
     import psycopg
+    # pyrefly: ignore[missing-import]
     from psycopg.rows import dict_row
 except ImportError:  # Local SQLite fallback remains available without psycopg.
     psycopg = None
@@ -164,7 +166,7 @@ def connect() -> _Database:
 def init_db() -> None:
     with connect() as db:
         if db.postgres:
-            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "vision_result_cache", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs", "photo_assets"}
+            required = {"listings", "recommendations", "actions", "settings", "commerce_jobs", "vision_result_cache", "enrichment_checkpoints", "listing_performance_daily", "listing_versions", "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs", "photo_assets", "inventory_batches", "inventory_items", "inventory_item_photos", "inventory_submissions"}
             rows = db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(?)", (list(required),)).fetchall()
             present = {str(row["table_name"]) for row in rows}
             missing = sorted(required - present)
@@ -259,6 +261,7 @@ def init_db() -> None:
             _ensure_recommendation_versioning(db)
             _ensure_seller_schema(db)
             _ensure_ebay_scope_proof_schema(db)
+            _ensure_inventory_workspace_schema(db)
             job_columns = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(commerce_jobs)").fetchall()}
             if "seller_id" not in job_columns:
                 db.execute("ALTER TABLE commerce_jobs ADD COLUMN seller_id TEXT")
@@ -316,6 +319,68 @@ def _ensure_ebay_scope_proof_schema(db: _Database) -> None:
             token_issued_at TEXT,
             error_category TEXT NOT NULL DEFAULT ''
         );
+        """
+    )
+
+
+def _ensure_inventory_workspace_schema(db: _Database) -> None:
+    if db.postgres:
+        return
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS inventory_batches (
+            id TEXT PRIMARY KEY,
+            seller_id TEXT NOT NULL REFERENCES sellers(id),
+            name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            photo_grouping_mode TEXT NOT NULL DEFAULT 'auto',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS inventory_items (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES inventory_batches(id) ON DELETE CASCADE,
+            seller_id TEXT NOT NULL REFERENCES sellers(id),
+            listing_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            workflow_status TEXT NOT NULL DEFAULT 'grouped',
+            validation_json TEXT NOT NULL DEFAULT '{}',
+            pricing_options_json TEXT NOT NULL DEFAULT '{}',
+            title_candidates_json TEXT NOT NULL DEFAULT '{}',
+            analysis_job_id TEXT NOT NULL DEFAULT '',
+            seller_confirmed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS inventory_item_photos (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES inventory_batches(id) ON DELETE CASCADE,
+            item_id TEXT REFERENCES inventory_items(id) ON DELETE SET NULL,
+            photo_asset_id TEXT REFERENCES photo_assets(id) ON DELETE SET NULL,
+            original_filename TEXT NOT NULL DEFAULT '',
+            preview_url TEXT NOT NULL DEFAULT '',
+            storage_url TEXT NOT NULL DEFAULT '',
+            position INTEGER NOT NULL DEFAULT 0,
+            is_cover INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS inventory_submissions (
+            id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+            seller_id TEXT NOT NULL REFERENCES sellers(id),
+            batch_id TEXT REFERENCES inventory_batches(id) ON DELETE SET NULL,
+            feed_task_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'submitted',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS inventory_batches_seller_idx ON inventory_batches(seller_id, created_at);
+        CREATE INDEX IF NOT EXISTS inventory_items_batch_idx ON inventory_items(batch_id, created_at);
+        CREATE INDEX IF NOT EXISTS inventory_items_seller_status_idx ON inventory_items(seller_id, workflow_status);
+        CREATE INDEX IF NOT EXISTS inventory_item_photos_batch_idx ON inventory_item_photos(batch_id, position);
+        CREATE INDEX IF NOT EXISTS inventory_item_photos_item_idx ON inventory_item_photos(item_id, position);
+        CREATE INDEX IF NOT EXISTS inventory_submissions_item_idx ON inventory_submissions(item_id, created_at);
         """
     )
 

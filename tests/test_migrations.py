@@ -44,6 +44,7 @@ class MigrationTests(unittest.TestCase):
                 "listings", "recommendations", "actions", "settings", "commerce_jobs", "vision_result_cache",
                 "enrichment_checkpoints", "listing_performance_daily", "listing_versions",
                 "fulfillment_orders", "rotation_actions", "sellers", "ebay_accounts", "analysis_runs", "ebay_scope_proofs", "photo_assets",
+                "inventory_batches", "inventory_items", "inventory_item_photos", "inventory_submissions",
             )
         ]
         columns = [
