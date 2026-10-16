@@ -549,12 +549,32 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
             if isinstance(f, dict):
                 f["sellerConfirmed"] = True
 
-    # Auto-normalize listing
+    # Preserve seller edits before normalization
+    seller_edited_title = bool(listing.get("sellerEditedTitle"))
+    saved_title = listing.get("title")
+    saved_price = listing.get("price")
+    saved_cat = listing.get("cat")
+    saved_cid = listing.get("cid")
+
+    # Auto-normalize listing attributes
     listing = normalize_listing(listing)
+
+    # Restore exact seller-edited values
+    if seller_edited_title and saved_title:
+        listing["title"] = str(saved_title)
+        listing["sellerEditedTitle"] = True
+    if saved_price:
+        listing["price"] = str(saved_price)
+    if saved_cat:
+        listing["cat"] = str(saved_cat)
+    if saved_cid:
+        listing["cid"] = str(saved_cid)
 
     # Re-evaluate validation
     photo_count = current_item["photoCount"]
     validation = check_listing_rules(listing, photo_count, {})
+    blocking_findings = [f for f in validation.get("findings", []) if f.get("rule") != "taxonomy_unverified"]
+    is_valid = len(blocking_findings) == 0
 
     # Evaluate workflow status transition
     # Required fields must exist and pass validation
@@ -565,7 +585,7 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
     
     new_status = current_status
     if current_status not in {"draft_submitted", "draft_result_available"}:
-        if validation["passed"] and has_required and all_confirmed:
+        if is_valid and has_required and all_confirmed:
             if current_status in {"needs_review", "grouped", "analysis_running"}:
                 new_status = "ready_for_approval"
         else:
@@ -617,8 +637,13 @@ def validate_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
 
         current_status = item["workflowStatus"]
         new_status = current_status
+        blocking = [f for f in validation.get("findings", []) if f.get("rule") != "taxonomy_unverified"]
+        is_valid = len(blocking) == 0
+
+        current_status = item["workflowStatus"]
+        new_status = current_status
         if current_status not in {"draft_submitted", "draft_result_available"}:
-            if validation["passed"] and has_required and all_confirmed:
+            if is_valid and has_required and all_confirmed:
                 new_status = "ready_for_approval"
             else:
                 new_status = "needs_review"
@@ -634,7 +659,7 @@ def validate_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
         results.append({
             "itemId": item_id,
             "status": new_status,
-            "passed": validation["passed"],
+            "passed": is_valid,
             "findings": validation["findings"],
         })
     return {"validatedCount": len(results), "results": results}
@@ -652,16 +677,18 @@ def approve_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
         listing = item["listing"]
         photo_count = item["photoCount"]
         validation = item["validation"]
-        if not validation or not validation.get("passed"):
+        if not validation or "findings" not in validation:
             # Re-check in case it hasn't been validated yet
             validation = check_listing_rules(listing, photo_count, {})
 
+        blocking = [f for f in validation.get("findings", []) if f.get("rule") != "taxonomy_unverified"]
+        is_valid = len(blocking) == 0
         has_required = all(bool(str(listing.get(f) or "").strip()) for f in ("title", "price", "cat", "size"))
-        if not validation["passed"] or not has_required:
+        if not is_valid or not has_required:
             rejected.append({
                 "itemId": item_id,
                 "reason": "Item failed validation rules or is missing required fields (title, price, category, size).",
-                "findings": validation.get("findings", []),
+                "findings": blocking,
             })
             continue
 
