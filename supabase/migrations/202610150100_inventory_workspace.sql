@@ -89,7 +89,13 @@ ALTER TABLE public.inventory_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.inventory_item_photos ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.inventory_submissions ENABLE ROW LEVEL SECURITY;
 
-REVOKE ALL ON TABLE public.inventory_batches, public.inventory_items, public.inventory_item_photos, public.inventory_submissions FROM anon, authenticated;
-GRANT ALL ON TABLE public.inventory_batches, public.inventory_items, public.inventory_item_photos, public.inventory_submissions TO service_role;
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+        REVOKE ALL ON TABLE public.inventory_batches, public.inventory_items, public.inventory_item_photos, public.inventory_submissions FROM anon, authenticated;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+        GRANT ALL ON TABLE public.inventory_batches, public.inventory_items, public.inventory_item_photos, public.inventory_submissions TO service_role;
+    END IF;
+END $$;
 
 COMMIT;
