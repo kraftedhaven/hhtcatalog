@@ -91,13 +91,19 @@
         try {
             batches = await inventoryListBatches();
             if (batches.length > 0) {
-                if (!selectedBatchId || !batches.some(b => b.id === selectedBatchId)) {
+                if (
+                    !selectedBatchId ||
+                    !batches.some((b) => b.id === selectedBatchId)
+                ) {
                     selectedBatchId = batches[0].id;
                 }
                 await selectBatch(selectedBatchId);
             } else {
                 // Auto create initial batch if none exists
-                const newBatch = await inventoryCreateBatch("First Inventory Batch", "3");
+                const newBatch = await inventoryCreateBatch(
+                    "First Inventory Batch",
+                    "3",
+                );
                 batches = [newBatch];
                 selectedBatchId = newBatch.id;
                 await selectBatch(selectedBatchId);
@@ -116,7 +122,9 @@
         inspectingItem = null;
         inspectingItemId = "";
         try {
-            selectedBatch = batches.find(b => b.id === batchId) || await inventoryGetBatch(batchId);
+            selectedBatch =
+                batches.find((b) => b.id === batchId) ||
+                (await inventoryGetBatch(batchId));
             items = await inventoryListBatchItems(batchId);
         } catch (err) {
             globalError = err.message || "Failed to load batch items.";
@@ -126,7 +134,10 @@
     }
 
     async function createNewBatch() {
-        const name = window.prompt("Enter a name for the new inventory batch:", `Batch ${new Date().toLocaleDateString()}`);
+        const name = window.prompt(
+            "Enter a name for the new inventory batch:",
+            `Batch ${new Date().toLocaleDateString()}`,
+        );
         if (!name) return;
         batchLoading = true;
         try {
@@ -177,7 +188,7 @@
             for (const [itemId, patchData] of entries) {
                 const updated = await inventoryPatchItem(itemId, patchData);
                 // Update in items list
-                const idx = items.findIndex(it => it.id === itemId);
+                const idx = items.findIndex((it) => it.id === itemId);
                 if (idx !== -1) {
                     items[idx] = updated;
                 }
@@ -200,10 +211,15 @@
     // Filter & Sort Logic
     // -----------------------------------------------------------------------
     $: filteredItems = items
-        .filter(it => {
+        .filter((it) => {
             if (statusFilter === "incomplete") {
                 const listing = it.listing || {};
-                return !listing.title || !listing.price || !listing.cat || !listing.size;
+                return (
+                    !listing.title ||
+                    !listing.price ||
+                    !listing.cat ||
+                    !listing.size
+                );
             }
             if (statusFilter !== "all" && it.workflowStatus !== statusFilter) {
                 return false;
@@ -250,10 +266,13 @@
     // Selection Helpers
     // -----------------------------------------------------------------------
     function toggleSelectAll() {
-        if (selectedItemIds.size === filteredItems.length && filteredItems.length > 0) {
+        if (
+            selectedItemIds.size === filteredItems.length &&
+            filteredItems.length > 0
+        ) {
             selectedItemIds = new Set();
         } else {
-            selectedItemIds = new Set(filteredItems.map(it => it.id));
+            selectedItemIds = new Set(filteredItems.map((it) => it.id));
         }
     }
 
@@ -293,7 +312,8 @@
             // Refresh batch items
             items = await inventoryListBatchItems(selectedBatchId);
             if (inspectingItemId) {
-                inspectingItem = items.find(it => it.id === inspectingItemId) || null;
+                inspectingItem =
+                    items.find((it) => it.id === inspectingItemId) || null;
             }
             globalStatus = `Validated ${res.validatedCount} items. Review any flags before approval.`;
         } catch (err) {
@@ -316,7 +336,8 @@
             const res = await inventoryApproveItems(ids);
             items = await inventoryListBatchItems(selectedBatchId);
             if (inspectingItemId) {
-                inspectingItem = items.find(it => it.id === inspectingItemId) || null;
+                inspectingItem =
+                    items.find((it) => it.id === inspectingItemId) || null;
             }
             if (res.rejectedCount > 0) {
                 globalError = `${res.rejectedCount} item(s) could not be approved due to validation errors or missing required fields.`;
@@ -338,13 +359,17 @@
             return;
         }
         // Check if all selected items are approved
-        const nonApproved = items.filter(it => ids.includes(it.id) && it.workflowStatus !== "approved");
+        const nonApproved = items.filter(
+            (it) => ids.includes(it.id) && it.workflowStatus !== "approved",
+        );
         if (nonApproved.length > 0) {
             globalError = `Cannot submit: ${nonApproved.length} selected item(s) are not in 'approved' status. Validate and approve items first.`;
             return;
         }
 
-        const confirmed = window.confirm(`Submit ${ids.length} approved item(s) to eBay Seller Hub draft feed? No live listings will be created.`);
+        const confirmed = window.confirm(
+            `Submit ${ids.length} approved item(s) to eBay Seller Hub draft feed? No live listings will be created.`,
+        );
         if (!confirmed) return;
 
         actionLoading = true;
@@ -353,7 +378,8 @@
             const res = await inventorySubmitDrafts(ids);
             items = await inventoryListBatchItems(selectedBatchId);
             if (inspectingItemId) {
-                inspectingItem = items.find(it => it.id === inspectingItemId) || null;
+                inspectingItem =
+                    items.find((it) => it.id === inspectingItemId) || null;
             }
             globalStatus = `Submitted ${res.submittedCount} draft(s) to eBay Seller Hub! Task ID: ${res.feedTaskId}. Polling results...`;
         } catch (err) {
@@ -391,13 +417,13 @@
     }
 
     function addUploadFiles(files) {
-        const imageFiles = files.filter(f => f.type.startsWith("image/"));
+        const imageFiles = files.filter((f) => f.type.startsWith("image/"));
         if (!imageFiles.length) {
             uploadError = "Please select valid image files.";
             return;
         }
         uploadFiles = [...uploadFiles, ...imageFiles];
-        const newPreviews = imageFiles.map(file => ({
+        const newPreviews = imageFiles.map((file) => ({
             id: `${file.name}-${file.size}-${Date.now()}`,
             file,
             name: file.name,
@@ -429,18 +455,21 @@
     }
 
     async function regroupBatchPhotos(mode, force = false) {
-        const hasProtected = items.some(it => 
-            (it.workflowStatus && it.workflowStatus !== "grouped" && it.workflowStatus !== "photo_staged") ||
-            Boolean(it.analysisJobId) ||
-            Boolean(it.sellerConfirmed) ||
-            Boolean(it.listing?.title) ||
-            Boolean(it.listing?.price)
+        const hasProtected = items.some(
+            (it) =>
+                (it.workflowStatus &&
+                    it.workflowStatus !== "grouped" &&
+                    it.workflowStatus !== "photo_staged") ||
+                Boolean(it.analysisJobId) ||
+                Boolean(it.sellerConfirmed) ||
+                Boolean(it.listing?.title) ||
+                Boolean(it.listing?.price),
         );
         if (hasProtected && !force) {
             const confirmed = window.confirm(
                 "Warning: This batch contains items with active edits, analysis, or approvals.\n\n" +
-                "Regrouping will adjust photo allocations across items. Existing listing details will be preserved wherever possible, but item groupings will change.\n\n" +
-                "Do you want to proceed with regrouping?"
+                    "Regrouping will adjust photo allocations across items. Existing listing details will be preserved wherever possible, but item groupings will change.\n\n" +
+                    "Do you want to proceed with regrouping?",
             );
             if (!confirmed) return;
             force = true;
@@ -449,7 +478,10 @@
         actionLoading = true;
         globalError = "";
         try {
-            await inventoryUpdatePhotoGrouping(selectedBatchId, { mode, force });
+            await inventoryUpdatePhotoGrouping(selectedBatchId, {
+                mode,
+                force,
+            });
             items = await inventoryListBatchItems(selectedBatchId);
             globalStatus = `Photos regrouped (${mode} per item).`;
         } catch (err) {
@@ -485,34 +517,69 @@
         switch (status) {
             case "ready_for_approval":
             case "approved":
-                return { text: "Ready", bg: "bg-emerald-50 text-emerald-700 border-emerald-200" };
+                return {
+                    text: "Ready",
+                    bg: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                };
             case "needs_review":
-                return { text: "Review", bg: "bg-slate-100 text-slate-700 border-slate-300" };
+                return {
+                    text: "Review",
+                    bg: "bg-slate-100 text-slate-700 border-slate-300",
+                };
             case "grouped":
-                return { text: "Grouped", bg: "bg-gray-100 text-gray-700 border-gray-200" };
+                return {
+                    text: "Grouped",
+                    bg: "bg-gray-100 text-gray-700 border-gray-200",
+                };
             case "photo_staged":
-                return { text: "Staged", bg: "bg-indigo-50 text-indigo-700 border-indigo-200" };
+                return {
+                    text: "Staged",
+                    bg: "bg-indigo-50 text-indigo-700 border-indigo-200",
+                };
             case "analysis_queued":
             case "analysis_running":
-                return { text: "Analyzing...", bg: "bg-blue-50 text-blue-700 border-blue-200 animate-pulse" };
+                return {
+                    text: "Analyzing...",
+                    bg: "bg-blue-50 text-blue-700 border-blue-200 animate-pulse",
+                };
             case "draft_submitted":
-                return { text: "Submitted", bg: "bg-cyan-50 text-cyan-700 border-cyan-200" };
+                return {
+                    text: "Submitted",
+                    bg: "bg-cyan-50 text-cyan-700 border-cyan-200",
+                };
             case "draft_result_available":
-                return { text: "eBay Available", bg: "bg-teal-50 text-teal-700 border-teal-200" };
+                return {
+                    text: "eBay Available",
+                    bg: "bg-teal-50 text-teal-700 border-teal-200",
+                };
             case "draft_failed":
-                return { text: "Failed", bg: "bg-rose-50 text-rose-700 border-rose-200" };
+                return {
+                    text: "Failed",
+                    bg: "bg-rose-50 text-rose-700 border-rose-200",
+                };
             default:
-                return { text: status, bg: "bg-gray-100 text-gray-700 border-gray-200" };
+                return {
+                    text: status,
+                    bg: "bg-gray-100 text-gray-700 border-gray-200",
+                };
         }
     }
 </script>
+
+<svelte:window
+    on:keydown={(e) => e.key === "Escape" && isUploadOpen && closeUploadModal()}
+/>
 
 <div class="workspace-root">
     <!-- Header Section matching Mockup media_1792112172110.png -->
     <header class="workspace-header">
         <div class="header-titles">
-            <h2 class="text-2xl font-bold tracking-tight text-slate-900">HHT Listing Workspace</h2>
-            <p class="text-sm text-slate-500 font-medium">New inventory · Spreadsheet operational center</p>
+            <h2 class="text-2xl font-bold tracking-tight text-slate-900">
+                HHT Listing Workspace
+            </h2>
+            <p class="text-sm text-slate-500 font-medium">
+                New inventory · Spreadsheet operational center
+            </p>
         </div>
 
         <div class="header-right">
@@ -526,19 +593,36 @@
             <!-- Autosave Indicator -->
             <div class="autosave-indicator">
                 {#if autosaveStatus === "saving"}
-                    <span class="text-xs text-blue-600 font-semibold flex items-center gap-1">
-                        <span class="inline-block w-2 h-2 rounded-full bg-blue-600 animate-ping"></span>
+                    <span
+                        class="text-xs text-blue-600 font-semibold flex items-center gap-1"
+                    >
+                        <span
+                            class="inline-block w-2 h-2 rounded-full bg-blue-600 animate-ping"
+                        ></span>
                         Saving...
                     </span>
                 {:else if autosaveStatus === "saved"}
-                    <span class="text-xs text-emerald-600 font-semibold flex items-center gap-1">
-                        <svg class="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
-                            <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                    <span
+                        class="text-xs text-emerald-600 font-semibold flex items-center gap-1"
+                    >
+                        <svg
+                            class="w-3.5 h-3.5"
+                            viewBox="0 0 20 20"
+                            fill="currentColor"
+                        >
+                            <path
+                                fill-rule="evenodd"
+                                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                clip-rule="evenodd"
+                            />
                         </svg>
                         Saved
                     </span>
                 {:else if autosaveStatus === "error"}
-                    <button class="text-xs text-rose-600 font-bold underline" on:click={flushPendingPatches}>
+                    <button
+                        class="text-xs text-rose-600 font-bold underline"
+                        on:click={flushPendingPatches}
+                    >
                         Save failed (Retry)
                     </button>
                 {/if}
@@ -552,7 +636,7 @@
             <button
                 class="subtab-pill"
                 class:active={activeSubTab === "new_inventory"}
-                on:click={() => activeSubTab = "new_inventory"}
+                on:click={() => (activeSubTab = "new_inventory")}
             >
                 New inventory
             </button>
@@ -570,7 +654,10 @@
 
         <!-- Batch Selector & Creation -->
         <div class="batch-selector-box">
-            <label for="batch-select-dropdown" class="text-xs font-semibold text-slate-500">Batch:</label>
+            <label
+                for="batch-select-dropdown"
+                class="text-xs font-semibold text-slate-500">Batch:</label
+            >
             <select
                 id="batch-select-dropdown"
                 class="batch-select"
@@ -582,13 +669,20 @@
                     <option value={b.id}>{b.name} ({b.itemCount} items)</option>
                 {/each}
             </select>
-            <button class="batch-new-btn" on:click={createNewBatch} title="Create new batch">+ New Batch</button>
+            <button
+                class="batch-new-btn"
+                on:click={createNewBatch}
+                title="Create new batch">+ New Batch</button
+            >
         </div>
     </div>
 
     <!-- Instruction Help Bar -->
     <div class="instruction-bar">
-        <span>Edit fields directly. Select a row to review its photos and full listing details.</span>
+        <span
+            >Edit fields directly. Select a row to review its photos and full
+            listing details.</span
+        >
         <div class="flex items-center gap-3">
             <!-- Search & Filter Controls -->
             <input
@@ -630,25 +724,42 @@
                         <th class="w-12 text-center">
                             <input
                                 type="checkbox"
-                                checked={selectedItemIds.size === filteredItems.length && filteredItems.length > 0}
+                                checked={selectedItemIds.size ===
+                                    filteredItems.length &&
+                                    filteredItems.length > 0}
                                 on:change={toggleSelectAll}
                                 class="row-checkbox"
                             />
                         </th>
                         <th class="w-24">Item</th>
-                        <th class="min-w-[280px]" on:click={() => toggleSort("title")}>
-                            Title {sortBy === "title" ? (sortDirection === "asc" ? "↑" : "↓") : ""}
+                        <th
+                            class="min-w-[280px]"
+                            on:click={() => toggleSort("title")}
+                        >
+                            Title {sortBy === "title"
+                                ? sortDirection === "asc"
+                                    ? "↑"
+                                    : "↓"
+                                : ""}
                         </th>
                         <th class="min-w-[150px]">Category</th>
                         <th class="w-32">Brand</th>
                         <th class="w-28">Size</th>
                         <th class="w-28">Condition</th>
                         <th class="w-32" on:click={() => toggleSort("price")}>
-                            Price {sortBy === "price" ? (sortDirection === "asc" ? "↑" : "↓") : ""}
+                            Price {sortBy === "price"
+                                ? sortDirection === "asc"
+                                    ? "↑"
+                                    : "↓"
+                                : ""}
                         </th>
                         <th class="w-20">Qty</th>
                         <th class="w-32" on:click={() => toggleSort("status")}>
-                            Status {sortBy === "status" ? (sortDirection === "asc" ? "↑" : "↓") : ""}
+                            Status {sortBy === "status"
+                                ? sortDirection === "asc"
+                                    ? "↑"
+                                    : "↓"
+                                : ""}
                         </th>
                         <th class="w-28">Updated</th>
                     </tr>
@@ -656,14 +767,29 @@
                 <tbody>
                     {#if batchLoading}
                         <tr>
-                            <td colspan="11" class="text-center py-12 text-slate-400">Loading batch items...</td>
+                            <td
+                                colspan="11"
+                                class="text-center py-12 text-slate-400"
+                                >Loading batch items...</td
+                            >
                         </tr>
                     {:else if filteredItems.length === 0}
                         <tr>
-                            <td colspan="11" class="text-center py-16 text-slate-500">
-                                <p class="text-base font-semibold mb-1">No items found in this view.</p>
-                                <p class="text-sm text-slate-400">Upload photos to create and group items, or change filters.</p>
-                                <button class="mt-4 px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-semibold hover:bg-slate-800" on:click={openUploadModal}>
+                            <td
+                                colspan="11"
+                                class="text-center py-16 text-slate-500"
+                            >
+                                <p class="text-base font-semibold mb-1">
+                                    No items found in this view.
+                                </p>
+                                <p class="text-sm text-slate-400">
+                                    Upload photos to create and group items, or
+                                    change filters.
+                                </p>
+                                <button
+                                    class="mt-4 px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-semibold hover:bg-slate-800"
+                                    on:click={openUploadModal}
+                                >
                                     Upload photos
                                 </button>
                             </td>
@@ -672,34 +798,57 @@
                         {#each filteredItems as item (item.id)}
                             {@const listing = item.listing || {}}
                             {@const prov = item.provenance || {}}
-                            {@const statusInfo = getStatusBadge(item.workflowStatus)}
-                            {@const isMissingSize = !listing.size || listing.size === "Not visible"}
+                            {@const statusInfo = getStatusBadge(
+                                item.workflowStatus,
+                            )}
+                            {@const isMissingSize =
+                                !listing.size || listing.size === "Not visible"}
                             {@const isSelected = selectedItemIds.has(item.id)}
                             {@const isInspecting = inspectingItemId === item.id}
 
-                            <tr class:selected-row={isSelected} class:inspecting-row={isInspecting}>
+                            <tr
+                                class:selected-row={isSelected}
+                                class:inspecting-row={isInspecting}
+                            >
                                 <!-- Checkbox -->
-                                <td class="text-center" on:click|stopPropagation>
+                                <td
+                                    class="text-center"
+                                    on:click|stopPropagation
+                                >
                                     <input
                                         type="checkbox"
                                         checked={isSelected}
-                                        on:change={() => toggleSelectItem(item.id)}
+                                        on:change={() =>
+                                            toggleSelectItem(item.id)}
                                         class="row-checkbox"
                                     />
                                 </td>
 
                                 <!-- Thumbnail & Photo Count Pill matching media_1792112229.png -->
-                                <td class="cursor-pointer" on:click={() => openItemInspector(item)}>
+                                <td
+                                    class="cursor-pointer"
+                                    on:click={() => openItemInspector(item)}
+                                >
                                     <div class="thumb-cell">
                                         <div class="thumb-box">
                                             {#if item.coverThumbnail}
-                                                <img src={item.coverThumbnail} alt={listing.title || "Item"} class="thumb-img" />
+                                                <img
+                                                    src={item.coverThumbnail}
+                                                    alt={listing.title ||
+                                                        "Item"}
+                                                    class="thumb-img"
+                                                />
                                             {:else}
-                                                <div class="thumb-placeholder">📷</div>
+                                                <div class="thumb-placeholder">
+                                                    📷
+                                                </div>
                                             {/if}
                                         </div>
                                         <span class="photo-count-label">
-                                            {item.photoCount} photo{item.photoCount === 1 ? "" : "s"}
+                                            {item.photoCount} photo{item.photoCount ===
+                                            1
+                                                ? ""
+                                                : "s"}
                                         </span>
                                     </div>
                                 </td>
@@ -713,7 +862,12 @@
                                             value={listing.title || ""}
                                             placeholder="Enter listing title..."
                                             maxlength="80"
-                                            on:input={(e) => handleInlineEdit(item, "title", e.target.value)}
+                                            on:input={(e) =>
+                                                handleInlineEdit(
+                                                    item,
+                                                    "title",
+                                                    e.target.value,
+                                                )}
                                         />
                                         {#if item.titleCandidates && Object.keys(item.titleCandidates).length > 0}
                                             <button
@@ -721,25 +875,52 @@
                                                 class="candidate-toggle-btn"
                                                 title="Select optimized title candidate"
                                                 on:click|stopPropagation={() => {
-                                                    activeTitleCandidatesItemId = activeTitleCandidatesItemId === item.id ? null : item.id;
+                                                    activeTitleCandidatesItemId =
+                                                        activeTitleCandidatesItemId ===
+                                                        item.id
+                                                            ? null
+                                                            : item.id;
                                                 }}
                                             >
                                                 ✨
                                             </button>
                                             {#if activeTitleCandidatesItemId === item.id}
                                                 <div class="candidate-dropdown">
-                                                    <div class="p-2 border-b text-xs font-bold text-slate-700">Select Title Candidate</div>
+                                                    <div
+                                                        class="p-2 border-b text-xs font-bold text-slate-700"
+                                                    >
+                                                        Select Title Candidate
+                                                    </div>
                                                     {#each Object.entries(item.titleCandidates) as [cKey, cand]}
                                                         <button
                                                             type="button"
                                                             class="candidate-option-btn"
-                                                            on:click={() => selectTitleCandidate(item, cKey)}
+                                                            on:click={() =>
+                                                                selectTitleCandidate(
+                                                                    item,
+                                                                    cKey,
+                                                                )}
                                                         >
-                                                            <div class="flex justify-between text-xs font-semibold">
-                                                                <span class="capitalize">{cKey.replace('_', ' ')}</span>
-                                                                <span class="text-slate-400">{cand.length}/80</span>
+                                                            <div
+                                                                class="flex justify-between text-xs font-semibold"
+                                                            >
+                                                                <span
+                                                                    class="capitalize"
+                                                                    >{cKey.replace(
+                                                                        "_",
+                                                                        " ",
+                                                                    )}</span
+                                                                >
+                                                                <span
+                                                                    class="text-slate-400"
+                                                                    >{cand.length}/80</span
+                                                                >
                                                             </div>
-                                                            <p class="text-xs text-slate-800 mt-0.5">{cand.title}</p>
+                                                            <p
+                                                                class="text-xs text-slate-800 mt-0.5"
+                                                            >
+                                                                {cand.title}
+                                                            </p>
                                                         </button>
                                                     {/each}
                                                 </div>
@@ -755,7 +936,12 @@
                                         class="table-input"
                                         value={listing.cat || ""}
                                         placeholder="Category..."
-                                        on:input={(e) => handleInlineEdit(item, "cat", e.target.value)}
+                                        on:input={(e) =>
+                                            handleInlineEdit(
+                                                item,
+                                                "cat",
+                                                e.target.value,
+                                            )}
                                     />
                                 </td>
 
@@ -766,7 +952,12 @@
                                         class="table-input"
                                         value={listing.brand || ""}
                                         placeholder="Brand..."
-                                        on:input={(e) => handleInlineEdit(item, "brand", e.target.value)}
+                                        on:input={(e) =>
+                                            handleInlineEdit(
+                                                item,
+                                                "brand",
+                                                e.target.value,
+                                            )}
                                     />
                                 </td>
 
@@ -779,29 +970,47 @@
                                             class:missing-input={isMissingSize}
                                             value={listing.size || ""}
                                             placeholder="Set size"
-                                            on:input={(e) => handleInlineEdit(item, "size", e.target.value)}
+                                            on:input={(e) =>
+                                                handleInlineEdit(
+                                                    item,
+                                                    "size",
+                                                    e.target.value,
+                                                )}
                                         />
                                     </div>
                                 </td>
 
                                 <!-- Condition -->
                                 <td>
-                                    <span class="text-sm text-slate-700 font-medium">
-                                        {listing.cid === "1000" ? "New" : "Pre-owned"}
+                                    <span
+                                        class="text-sm text-slate-700 font-medium"
+                                    >
+                                        {listing.cid === "1000"
+                                            ? "New"
+                                            : "Pre-owned"}
                                     </span>
                                 </td>
 
                                 <!-- Price (with Tier options popover) -->
                                 <td>
-                                    <div class="relative flex items-center gap-1">
-                                        <span class="text-slate-400 text-sm">$</span>
+                                    <div
+                                        class="relative flex items-center gap-1"
+                                    >
+                                        <span class="text-slate-400 text-sm"
+                                            >$</span
+                                        >
                                         <input
                                             type="number"
                                             step="0.01"
                                             class="table-input w-24 text-right"
                                             value={listing.price || ""}
                                             placeholder="0.00"
-                                            on:input={(e) => handleInlineEdit(item, "price", e.target.value)}
+                                            on:input={(e) =>
+                                                handleInlineEdit(
+                                                    item,
+                                                    "price",
+                                                    e.target.value,
+                                                )}
                                         />
                                         {#if item.pricingOptions && Object.keys(item.pricingOptions).length > 0}
                                             <button
@@ -809,25 +1018,48 @@
                                                 class="price-tiers-btn"
                                                 title="View recommended price tiers"
                                                 on:click|stopPropagation={() => {
-                                                    activePriceTiersItemId = activePriceTiersItemId === item.id ? null : item.id;
+                                                    activePriceTiersItemId =
+                                                        activePriceTiersItemId ===
+                                                        item.id
+                                                            ? null
+                                                            : item.id;
                                                 }}
                                             >
                                                 🏷️
                                             </button>
                                             {#if activePriceTiersItemId === item.id}
                                                 <div class="candidate-dropdown">
-                                                    <div class="p-2 border-b text-xs font-bold text-slate-700">Recommended Price Tiers</div>
+                                                    <div
+                                                        class="p-2 border-b text-xs font-bold text-slate-700"
+                                                    >
+                                                        Recommended Price Tiers
+                                                    </div>
                                                     {#each Object.entries(item.pricingOptions) as [tKey, opt]}
                                                         <button
                                                             type="button"
                                                             class="candidate-option-btn"
-                                                            on:click={() => selectPricingOption(item, tKey)}
+                                                            on:click={() =>
+                                                                selectPricingOption(
+                                                                    item,
+                                                                    tKey,
+                                                                )}
                                                         >
-                                                            <div class="flex justify-between items-center text-xs font-bold">
-                                                                <span>{opt.label}</span>
-                                                                <span class="text-emerald-700">${opt.price}</span>
+                                                            <div
+                                                                class="flex justify-between items-center text-xs font-bold"
+                                                            >
+                                                                <span
+                                                                    >{opt.label}</span
+                                                                >
+                                                                <span
+                                                                    class="text-emerald-700"
+                                                                    >${opt.price}</span
+                                                                >
                                                             </div>
-                                                            <p class="text-xs text-slate-500 mt-0.5">{opt.reason}</p>
+                                                            <p
+                                                                class="text-xs text-slate-500 mt-0.5"
+                                                            >
+                                                                {opt.reason}
+                                                            </p>
                                                         </button>
                                                     {/each}
                                                 </div>
@@ -843,25 +1075,36 @@
                                         class="table-input w-16 text-center"
                                         value={listing.quantity || 1}
                                         min="1"
-                                        on:input={(e) => handleInlineEdit(item, "quantity", Number(e.target.value) || 1)}
+                                        on:input={(e) =>
+                                            handleInlineEdit(
+                                                item,
+                                                "quantity",
+                                                Number(e.target.value) || 1,
+                                            )}
                                     />
                                 </td>
 
                                 <!-- Status Badge matching media_1792112229.png -->
                                 <td>
                                     {#if isMissingSize && item.workflowStatus === "needs_review"}
-                                        <span class="status-pill bg-amber-50 text-amber-700 border-amber-200">
+                                        <span
+                                            class="status-pill bg-amber-50 text-amber-700 border-amber-200"
+                                        >
                                             Missing size
                                         </span>
                                     {:else}
-                                        <span class="status-pill {statusInfo.bg}">
+                                        <span
+                                            class="status-pill {statusInfo.bg}"
+                                        >
                                             {statusInfo.text}
                                         </span>
                                     {/if}
                                 </td>
 
                                 <!-- Updated -->
-                                <td class="text-xs text-slate-500 whitespace-nowrap">
+                                <td
+                                    class="text-xs text-slate-500 whitespace-nowrap"
+                                >
                                     {formatTime(item.updatedAt)}
                                 </td>
                             </tr>
@@ -876,20 +1119,36 @@
             <aside class="inspector-drawer">
                 <div class="inspector-header">
                     <div>
-                        <h3 class="text-base font-bold text-slate-900">Item Inspector</h3>
-                        <p class="text-xs text-slate-500">{inspectingItem.id.slice(0, 8)}</p>
+                        <h3 class="text-base font-bold text-slate-900">
+                            Item Inspector
+                        </h3>
+                        <p class="text-xs text-slate-500">
+                            {inspectingItem.id.slice(0, 8)}
+                        </p>
                     </div>
-                    <button class="close-btn" on:click={closeItemInspector}>✕</button>
+                    <button class="close-btn" on:click={closeItemInspector}
+                        >✕</button
+                    >
                 </div>
 
                 <div class="inspector-body">
                     <!-- Photo Gallery for Item -->
                     <div class="inspector-section">
-                        <h4 class="inspector-section-title">Photos ({inspectingItem.photoCount})</h4>
+                        <h4 class="inspector-section-title">
+                            Photos ({inspectingItem.photoCount})
+                        </h4>
                         <div class="inspector-photo-grid">
                             {#each inspectingItem.photos || [] as photo, pIdx}
-                                <div class="inspector-photo-card" class:is-cover={photo.isCover}>
-                                    <img src={photo.previewUrl || photo.storageUrl} alt={photo.originalFilename} class="inspector-img" />
+                                <div
+                                    class="inspector-photo-card"
+                                    class:is-cover={photo.isCover}
+                                >
+                                    <img
+                                        src={photo.previewUrl ||
+                                            photo.storageUrl}
+                                        alt={photo.originalFilename}
+                                        class="inspector-img"
+                                    />
                                     {#if photo.isCover}
                                         <span class="cover-tag">Cover</span>
                                     {/if}
@@ -902,47 +1161,81 @@
                     <!-- Provenance Breakdown for Key Fields -->
                     <div class="inspector-section">
                         <div class="flex items-center justify-between mb-2">
-                            <h4 class="inspector-section-title mb-0">Field Provenance & Truth</h4>
-                            <button class="text-xs text-blue-600 font-bold hover:underline" on:click={() => confirmAllFields(inspectingItem)}>
+                            <h4 class="inspector-section-title mb-0">
+                                Field Provenance & Truth
+                            </h4>
+                            <button
+                                class="text-xs text-blue-600 font-bold hover:underline"
+                                on:click={() =>
+                                    confirmAllFields(inspectingItem)}
+                            >
                                 Confirm All
                             </button>
                         </div>
                         <p class="text-xs text-slate-500 mb-3">
-                            Verified photo evidence vs estimates. Unconfirmed estimates require seller verification before approval.
+                            Verified photo evidence vs estimates. Unconfirmed
+                            estimates require seller verification before
+                            approval.
                         </p>
 
                         <div class="space-y-3">
                             {#each ["title", "price", "brand", "size", "cat", "cnote"] as fKey}
                                 {@const fVal = inspectingItem.listing?.[fKey]}
-                                {@const fProv = inspectingItem.provenance?.[fKey] || {}}
+                                {@const fProv =
+                                    inspectingItem.provenance?.[fKey] || {}}
                                 <div class="provenance-card">
-                                    <div class="flex items-center justify-between">
-                                        <span class="font-bold text-xs uppercase text-slate-600">{fKey}</span>
+                                    <div
+                                        class="flex items-center justify-between"
+                                    >
+                                        <span
+                                            class="font-bold text-xs uppercase text-slate-600"
+                                            >{fKey}</span
+                                        >
                                         <div class="flex items-center gap-1.5">
-                                            <span class="prov-badge prov-{fProv.source || 'missing'}">
+                                            <span
+                                                class="prov-badge prov-{fProv.source ||
+                                                    'missing'}"
+                                            >
                                                 {fProv.source || "missing"}
                                             </span>
                                             {#if fProv.confidence}
-                                                <span class="conf-badge conf-{fProv.confidence}">
+                                                <span
+                                                    class="conf-badge conf-{fProv.confidence}"
+                                                >
                                                     {fProv.confidence}
                                                 </span>
                                             {/if}
                                         </div>
                                     </div>
-                                    <div class="text-sm text-slate-800 font-medium mt-1 truncate">
+                                    <div
+                                        class="text-sm text-slate-800 font-medium mt-1 truncate"
+                                    >
                                         {fVal || "(Empty)"}
                                     </div>
                                     {#if fProv.evidence}
-                                        <p class="text-xs text-slate-500 mt-0.5 italic">{fProv.evidence}</p>
+                                        <p
+                                            class="text-xs text-slate-500 mt-0.5 italic"
+                                        >
+                                            {fProv.evidence}
+                                        </p>
                                     {/if}
-                                    <div class="mt-2 flex items-center justify-between pt-1 border-t border-slate-100">
-                                        <label class="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer">
+                                    <div
+                                        class="mt-2 flex items-center justify-between pt-1 border-t border-slate-100"
+                                    >
+                                        <label
+                                            class="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer"
+                                        >
                                             <input
                                                 type="checkbox"
-                                                checked={fProv.sellerConfirmed === true}
+                                                checked={fProv.sellerConfirmed ===
+                                                    true}
                                                 on:change={(e) => {
                                                     if (e.target.checked) {
-                                                        handleInlineEdit(inspectingItem, "confirmField", fKey);
+                                                        handleInlineEdit(
+                                                            inspectingItem,
+                                                            "confirmField",
+                                                            fKey,
+                                                        );
                                                     }
                                                 }}
                                             />
@@ -960,7 +1253,12 @@
                         <textarea
                             class="w-full text-xs p-2 border rounded-md h-20 text-slate-700"
                             value={inspectingItem.listing?.cnote || ""}
-                            on:input={(e) => handleInlineEdit(inspectingItem, "cnote", e.target.value)}
+                            on:input={(e) =>
+                                handleInlineEdit(
+                                    inspectingItem,
+                                    "cnote",
+                                    e.target.value,
+                                )}
                         ></textarea>
                     </div>
                 </div>
@@ -1012,34 +1310,60 @@
 
 <!-- Upload & Grouping Modal Drawer -->
 {#if isUploadOpen}
-    <div class="modal-backdrop" role="presentation" on:click={closeUploadModal} on:keydown={(e) => e.key === 'Escape' && closeUploadModal()}>
-        <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title" on:click|stopPropagation on:keydown|stopPropagation>
+    <div
+        class="modal-backdrop"
+        role="presentation"
+        on:click={(e) => {
+            if (e.target === e.currentTarget) closeUploadModal();
+        }}
+    >
+        <div
+            class="modal-box"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="modal-title"
+        >
             <div class="modal-header">
                 <div>
-                    <h3 id="modal-title" class="text-lg font-bold text-slate-900">Upload Photos & Group Items</h3>
-                    <p class="text-xs text-slate-500">Staging batch: {selectedBatch?.name}</p>
+                    <h3
+                        id="modal-title"
+                        class="text-lg font-bold text-slate-900"
+                    >
+                        Upload Photos & Group Items
+                    </h3>
+                    <p class="text-xs text-slate-500">
+                        Staging batch: {selectedBatch?.name}
+                    </p>
                 </div>
-                <button class="close-btn" aria-label="Close modal" on:click={closeUploadModal}>✕</button>
+                <button
+                    class="close-btn"
+                    aria-label="Close modal"
+                    on:click={closeUploadModal}>✕</button
+                >
             </div>
 
             <div class="modal-body">
                 <!-- Grouping Mode Selector -->
                 <div class="mb-4">
-                    <span class="block text-xs font-bold text-slate-700 mb-1">Expected photos per item:</span>
+                    <span class="block text-xs font-bold text-slate-700 mb-1"
+                        >Expected photos per item:</span
+                    >
                     <div class="flex gap-2">
                         {#each [["1", "1 photo"], ["2", "2 photos"], ["3", "3 photos"], ["auto", "Automatic"]] as [mVal, mLabel]}
                             <button
                                 type="button"
                                 class="px-3 py-1.5 rounded-lg border text-xs font-semibold"
-                                class:active-group-mode={uploadGroupingMode === mVal}
-                                on:click={() => uploadGroupingMode = mVal}
+                                class:active-group-mode={uploadGroupingMode ===
+                                    mVal}
+                                on:click={() => (uploadGroupingMode = mVal)}
                             >
                                 {mLabel}
                             </button>
                         {/each}
                     </div>
                     <p class="text-xs text-slate-500 mt-1">
-                        Select multiple photos. HHT will automatically bundle photos into item groups.
+                        Select multiple photos. HHT will automatically bundle
+                        photos into item groups.
                     </p>
                 </div>
 
@@ -1059,10 +1383,17 @@
                         id="batch-photo-upload"
                         on:change={handleFilesSelected}
                     />
-                    <label for="batch-photo-upload" class="cursor-pointer block text-center py-6">
+                    <label
+                        for="batch-photo-upload"
+                        class="cursor-pointer block text-center py-6"
+                    >
                         <div class="text-3xl mb-2">📸</div>
-                        <p class="text-sm font-bold text-slate-800">Click to choose or drag images here</p>
-                        <p class="text-xs text-slate-500 mt-1">Supports JPEG, PNG, WebP, HEIC up to 12MB each</p>
+                        <p class="text-sm font-bold text-slate-800">
+                            Click to choose or drag images here
+                        </p>
+                        <p class="text-xs text-slate-500 mt-1">
+                            Supports JPEG, PNG, WebP, HEIC up to 12MB each
+                        </p>
                     </label>
                 </div>
 
@@ -1070,14 +1401,32 @@
                 {#if uploadPreviews.length > 0}
                     <div class="mt-4">
                         <div class="flex justify-between items-center mb-2">
-                            <span class="text-xs font-bold text-slate-700">{uploadPreviews.length} photo(s) selected</span>
-                            <button class="text-xs text-rose-600 font-bold" on:click={() => { uploadFiles = []; uploadPreviews = []; }}>Clear</button>
+                            <span class="text-xs font-bold text-slate-700"
+                                >{uploadPreviews.length} photo(s) selected</span
+                            >
+                            <button
+                                class="text-xs text-rose-600 font-bold"
+                                on:click={() => {
+                                    uploadFiles = [];
+                                    uploadPreviews = [];
+                                }}>Clear</button
+                            >
                         </div>
-                        <div class="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-48 overflow-y-auto p-1 border rounded-lg">
+                        <div
+                            class="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-48 overflow-y-auto p-1 border rounded-lg"
+                        >
                             {#each uploadPreviews as prev, idx}
-                                <div class="relative group aspect-square rounded overflow-hidden border">
-                                    <img src={prev.url} alt={prev.name} class="w-full h-full object-cover" />
-                                    <span class="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1 rounded">
+                                <div
+                                    class="relative group aspect-square rounded overflow-hidden border"
+                                >
+                                    <img
+                                        src={prev.url}
+                                        alt={prev.name}
+                                        class="w-full h-full object-cover"
+                                    />
+                                    <span
+                                        class="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1 rounded"
+                                    >
                                         {idx + 1}
                                     </span>
                                 </div>
@@ -1094,7 +1443,11 @@
             </div>
 
             <div class="modal-footer">
-                <button class="px-4 py-2 border rounded-lg text-xs font-bold" on:click={closeUploadModal} disabled={isUploading}>
+                <button
+                    class="px-4 py-2 border rounded-lg text-xs font-bold"
+                    on:click={closeUploadModal}
+                    disabled={isUploading}
+                >
                     Cancel
                 </button>
                 <button
@@ -1102,7 +1455,9 @@
                     on:click={submitUploadAndGroup}
                     disabled={isUploading || uploadFiles.length === 0}
                 >
-                    {isUploading ? "Uploading & Grouping..." : `Create Groups (${uploadFiles.length} photos)`}
+                    {isUploading
+                        ? "Uploading & Grouping..."
+                        : `Create Groups (${uploadFiles.length} photos)`}
                 </button>
             </div>
         </div>
@@ -1119,7 +1474,7 @@
         border-radius: 12px;
         border: 1px solid #e2e8f0;
         padding: 20px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
         position: relative;
     }
 
@@ -1179,7 +1534,7 @@
     .subtab-pill.active {
         background: #ffffff;
         color: #0f172a;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
     }
 
     .batch-selector-box {
@@ -1380,7 +1735,7 @@
         background: #ffffff;
         border: 1px solid #cbd5e1;
         border-radius: 8px;
-        box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
         z-index: 50;
         margin-top: 4px;
         max-height: 240px;
@@ -1507,7 +1862,7 @@
         position: absolute;
         bottom: 4px;
         right: 4px;
-        background: rgba(0,0,0,0.6);
+        background: rgba(0, 0, 0, 0.6);
         color: #ffffff;
         font-size: 9px;
         font-weight: 600;
@@ -1530,10 +1885,22 @@
         text-transform: uppercase;
     }
 
-    .prov-photo_evidence { background: #dbeafe; color: #1e40af; }
-    .prov-ai_estimate { background: #e0e7ff; color: #3730a3; }
-    .prov-seller_input { background: #f3e8ff; color: #6b21a8; }
-    .prov-missing { background: #fef3c7; color: #92400e; }
+    .prov-photo_evidence {
+        background: #dbeafe;
+        color: #1e40af;
+    }
+    .prov-ai_estimate {
+        background: #e0e7ff;
+        color: #3730a3;
+    }
+    .prov-seller_input {
+        background: #f3e8ff;
+        color: #6b21a8;
+    }
+    .prov-missing {
+        background: #fef3c7;
+        color: #92400e;
+    }
 
     .conf-badge {
         font-size: 9px;
@@ -1542,10 +1909,22 @@
         border-radius: 4px;
     }
 
-    .conf-high { background: #d1fae5; color: #065f46; }
-    .conf-medium { background: #fef3c7; color: #92400e; }
-    .conf-low { background: #fee2e2; color: #991b1b; }
-    .conf-none { background: #f1f5f9; color: #64748b; }
+    .conf-high {
+        background: #d1fae5;
+        color: #065f46;
+    }
+    .conf-medium {
+        background: #fef3c7;
+        color: #92400e;
+    }
+    .conf-low {
+        background: #fee2e2;
+        color: #991b1b;
+    }
+    .conf-none {
+        background: #f1f5f9;
+        color: #64748b;
+    }
 
     /* Bottom Action Bar matching Mockup */
     .bottom-action-bar {
@@ -1643,7 +2022,7 @@
         background: #ffffff;
         border-radius: 12px;
         width: min(100%, 600px);
-        box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1);
+        box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
         overflow: hidden;
     }
 
