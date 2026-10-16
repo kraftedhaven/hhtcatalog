@@ -921,15 +921,23 @@ def inventory_batch_grouping(batch_id):
     body = request.get_json(silent=True) or {}
     mode = body.get("mode", "auto")
     custom_groups = body.get("customGroups")
+    force = bool(body.get("force", False))
     try:
         items = inventory_workspace.apply_photo_grouping(
-            batch_id, str(seller_id), mode=mode, custom_groups=custom_groups
+            batch_id, str(seller_id), mode=mode, custom_groups=custom_groups, force=force
         )
         return jsonify({"result": items})
     except KeyError as exc:
         return jsonify({"error": str(exc)}), 404
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        err_msg = str(exc)
+        if "requires explicit confirmation" in err_msg or "force=True" in err_msg:
+            return jsonify({
+                "error": err_msg,
+                "code": "CONFIRMATION_REQUIRED",
+                "requiresConfirmation": True,
+            }), 409
+        return jsonify({"error": err_msg}), 400
 
 
 @app.route("/api/inventory/batches/<batch_id>/items", methods=["GET"])

@@ -417,16 +417,45 @@
         uploadError = "";
         try {
             await inventoryUploadBatchPhotos(selectedBatchId, uploadFiles);
-            // Apply grouping mode
-            await inventoryUpdatePhotoGrouping(selectedBatchId, { mode: uploadGroupingMode });
-            // Refresh items
+            // Refresh items (backend handles initial grouping or safely appends new item groups without touching existing items)
             items = await inventoryListBatchItems(selectedBatchId);
             closeUploadModal();
-            globalStatus = `Uploaded ${uploadFiles.length} photo(s) and created ${items.length} item group(s).`;
+            globalStatus = `Uploaded ${uploadFiles.length} photo(s) and updated item groups.`;
         } catch (err) {
             uploadError = err.message || "Failed to upload and group photos.";
         } finally {
             isUploading = false;
+        }
+    }
+
+    async function regroupBatchPhotos(mode, force = false) {
+        const hasProtected = items.some(it => 
+            (it.workflowStatus && it.workflowStatus !== "grouped" && it.workflowStatus !== "photo_staged") ||
+            Boolean(it.analysisJobId) ||
+            Boolean(it.sellerConfirmed) ||
+            Boolean(it.listing?.title) ||
+            Boolean(it.listing?.price)
+        );
+        if (hasProtected && !force) {
+            const confirmed = window.confirm(
+                "Warning: This batch contains items with active edits, analysis, or approvals.\n\n" +
+                "Regrouping will adjust photo allocations across items. Existing listing details will be preserved wherever possible, but item groupings will change.\n\n" +
+                "Do you want to proceed with regrouping?"
+            );
+            if (!confirmed) return;
+            force = true;
+        }
+
+        actionLoading = true;
+        globalError = "";
+        try {
+            await inventoryUpdatePhotoGrouping(selectedBatchId, { mode, force });
+            items = await inventoryListBatchItems(selectedBatchId);
+            globalStatus = `Photos regrouped (${mode} per item).`;
+        } catch (err) {
+            globalError = err.message || "Failed to regroup photos.";
+        } finally {
+            actionLoading = false;
         }
     }
 

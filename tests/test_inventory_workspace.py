@@ -315,5 +315,106 @@ class InventoryWorkspaceTests(unittest.TestCase):
             self.assertIn("mutations are disabled", res.get_json()["error"])
 
 
+    def test_regrouping_guard_blocks_destructive_recreation(self):
+        """Confirm that regrouping a batch with edited/analyzed items requires force=True."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Guard Test Batch", grouping_mode="2")
+        photos = [
+            {"filename": f"test_guard_{i}.jpg", "previewUrl": f"https://example.com/tg_{i}.jpg"}
+            for i in range(4)
+        ]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos)
+        items = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        self.assertEqual(len(items), 2)
+
+        # Edit item 0
+        inventory_workspace.patch_item(
+            items[0]["id"],
+            self.seller_id,
+            {"title": "Custom Hand-Knitted Wool Scarf", "price": "34.00", "brand": "Handmade", "size": "OS"},
+        )
+
+        # Calling apply_photo_grouping without force MUST raise ValueError
+        with self.assertRaises(ValueError) as ctx:
+            inventory_workspace.apply_photo_grouping(batch["id"], self.seller_id, mode="1", force=False)
+        self.assertIn("requires explicit confirmation (force=True)", str(ctx.exception))
+
+        # Check API endpoint returns 409
+        client = hht_app.app.test_client()
+        def authenticate():
+            from flask import g
+            g.supabase_user = {"sub": self.auth_user_id}
+
+        with mock.patch("app.authenticate_request", side_effect=authenticate), \
+             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+            res = client.put(f"/api/inventory/batches/{batch['id']}/photos/groups", json={"mode": "1", "force": False})
+            self.assertEqual(res.status_code, 409)
+            data = res.get_json()
+            self.assertEqual(data.get("code"), "CONFIRMATION_REQUIRED")
+            self.assertTrue(data.get("requiresConfirmation"))
+
+    def test_regrouping_preserves_item_data_with_force(self):
+        """Confirm that regrouping with force=True migrates and preserves existing item edits."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Force Regroup Batch", grouping_mode="2")
+        photos = [
+            {"filename": f"force_photo_{i}.jpg", "previewUrl": f"https://example.com/fp_{i}.jpg"}
+            for i in range(4)
+        ]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos)
+        items = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        self.assertEqual(len(items), 2)
+        item0_id = items[0]["id"]
+
+        # Edit item 0
+        inventory_workspace.patch_item(
+            item0_id,
+            self.seller_id,
+            {"title": "Rare Graphic Tee 90s", "price": "65.00", "brand": "Vintage", "size": "XL"},
+        )
+
+        # Regroup with force=True into 1 photo per item
+        regrouped = inventory_workspace.apply_photo_grouping(batch["id"], self.seller_id, mode="1", force=True)
+        self.assertEqual(len(regrouped), 4)
+
+        # Confirm the edited item's title and price were preserved in the item associated with its photos
+        preserved_item = next((it for it in regrouped if it["listing"]["title"] == "Rare Graphic Tee 90s"), None)
+        self.assertIsNotNone(preserved_item)
+        self.assertEqual(preserved_item["listing"]["price"], "65.00")
+        self.assertEqual(preserved_item["listing"]["brand"], "Vintage")
+
+    def test_register_photos_appends_without_wiping_existing_items(self):
+        """Confirm that uploading additional photos into a batch appends new items without wiping existing ones."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Append Photos Batch", grouping_mode="2")
+        photos_batch1 = [
+            {"filename": "item1_a.jpg", "previewUrl": "https://example.com/i1a.jpg"},
+            {"filename": "item1_b.jpg", "previewUrl": "https://example.com/i1b.jpg"},
+        ]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos_batch1)
+        items1 = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        self.assertEqual(len(items1), 1)
+
+        # Edit item 1
+        inventory_workspace.patch_item(
+            items1[0]["id"],
+            self.seller_id,
+            {"title": "Existing Item 1 Edited", "price": "99.00"},
+        )
+
+        # Upload 2 more photos for item 2
+        photos_batch2 = [
+            {"filename": "item2_a.jpg", "previewUrl": "https://example.com/i2a.jpg"},
+            {"filename": "item2_b.jpg", "previewUrl": "https://example.com/i2b.jpg"},
+        ]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos_batch2)
+
+        items2 = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        self.assertEqual(len(items2), 2)
+
+        # Confirm existing item 1 is completely intact
+        existing = next(it for it in items2 if it["id"] == items1[0]["id"])
+        self.assertEqual(existing["listing"]["title"], "Existing Item 1 Edited")
+        self.assertEqual(existing["listing"]["price"], "99.00")
+
+
 if __name__ == "__main__":
     unittest.main()
+

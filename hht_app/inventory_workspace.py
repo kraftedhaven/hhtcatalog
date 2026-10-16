@@ -214,80 +214,97 @@ def register_batch_photos(
                 "isCover": False,
             })
 
-    # Apply grouping according to batch grouping mode
-    apply_photo_grouping(batch_id, seller_id, mode=grouping_mode)
+    with connect() as db:
+        existing_items = db.execute(
+            "SELECT id FROM inventory_items WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchall()
+
+    if not existing_items:
+        apply_photo_grouping(batch_id, seller_id, mode=grouping_mode, force=True)
+    else:
+        _group_new_photos(batch_id, seller_id, registered_photos, mode=grouping_mode)
     return registered_photos
 
 
-def apply_photo_grouping(
-    batch_id: str, seller_id: str, mode: str = "auto", custom_groups: list[list[str]] | None = None
-) -> list[dict[str, Any]]:
-    """Group photos in a batch into inventory items.
-    
-    mode can be '1', '2', '3', or 'auto'.
-    If custom_groups is given, each element is a list of photo IDs.
-    """
-    if not seller_id:
-        raise ValueError("Seller ownership is required.")
-    get_batch(batch_id, seller_id)
-    now = _now_iso()
-
+def check_batch_has_protected_items(batch_id: str) -> tuple[bool, list[str]]:
+    """Check if any items in the batch have seller edits, analysis results, approvals, or submissions."""
     with connect() as db:
-        all_photos = db.execute(
-            """SELECT * FROM inventory_item_photos
-               WHERE batch_id = ?
-               ORDER BY position ASC, created_at ASC""",
+        items = db.execute(
+            "SELECT * FROM inventory_items WHERE batch_id = ?",
             (batch_id,),
         ).fetchall()
-        photo_records = [dict(p) for p in all_photos]
+        if not items:
+            return False, []
 
-        if not photo_records:
-            return []
+        protected_ids = []
+        for item in items:
+            item_id = str(item["id"])
+            status = str(item["workflow_status"] or "")
+            if status not in ("grouped", "photo_staged", ""):
+                protected_ids.append(item_id)
+                continue
+            if item["analysis_job_id"]:
+                protected_ids.append(item_id)
+                continue
+            if bool(item["seller_confirmed"]):
+                protected_ids.append(item_id)
+                continue
+            listing = _parse_json(item["listing_json"])
+            if listing.get("title") or listing.get("price") or listing.get("brand") or listing.get("size"):
+                protected_ids.append(item_id)
+                continue
+            prov = _parse_json(item["provenance_json"])
+            has_prov_edits = any(
+                p.get("source") in ("seller_input", "ai_estimate") or p.get("sellerConfirmed")
+                for p in prov.values()
+                if isinstance(p, dict)
+            )
+            if has_prov_edits:
+                protected_ids.append(item_id)
+                continue
 
-        # Determine groupings
-        groupings: list[list[dict[str, Any]]] = []
-        if custom_groups is not None:
-            photo_by_id = {str(p["id"]): p for p in photo_records}
-            for group in custom_groups:
-                g = [photo_by_id[pid] for pid in group if pid in photo_by_id]
-                if g:
-                    groupings.append(g)
-            # Gather unassigned photos
-            assigned_ids = {str(p["id"]) for g in groupings for p in g}
-            unassigned = [p for p in photo_records if str(p["id"]) not in assigned_ids]
-            if unassigned:
-                # Keep unassigned in their own single-photo groups or unassigned
-                for p in unassigned:
-                    groupings.append([p])
-        else:
-            step = 3
-            if mode == "1":
-                step = 1
-            elif mode == "2":
-                step = 2
-            elif mode == "3":
-                step = 3
-            elif mode == "auto":
-                step = 3
+        if not protected_ids:
+            subs = db.execute(
+                """SELECT s.item_id FROM inventory_submissions s
+                   JOIN inventory_items i ON s.item_id = i.id
+                   WHERE i.batch_id = ?""",
+                (batch_id,),
+            ).fetchall()
+            if subs:
+                protected_ids.extend([str(s["item_id"]) for s in subs])
 
-            for i in range(0, len(photo_records), step):
-                groupings.append(photo_records[i : i + step])
+        return len(protected_ids) > 0, list(set(protected_ids))
 
-        # Delete existing items for this batch to cleanly re-create or re-assign
-        # Note: cascade removes items and dissociates photos (item_id SET NULL)
-        db.execute("DELETE FROM inventory_items WHERE batch_id = ?", (batch_id,))
 
-        created_items = []
-        for g_idx, group in enumerate(groupings):
+def _group_new_photos(
+    batch_id: str, seller_id: str, new_photos: list[dict[str, Any]], mode: str = "3"
+) -> list[dict[str, Any]]:
+    """Group newly uploaded photos into new items without modifying or deleting existing items."""
+    if not new_photos:
+        return []
+    step = 3
+    if mode == "1":
+        step = 1
+    elif mode == "2":
+        step = 2
+    elif mode == "3":
+        step = 3
+    elif mode == "auto":
+        step = 3
+
+    now = _now_iso()
+    created_items = []
+    with connect() as db:
+        for i in range(0, len(new_photos), step):
+            group = new_photos[i : i + step]
             item_id = str(uuid.uuid4())
             cover_photo = group[0] if group else None
-            cover_url = cover_photo["storage_url"] or cover_photo["preview_url"] if cover_photo else ""
+            cover_url = cover_photo.get("storageUrl") or cover_photo.get("previewUrl") or ""
 
-            # Check if group might be duplicate
-            filenames = [p["original_filename"] for p in group]
+            filenames = [p.get("originalFilename") or p.get("filename") or "" for p in group]
             has_duplicates = len(filenames) != len(set(filenames))
 
-            # Base empty listing JSON
             initial_listing = {
                 "title": "",
                 "price": "",
@@ -298,7 +315,7 @@ def apply_photo_grouping(
                 "cnote": "Pre-owned in good condition.",
                 "cid_condition": "3000",
                 "quantity": 1,
-                "pic": " ".join(filter(None, [p["storage_url"] or p["preview_url"] for p in group])),
+                "pic": " ".join(filter(None, [p.get("storageUrl") or p.get("previewUrl") for p in group])),
                 "coverUrl": cover_url,
                 "photoCount": len(group),
                 "notes": "Group flagged: duplicate photo filenames detected." if has_duplicates else "",
@@ -333,6 +350,179 @@ def apply_photo_grouping(
                 ),
             )
 
+            for p_pos, photo in enumerate(group):
+                is_cover = 1 if p_pos == 0 else 0
+                db.execute(
+                    """UPDATE inventory_item_photos
+                       SET item_id = ?, position = ?, is_cover = ?
+                       WHERE id = ?""",
+                    (item_id, p_pos, is_cover, photo["id"]),
+                )
+            created_items.append(item_id)
+
+    return list_batch_items(batch_id, seller_id)
+
+
+def apply_photo_grouping(
+    batch_id: str,
+    seller_id: str,
+    mode: str = "auto",
+    custom_groups: list[list[str]] | None = None,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    """Group photos in a batch into inventory items.
+    
+    mode can be '1', '2', '3', or 'auto'.
+    If custom_groups is given, each element is a list of photo IDs.
+    If the batch contains items with edits, analysis, approvals, or submissions,
+    regrouping requires force=True and preserves item data wherever possible.
+    """
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    get_batch(batch_id, seller_id)
+    now = _now_iso()
+
+    has_protected, protected_ids = check_batch_has_protected_items(batch_id)
+    if has_protected and not force:
+        raise ValueError(
+            f"Batch contains {len(protected_ids)} item(s) with edits, analysis, approvals, or submissions. "
+            "Regrouping requires explicit confirmation (force=True) to prevent accidental data loss."
+        )
+
+    with connect() as db:
+        all_photos = db.execute(
+            """SELECT * FROM inventory_item_photos
+               WHERE batch_id = ?
+               ORDER BY position ASC, created_at ASC""",
+            (batch_id,),
+        ).fetchall()
+        photo_records = [dict(p) for p in all_photos]
+
+        if not photo_records:
+            return []
+
+        photo_to_item_id = {str(p["id"]): str(p["item_id"]) for p in photo_records if p["item_id"]}
+
+        existing_items_rows = db.execute(
+            "SELECT * FROM inventory_items WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchall()
+        available_existing_items = {str(it["id"]): dict(it) for it in existing_items_rows}
+
+        # Determine groupings
+        groupings: list[list[dict[str, Any]]] = []
+        if custom_groups is not None:
+            photo_by_id = {str(p["id"]): p for p in photo_records}
+            for group in custom_groups:
+                g = [photo_by_id[pid] for pid in group if pid in photo_by_id]
+                if g:
+                    groupings.append(g)
+            # Gather unassigned photos
+            assigned_ids = {str(p["id"]) for g in groupings for p in g}
+            unassigned = [p for p in photo_records if str(p["id"]) not in assigned_ids]
+            if unassigned:
+                for p in unassigned:
+                    groupings.append([p])
+        else:
+            step = 3
+            if mode == "1":
+                step = 1
+            elif mode == "2":
+                step = 2
+            elif mode == "3":
+                step = 3
+            elif mode == "auto":
+                step = 3
+
+            for i in range(0, len(photo_records), step):
+                groupings.append(photo_records[i : i + step])
+
+        used_item_ids = set()
+        created_items = []
+
+        for g_idx, group in enumerate(groupings):
+            cover_photo = group[0] if group else None
+            cover_url = cover_photo["storage_url"] or cover_photo["preview_url"] if cover_photo else ""
+            filenames = [p["original_filename"] for p in group]
+            has_duplicates = len(filenames) != len(set(filenames))
+            pic_str = " ".join(filter(None, [p["storage_url"] or p["preview_url"] for p in group]))
+
+            # Check if this group can reuse an existing item to preserve edits/analysis
+            matched_item = None
+            for p in group:
+                pid = str(p["id"])
+                prev_item_id = photo_to_item_id.get(pid)
+                if prev_item_id and prev_item_id in available_existing_items and prev_item_id not in used_item_ids:
+                    matched_item = available_existing_items[prev_item_id]
+                    break
+
+            if matched_item:
+                item_id = str(matched_item["id"])
+                used_item_ids.add(item_id)
+                existing_listing = _parse_json(matched_item["listing_json"])
+                existing_listing["pic"] = pic_str
+                existing_listing["coverUrl"] = cover_url
+                existing_listing["photoCount"] = len(group)
+                if has_duplicates:
+                    notes = existing_listing.get("notes", "")
+                    if "duplicate photo filenames" not in notes:
+                        existing_listing["notes"] = (notes + " Group flagged: duplicate photo filenames detected.").strip()
+
+                validation = check_listing_rules(existing_listing, len(group), {})
+
+                db.execute(
+                    """UPDATE inventory_items
+                       SET listing_json = ?, validation_json = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (_json(existing_listing), _json(validation), now, item_id),
+                )
+            else:
+                item_id = str(uuid.uuid4())
+                initial_listing = {
+                    "title": "",
+                    "price": "",
+                    "cat": "",
+                    "cid": "",
+                    "brand": "",
+                    "size": "",
+                    "cnote": "Pre-owned in good condition.",
+                    "cid_condition": "3000",
+                    "quantity": 1,
+                    "pic": pic_str,
+                    "coverUrl": cover_url,
+                    "photoCount": len(group),
+                    "notes": "Group flagged: duplicate photo filenames detected." if has_duplicates else "",
+                }
+
+                initial_provenance = {
+                    "title": {"source": "missing", "confidence": "none", "evidence": "Unanalyzed", "sellerConfirmed": False},
+                    "price": {"source": "missing", "confidence": "none", "evidence": "Unanalyzed", "sellerConfirmed": False},
+                    "brand": {"source": "missing", "confidence": "none", "evidence": "Unanalyzed", "sellerConfirmed": False},
+                    "size": {"source": "missing", "confidence": "none", "evidence": "Unanalyzed", "sellerConfirmed": False},
+                    "cat": {"source": "missing", "confidence": "none", "evidence": "Unanalyzed", "sellerConfirmed": False},
+                }
+
+                validation = check_listing_rules(initial_listing, len(group), {})
+
+                db.execute(
+                    """INSERT INTO inventory_items(
+                        id, batch_id, seller_id, listing_json, provenance_json,
+                        workflow_status, validation_json, pricing_options_json,
+                        title_candidates_json, analysis_job_id, seller_confirmed,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'grouped', ?, '{}', '{}', '', 0, ?, ?)""",
+                    (
+                        item_id,
+                        batch_id,
+                        seller_id,
+                        _json(initial_listing),
+                        _json(initial_provenance),
+                        _json(validation),
+                        now,
+                        now,
+                    ),
+                )
+
             # Update photos for this item
             for p_pos, photo in enumerate(group):
                 is_cover = 1 if p_pos == 0 else 0
@@ -344,6 +534,11 @@ def apply_photo_grouping(
                 )
 
             created_items.append(item_id)
+
+        # Remove orphaned items that no longer have any photos assigned
+        for old_id in available_existing_items:
+            if old_id not in used_item_ids:
+                db.execute("DELETE FROM inventory_items WHERE id = ?", (old_id,))
 
     return list_batch_items(batch_id, seller_id)
 
