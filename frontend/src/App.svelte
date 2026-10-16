@@ -4,6 +4,7 @@
     import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayFeedTask, ebayOAuthProbeScopes, ebayOAuthStart, ebayOAuthStatus, photoStorageStatus, sendDraftFeed, startNvidiaAnalysis, uploadListingPhotos } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
+    import InventoryWorkspace from "$lib/components/InventoryWorkspace.svelte";
     import AuthGate from "$lib/components/AuthGate.svelte";
     import { supabase } from "$lib/supabase";
 
@@ -20,7 +21,7 @@
         dispatchTimeMax: "3"
     };
 
-    let tab = "analyze";
+    let tab = "workspace";
     let engine = "hosted";
     let files = [];
     let previews = [];
@@ -1102,6 +1103,7 @@
     </header>
 
     <nav class="tabs" aria-label="Main navigation">
+        <button class:on={tab === "workspace"} on:click={() => tab = "workspace"}>Workspace</button>
         <button class:on={tab === "commerce"} on:click={() => tab = "commerce"}>Dashboard</button>
         <button class:on={tab === "analyze"} on:click={() => tab = "analyze"}>Analyze</button>
         <button class:on={tab === "edit"} on:click={() => tab = "edit"}>Review</button>
@@ -1121,6 +1123,10 @@
         </div>
     {/if}
     {#if status}<div class="notice info">{status}</div>{/if}
+
+    {#if tab === "workspace"}
+        <InventoryWorkspace onSwitchToListingOptimization={() => tab = "commerce"} />
+    {/if}
 
     {#if tab === "analyze"}
         <section class="panel">

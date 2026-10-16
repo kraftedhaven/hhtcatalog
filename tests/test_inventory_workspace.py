@@ -228,6 +228,92 @@ class InventoryWorkspaceTests(unittest.TestCase):
             it = inventory_workspace.get_item(item_id, self.seller_id)
             self.assertEqual(it["workflowStatus"], "draft_submitted")
 
+    def test_flask_inventory_routes_end_to_end(self):
+        client = hht_app.app.test_client()
+        def authenticate():
+            # pyrefly: ignore[missing-import]
+            from flask import g
+            g.supabase_user = {"sub": self.auth_user_id}
+
+        with mock.patch("app.authenticate_request", side_effect=authenticate), \
+             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+
+            # 1. Create batch
+            res = client.post("/api/inventory/batches", json={"name": "API Batch", "groupingMode": "2"})
+            self.assertEqual(res.status_code, 201)
+            batch = res.get_json()["result"]
+            batch_id = batch["id"]
+
+            # 2. List batches
+            res = client.get("/api/inventory/batches")
+            self.assertEqual(res.status_code, 200)
+            self.assertTrue(any(b["id"] == batch_id for b in res.get_json()["result"]))
+
+            # 3. Register photos
+            res = client.post(f"/api/inventory/batches/{batch_id}/photos", json={
+                "photos": [
+                    {"filename": "p1.jpg", "previewUrl": "https://example.com/p1.jpg"},
+                    {"filename": "p2.jpg", "previewUrl": "https://example.com/p2.jpg"},
+                ]
+            })
+            self.assertEqual(res.status_code, 201)
+
+            # 4. List batch items
+            res = client.get(f"/api/inventory/batches/{batch_id}/items")
+            self.assertEqual(res.status_code, 200)
+            items = res.get_json()["result"]
+            self.assertEqual(len(items), 1)
+            item_id = items[0]["id"]
+
+            # 5. Patch item
+            res = client.patch(f"/api/inventory/items/{item_id}", json={
+                "title": "API Patched Vintage Jacket L",
+                "price": "39.99",
+                "size": "L",
+                "cat": "Jackets",
+                "brand": "Vintage",
+                "confirmAll": True,
+            })
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.get_json()["result"]["listing"]["title"], "API Patched Vintage Jacket L")
+
+            # 6. Validate item
+            res = client.post("/api/inventory/items/validate", json={"itemIds": [item_id]})
+            self.assertEqual(res.status_code, 200)
+            self.assertTrue(res.get_json()["result"]["results"][0]["passed"])
+
+            # 7. Approve item
+            res = client.post("/api/inventory/items/approve", json={"itemIds": [item_id]})
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.get_json()["result"]["approvedCount"], 1)
+
+            # 8. Submit drafts (mock feed upload)
+            with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "feed-99", "status": "IN_PROCESS"}):
+                res = client.post("/api/inventory/items/submit-drafts", json={"itemIds": [item_id]})
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(res.get_json()["result"]["feedTaskId"], "feed-99")
+
+            # 9. Get submission status
+            with mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value={"status": "COMPLETED"}):
+                res = client.get(f"/api/inventory/items/{item_id}/submission")
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(res.get_json()["result"]["status"], "completed")
+
+    def test_no_live_ebay_mutations_called(self):
+        """Confirm that EBAY_MUTATIONS_ENABLED remains false and live mutation endpoints are forbidden."""
+        self.assertFalse(commerce_agent.ebay_mutations_enabled())
+        client = hht_app.app.test_client()
+        def authenticate():
+            # pyrefly: ignore[missing-import]
+            from flask import g
+            g.supabase_user = {"sub": self.auth_user_id}
+
+        with mock.patch("app.authenticate_request", side_effect=authenticate), \
+             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+            res = client.post("/api/ebay/drafts", json={"item": {"title": "Test"}})
+            self.assertEqual(res.status_code, 403)
+            self.assertIn("mutations are disabled", res.get_json()["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

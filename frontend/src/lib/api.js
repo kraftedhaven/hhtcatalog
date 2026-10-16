@@ -354,3 +354,127 @@ export function downloadJSON(data, filename = 'hht-listings-backup.json') {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 }
+
+// ---------------------------------------------------------------------------
+// Inventory Workspace Client APIs
+// ---------------------------------------------------------------------------
+
+export async function inventoryCreateBatch(name = '', groupingMode = 'auto') {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, groupingMode }),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryListBatches() {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches`);
+    const body = await parseResponse(res);
+    return body.result || [];
+}
+
+export async function inventoryGetBatch(batchId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}`);
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryUploadBatchPhotos(batchId, files = [], photos = []) {
+    if (files.length > 0) {
+        const form = new FormData();
+        for (const file of files) form.append('files', file);
+        const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/photos`, {
+            method: 'POST',
+            body: form,
+        });
+        const body = await parseResponse(res);
+        return body.result || body;
+    }
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/photos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photos }),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryUpdatePhotoGrouping(batchId, { mode = 'auto', customGroups = null } = {}) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/photos/groups`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, customGroups }),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryListBatchItems(batchId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/items`);
+    const body = await parseResponse(res);
+    return body.result || [];
+}
+
+export async function inventoryAnalyzeBatch(batchId, itemIds = null) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds }),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryGetItem(itemId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}`);
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryPatchItem(itemId, patchData) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patchData),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryValidateItems(itemIds) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/validate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds }),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryApproveItems(itemIds) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds }),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventorySubmitDrafts(itemIds) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/submit-drafts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds }),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryGetItemSubmission(itemId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}/submission`);
+    const body = await parseResponse(res);
+    return body.result || body;
+}
