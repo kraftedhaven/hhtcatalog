@@ -341,6 +341,7 @@ class InventoryWorkspaceTests(unittest.TestCase):
         # Check API endpoint returns 409
         client = hht_app.app.test_client()
         def authenticate():
+            # pyrefly: ignore[missing-import]
             from flask import g
             g.supabase_user = {"sub": self.auth_user_id}
 

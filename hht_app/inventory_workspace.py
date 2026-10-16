@@ -250,11 +250,11 @@ def check_batch_has_protected_items(batch_id: str) -> tuple[bool, list[str]]:
             if bool(item["seller_confirmed"]):
                 protected_ids.append(item_id)
                 continue
-            listing = _parse_json(item["listing_json"])
+            listing = _decode(item["listing_json"], {})
             if listing.get("title") or listing.get("price") or listing.get("brand") or listing.get("size"):
                 protected_ids.append(item_id)
                 continue
-            prov = _parse_json(item["provenance_json"])
+            prov = _decode(item["provenance_json"], {})
             has_prov_edits = any(
                 p.get("source") in ("seller_input", "ai_estimate") or p.get("sellerConfirmed")
                 for p in prov.values()
@@ -459,7 +459,7 @@ def apply_photo_grouping(
             if matched_item:
                 item_id = str(matched_item["id"])
                 used_item_ids.add(item_id)
-                existing_listing = _parse_json(matched_item["listing_json"])
+                existing_listing = _decode(matched_item["listing_json"], {})
                 existing_listing["pic"] = pic_str
                 existing_listing["coverUrl"] = cover_url
                 existing_listing["photoCount"] = len(group)
