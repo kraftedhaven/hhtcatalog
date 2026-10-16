@@ -1310,13 +1310,14 @@
 
 <!-- Upload & Grouping Modal Drawer -->
 {#if isUploadOpen}
-    <div
-        class="modal-backdrop"
-        role="presentation"
-        on:click={(e) => {
-            if (e.target === e.currentTarget) closeUploadModal();
-        }}
-    >
+    <div class="modal-backdrop">
+        <button
+            type="button"
+            class="modal-backdrop-btn"
+            aria-label="Close modal overlay"
+            tabindex="-1"
+            on:click={closeUploadModal}
+        />
         <div
             class="modal-box"
             role="dialog"
@@ -2018,7 +2019,21 @@
         padding: 20px;
     }
 
+    .modal-backdrop-btn {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        border: none;
+        cursor: default;
+        padding: 0;
+        margin: 0;
+    }
+
     .modal-box {
+        position: relative;
+        z-index: 1;
         background: #ffffff;
         border-radius: 12px;
         width: min(100%, 600px);
