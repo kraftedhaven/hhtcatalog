@@ -191,7 +191,7 @@ def register_batch_photos(
                 """INSERT INTO inventory_item_photos(
                     id, batch_id, item_id, photo_asset_id, original_filename,
                     preview_url, storage_url, position, is_cover, created_at
-                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 0, ?)""",
+                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     photo_id,
                     batch_id,
@@ -200,6 +200,7 @@ def register_batch_photos(
                     preview_url,
                     storage_url,
                     start_pos + idx,
+                    False,
                     now,
                 ),
             )
@@ -337,7 +338,7 @@ def _group_new_photos(
                     workflow_status, validation_json, pricing_options_json,
                     title_candidates_json, analysis_job_id, seller_confirmed,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'grouped', ?, '{}', '{}', '', 0, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, 'grouped', ?, '{}', '{}', '', ?, ?, ?)""",
                 (
                     item_id,
                     batch_id,
@@ -345,13 +346,14 @@ def _group_new_photos(
                     _json(initial_listing),
                     _json(initial_provenance),
                     _json(validation),
+                    False,
                     now,
                     now,
                 ),
             )
 
             for p_pos, photo in enumerate(group):
-                is_cover = 1 if p_pos == 0 else 0
+                is_cover = bool(p_pos == 0)
                 db.execute(
                     """UPDATE inventory_item_photos
                        SET item_id = ?, position = ?, is_cover = ?
@@ -510,7 +512,7 @@ def apply_photo_grouping(
                         workflow_status, validation_json, pricing_options_json,
                         title_candidates_json, analysis_job_id, seller_confirmed,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'grouped', ?, '{}', '{}', '', 0, ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, 'grouped', ?, '{}', '{}', '', ?, ?, ?)""",
                     (
                         item_id,
                         batch_id,
@@ -518,6 +520,7 @@ def apply_photo_grouping(
                         _json(initial_listing),
                         _json(initial_provenance),
                         _json(validation),
+                        False,
                         now,
                         now,
                     ),
@@ -525,7 +528,7 @@ def apply_photo_grouping(
 
             # Update photos for this item
             for p_pos, photo in enumerate(group):
-                is_cover = 1 if p_pos == 0 else 0
+                is_cover = bool(p_pos == 0)
                 db.execute(
                     """UPDATE inventory_item_photos
                        SET item_id = ?, position = ?, is_cover = ?
@@ -891,9 +894,9 @@ def approve_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
         with connect() as db:
             db.execute(
                 """UPDATE inventory_items
-                   SET workflow_status = 'approved', seller_confirmed = 1, updated_at = ?
+                   SET workflow_status = 'approved', seller_confirmed = ?, updated_at = ?
                    WHERE id = ? AND seller_id = ?""",
-                (now, item_id, seller_id),
+                (True, now, item_id, seller_id),
             )
         approved.append(item_id)
 

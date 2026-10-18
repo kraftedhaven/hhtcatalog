@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview --port 4173",
     "format": "prettier --write .",
+    "test": "node --test src/lib",
     "prod:build": "vite build",
     "prod:preview": "vite preview"
   },

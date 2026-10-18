@@ -17,6 +17,11 @@
         inventoryGetItemSubmission,
         ebayCategorySuggestions,
     } from "$lib/api";
+    import {
+        formatBytes,
+        prepareUploadBatch,
+        partitionUploadChunks,
+    } from "$lib/image-compressor";
 
     export let onSwitchToListingOptimization = () => {};
 
@@ -63,6 +68,8 @@
     let uploadPreviews = [];
     let uploadGroupingMode = "3"; // 1, 2, 3, auto
     let isUploading = false;
+    let uploadPhase = "idle"; // idle, compressing, uploading
+    let uploadPhaseMessage = "";
     let uploadError = "";
 
     // Global action states
@@ -430,13 +437,20 @@
         uploadFiles = [];
         uploadPreviews = [];
         uploadError = "";
+        uploadPhase = "idle";
+        uploadPhaseMessage = "";
         isUploadOpen = true;
     }
 
     function closeUploadModal() {
         isUploadOpen = false;
+        uploadPreviews.forEach((p) => {
+            if (p.url) URL.revokeObjectURL(p.url);
+        });
         uploadFiles = [];
         uploadPreviews = [];
+        uploadPhase = "idle";
+        uploadPhaseMessage = "";
     }
 
     function handleFilesSelected(event) {
@@ -458,10 +472,17 @@
         }
         uploadFiles = [...uploadFiles, ...imageFiles];
         const newPreviews = imageFiles.map((file) => ({
-            id: `${file.name}-${file.size}-${Date.now()}`,
+            id: `${file.name}-${file.size}-${Date.now()}-${Math.random()}`,
             file,
             name: file.name,
-            size: file.size,
+            originalSize: file.size,
+            formattedOriginalSize: formatBytes(file.size),
+            uploadSize: null,
+            formattedUploadSize:
+                file.size > 8 * 1024 * 1024
+                    ? "Auto-compressing (<8MB)"
+                    : formatBytes(file.size),
+            isOversized: file.size > 8 * 1024 * 1024,
             url: URL.createObjectURL(file),
         }));
         uploadPreviews = [...uploadPreviews, ...newPreviews];
@@ -475,16 +496,67 @@
         }
         isUploading = true;
         uploadError = "";
+        uploadPhase = "compressing";
+        uploadPhaseMessage = "";
+
         try {
-            await inventoryUploadBatchPhotos(selectedBatchId, uploadFiles);
+            // Partition into bounded chunks matching grouping mode to ensure request body stays under limit
+            const chunks = partitionUploadChunks(
+                uploadFiles,
+                uploadGroupingMode,
+            );
+            for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
+                const chunk = chunks[cIdx];
+                uploadPhase = "compressing";
+                uploadPhaseMessage =
+                    chunks.length > 1
+                        ? `Compressing batch ${cIdx + 1} of ${chunks.length}...`
+                        : `Compressing ${chunk.length} photo(s)...`;
+
+                // Compress in browser before sending FormData
+                const prepared = await prepareUploadBatch(chunk, {
+                    onProgress: (p) => {
+                        uploadPhaseMessage = `Compressing ${p.fileName} (${p.current} of ${p.total})...`;
+                    },
+                });
+
+                // Update preview cards with exact compressed sizes
+                for (const item of prepared.items) {
+                    const prev = uploadPreviews.find(
+                        (p) => p.name === item.name,
+                    );
+                    if (prev) {
+                        prev.uploadSize = item.compressedSize;
+                        prev.formattedUploadSize = formatBytes(
+                            item.compressedSize,
+                        );
+                    }
+                }
+                uploadPreviews = [...uploadPreviews];
+
+                // Upload chunk
+                uploadPhase = "uploading";
+                uploadPhaseMessage =
+                    chunks.length > 1
+                        ? `Uploading batch ${cIdx + 1} of ${chunks.length} (${formatBytes(prepared.totalCompressedSize)})...`
+                        : `Uploading ${chunk.length} photo(s) (${formatBytes(prepared.totalCompressedSize)})...`;
+
+                await inventoryUploadBatchPhotos(
+                    selectedBatchId,
+                    prepared.files,
+                );
+            }
+
             // Refresh items (backend handles initial grouping or safely appends new item groups without touching existing items)
             items = await inventoryListBatchItems(selectedBatchId);
             closeUploadModal();
-            globalStatus = `Uploaded ${uploadFiles.length} photo(s) and updated item groups.`;
+            globalStatus = `Successfully uploaded ${uploadFiles.length} photo(s) (under 10MB limit) and updated item groups.`;
         } catch (err) {
             uploadError = err.message || "Failed to upload and group photos.";
         } finally {
             isUploading = false;
+            uploadPhase = "idle";
+            uploadPhaseMessage = "";
         }
     }
 
@@ -1455,7 +1527,7 @@
                             Click to choose or drag images here
                         </p>
                         <p class="text-xs text-slate-500 mt-1">
-                            Supports JPEG, PNG, WebP, HEIC up to 12MB each
+                            Supports JPEG, PNG, WebP, HEIC. Large photos are automatically compressed before upload (max 10MB request).
                         </p>
                     </label>
                 </div>
@@ -1464,37 +1536,80 @@
                 {#if uploadPreviews.length > 0}
                     <div class="mt-4">
                         <div class="flex justify-between items-center mb-2">
-                            <span class="text-xs font-bold text-slate-700"
-                                >{uploadPreviews.length} photo(s) selected</span
-                            >
+                            <div>
+                                <span class="text-xs font-bold text-slate-700"
+                                    >{uploadPreviews.length} photo(s) selected</span
+                                >
+                                <span class="text-[11px] text-slate-500 ml-2">
+                                    Total original: {formatBytes(
+                                        uploadPreviews.reduce(
+                                            (acc, p) => acc + (p.originalSize || 0),
+                                            0,
+                                        ),
+                                    )}
+                                </span>
+                            </div>
                             <button
                                 class="text-xs text-rose-600 font-bold"
                                 on:click={() => {
+                                    uploadPreviews.forEach((p) => {
+                                        if (p.url) URL.revokeObjectURL(p.url);
+                                    });
                                     uploadFiles = [];
                                     uploadPreviews = [];
-                                }}>Clear</button
+                                }}
+                                disabled={isUploading}>Clear</button
                             >
                         </div>
                         <div
-                            class="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-48 overflow-y-auto p-1 border rounded-lg"
+                            class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5 max-h-56 overflow-y-auto p-2 border border-slate-200 rounded-lg bg-slate-50/50"
                         >
                             {#each uploadPreviews as prev, idx}
                                 <div
-                                    class="relative group aspect-square rounded overflow-hidden border"
+                                    class="relative group rounded-lg overflow-hidden border border-slate-200 bg-white p-1.5 shadow-xs flex flex-col gap-1.5"
                                 >
-                                    <img
-                                        src={prev.url}
-                                        alt={prev.name}
-                                        class="w-full h-full object-cover"
-                                    />
-                                    <span
-                                        class="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1 rounded"
-                                    >
-                                        {idx + 1}
-                                    </span>
+                                    <div class="relative aspect-video rounded overflow-hidden bg-slate-100">
+                                        <img
+                                            src={prev.url}
+                                            alt={prev.name}
+                                            class="w-full h-full object-cover"
+                                        />
+                                        <span
+                                            class="absolute top-1 left-1 bg-black/70 text-white text-[10px] font-bold px-1.5 py-0.5 rounded"
+                                        >
+                                            #{idx + 1}
+                                        </span>
+                                        {#if prev.isOversized}
+                                            <span
+                                                class="absolute top-1 right-1 bg-amber-500/90 text-white text-[9px] font-bold px-1 rounded"
+                                                title="Over 8MB - will be automatically compressed before upload"
+                                            >
+                                                Auto-compress
+                                            </span>
+                                        {/if}
+                                    </div>
+                                    <div class="px-0.5">
+                                        <p class="text-[11px] font-medium text-slate-800 truncate" title={prev.name}>
+                                            {prev.name}
+                                        </p>
+                                        <div class="flex items-center justify-between text-[10px] text-slate-500 mt-0.5">
+                                            <span>Orig: {prev.formattedOriginalSize}</span>
+                                            <span class="font-semibold {prev.uploadSize ? 'text-emerald-700' : 'text-slate-600'}">
+                                                {prev.uploadSize ? `Upload: ${prev.formattedUploadSize}` : prev.formattedUploadSize}
+                                            </span>
+                                        </div>
+                                    </div>
                                 </div>
                             {/each}
                         </div>
+                    </div>
+                {/if}
+
+                {#if isUploading}
+                    <div class="mt-3 p-2.5 rounded-lg bg-sky-50 border border-sky-200 text-xs text-sky-800 flex items-center gap-2">
+                        <span class="animate-spin">⏳</span>
+                        <span class="font-semibold">{uploadPhase === "compressing" ? "Compressing photos..." : "Uploading photos..."}</span>
+                        <span class="text-sky-600">{uploadPhaseMessage}</span>
                     </div>
                 {/if}
 
@@ -1518,9 +1633,15 @@
                     on:click={submitUploadAndGroup}
                     disabled={isUploading || uploadFiles.length === 0}
                 >
-                    {isUploading
-                        ? "Uploading & Grouping..."
-                        : `Create Groups (${uploadFiles.length} photos)`}
+                    {#if uploadPhase === "compressing"}
+                        Compressing...
+                    {:else if uploadPhase === "uploading"}
+                        Uploading...
+                    {:else if isUploading}
+                        Uploading & Grouping...
+                    {:else}
+                        Create Groups ({uploadFiles.length} photos)
+                    {/if}
                 </button>
             </div>
         </div>
