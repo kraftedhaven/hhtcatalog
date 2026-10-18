@@ -1079,6 +1079,76 @@ def prepopulate_item_from_analysis(
     return get_item(item_id, seller_id)
 
 
+def enrich_item_from_research_clues(
+    item_id: str, seller_id: str, clues: dict[str, Any]
+) -> dict[str, Any]:
+    """Generate reviewable title and price suggestions from seller research.
+
+    This does not create an analysis job or an eBay draft. Clues remain
+    seller-provided and unconfirmed until the seller confirms the fields.
+    """
+    item = get_item(item_id, seller_id)
+    listing = dict(item["listing"])
+    provenance = dict(item["provenance"])
+    clean = {
+        str(key): str(value or "").strip()[:500]
+        for key, value in (clues or {}).items()
+        if str(value or "").strip()
+    }
+    if not clean:
+        raise ValueError("Enter at least one research clue before generating suggestions.")
+    listing["researchClues"] = clean
+    field_map = {
+        "observedTitle": "title", "brand": "brand", "model": "model",
+        "itemType": "type", "category": "cat", "size": "size",
+        "color": "color", "material": "mat", "pattern": "pat",
+        "theme": "theme", "condition": "cnote",
+    }
+    for clue_key, listing_key in field_map.items():
+        value = clean.get(clue_key)
+        if value:
+            listing[listing_key] = value
+            provenance[listing_key] = {
+                "source": "seller_input",
+                "confidence": "high",
+                "evidence": "Seller-provided research clue; verify against the item.",
+                "sellerConfirmed": False,
+            }
+    comparable = clean.get("comparablePrice", "")
+    price_match = re.search(r"\d+(?:[.,]\d{1,2})?", comparable)
+    comparable_price = float(price_match.group(0).replace(",", "")) if price_match else None
+    title_input = {**listing, "sellerEditedTitle": False, "sellerEditedMetadata": False}
+    title_plan = optimize_title(title_input)
+    title_candidates = title_plan.get("candidates", {})
+    if title_plan.get("title"):
+        listing["title"] = title_plan["title"]
+        provenance["title"] = {
+            "source": "ai_estimate",
+            "confidence": title_plan.get("confidence", "medium"),
+            "evidence": "Generated from seller-provided research clues; verify every attribute.",
+            "sellerConfirmed": False,
+        }
+    pricing_rec = pricing_recommendation(listing)
+    base_price = float(pricing_rec["recommendedPrice"]) if pricing_rec.get("recommendedPrice") else comparable_price
+    pricing_options: dict[str, Any] = {}
+    if base_price and base_price > 0:
+        pricing_options = {
+            "quick_sale": {"price": round(base_price * 0.85, 2), "label": "Quick sale", "confidence": "medium", "reason": "Below the supplied/recommended reference for faster sell-through."},
+            "balanced": {"price": round(base_price, 2), "label": "Balanced", "confidence": "medium", "reason": "Centered on the supplied/recommended reference."},
+            "premium": {"price": round(base_price * 1.15, 2), "label": "Premium", "confidence": "low", "reason": "Higher asking price; expect a longer sales cycle."},
+        }
+    validation = check_listing_rules(listing, item["photoCount"], {})
+    now = _now_iso()
+    with connect() as db:
+        db.execute(
+            """UPDATE inventory_items SET listing_json=?, provenance_json=?, validation_json=?,
+               pricing_options_json=?, title_candidates_json=?, workflow_status='needs_review', updated_at=?
+               WHERE id=? AND seller_id=?""",
+            (_json(listing), _json(provenance), _json(validation), _json(pricing_options), _json(title_candidates), now, item_id, seller_id),
+        )
+    return get_item(item_id, seller_id)
+
+
 def start_workspace_analysis(
     batch_id: str, seller_id: str, item_ids: list[str] | None = None
 ) -> dict[str, Any]:

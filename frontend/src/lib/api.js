@@ -443,6 +443,16 @@ export async function inventoryPatchItem(itemId, patchData) {
     return body.result || body;
 }
 
+export async function inventoryEnrichFromResearch(itemId, clues) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}/research`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clues }),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
 export async function inventoryValidateItems(itemIds) {
     const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/validate`, {
         method: 'POST',

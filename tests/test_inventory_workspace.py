@@ -135,6 +135,30 @@ class InventoryWorkspaceTests(unittest.TestCase):
         self.assertEqual(populated["provenance"]["price"]["source"], "seller_input")
         self.assertTrue(populated["provenance"]["price"]["sellerConfirmed"])
 
+    def test_research_clues_generate_suggestions_without_ebay_submission(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Research Clues", grouping_mode="1")
+        inventory_workspace.register_batch_photos(
+            batch["id"], self.seller_id,
+            [{"filename": "jersey.jpg", "previewUrl": "https://example.com/j.jpg"}],
+        )
+        item = inventory_workspace.list_batch_items(batch["id"], self.seller_id)[0]
+        enriched = inventory_workspace.enrich_item_from_research_clues(
+            item["id"], self.seller_id,
+            {
+                "observedTitle": "Vintage Ohio State Buckeyes Silver Jersey Number 12",
+                "itemType": "Football Jersey",
+                "model": "Number 12",
+                "color": "Silver",
+                "comparablePrice": "$54.99",
+            },
+        )
+        self.assertTrue(enriched["titleCandidates"])
+        self.assertTrue(all(len(v["title"]) <= 80 for v in enriched["titleCandidates"].values()))
+        self.assertIn("quick_sale", enriched["pricingOptions"])
+        self.assertEqual(enriched["listing"]["researchClues"]["comparablePrice"], "$54.99")
+        self.assertEqual(enriched["provenance"]["type"]["source"], "seller_input")
+        self.assertEqual(enriched["workflowStatus"], "needs_review")
+
     def test_validation_and_approval_gating(self):
         batch = inventory_workspace.create_batch(self.seller_id, name="Approval Test", grouping_mode="1")
         inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
@@ -418,4 +442,3 @@ class InventoryWorkspaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

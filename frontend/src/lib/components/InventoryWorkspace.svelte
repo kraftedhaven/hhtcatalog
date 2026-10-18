@@ -10,6 +10,7 @@
         inventoryAnalyzeBatch,
         inventoryGetItem,
         inventoryPatchItem,
+        inventoryEnrichFromResearch,
         inventoryValidateItems,
         inventoryApproveItems,
         inventorySubmitDrafts,
@@ -33,6 +34,17 @@
     let selectedItemIds = new Set();
     let inspectingItem = null;
     let inspectingItemId = "";
+    let researchClues = {
+        observedTitle: "",
+        brand: "",
+        itemType: "",
+        model: "",
+        category: "",
+        size: "",
+        color: "",
+        comparablePrice: "",
+    };
+    let researchLoading = false;
 
     // Filters and sorting
     let searchQuery = "";
@@ -288,11 +300,33 @@
     function openItemInspector(item) {
         inspectingItemId = item.id;
         inspectingItem = item;
+        researchClues = {
+            ...researchClues,
+            ...(item.listing?.researchClues || {}),
+        };
     }
 
     function closeItemInspector() {
         inspectingItemId = "";
         inspectingItem = null;
+    }
+
+    async function generateResearchSuggestions() {
+        if (!inspectingItem) return;
+        researchLoading = true;
+        globalError = "";
+        try {
+            const updated = await inventoryEnrichFromResearch(inspectingItem.id, researchClues);
+            const index = items.findIndex((item) => item.id === updated.id);
+            if (index !== -1) items[index] = updated;
+            items = [...items];
+            inspectingItem = updated;
+            globalStatus = "Research clues saved. Title candidates and price options are ready for review.";
+        } catch (err) {
+            globalError = err.message || "Could not generate research suggestions.";
+        } finally {
+            researchLoading = false;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1158,6 +1192,34 @@
                         </div>
                     </div>
 
+                    <!-- Seller research clues -->
+                    <div class="inspector-section">
+                        <h4 class="inspector-section-title">Research clues</h4>
+                        <p class="text-xs text-slate-500 mb-3">
+                            Paste factual clues from a comparable listing or label. HHT saves them as seller input and generates suggestions; verify every field before approval.
+                        </p>
+                        <textarea
+                            class="w-full text-xs p-2 border rounded-md h-20 text-slate-700 mb-2"
+                            placeholder="Paste an observed title or product details..."
+                            bind:value={researchClues.observedTitle}
+                        ></textarea>
+                        <div class="form-grid compact">
+                            <label class="field"><span>Brand</span><input bind:value={researchClues.brand} placeholder="e.g. Nike" /></label>
+                            <label class="field"><span>Item type</span><input bind:value={researchClues.itemType} placeholder="e.g. football jersey" /></label>
+                            <label class="field"><span>Model / number</span><input bind:value={researchClues.model} placeholder="e.g. #12" /></label>
+                            <label class="field"><span>Category</span><input bind:value={researchClues.category} placeholder="e.g. sports jersey" /></label>
+                            <label class="field"><span>Size</span><input bind:value={researchClues.size} placeholder="e.g. Men's Large" /></label>
+                            <label class="field"><span>Comparable price</span><input type="text" bind:value={researchClues.comparablePrice} placeholder="e.g. 54.99" /></label>
+                        </div>
+                        <button
+                            type="button"
+                            class="action-btn-primary mt-3"
+                            on:click={generateResearchSuggestions}
+                            disabled={researchLoading}
+                        >
+                            {researchLoading ? "Generating..." : "Generate title & price options"}
+                        </button>
+                    </div>
                     <!-- Provenance Breakdown for Key Fields -->
                     <div class="inspector-section">
                         <div class="flex items-center justify-between mb-2">

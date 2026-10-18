@@ -991,6 +991,24 @@ def inventory_item_detail(item_id):
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/api/inventory/items/<item_id>/research", methods=["POST"])
+def inventory_item_research(item_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    clues = body.get("clues") or body
+    if not isinstance(clues, dict):
+        return jsonify({"error": "Research clues must be an object."}), 400
+    try:
+        item = inventory_workspace.enrich_item_from_research_clues(item_id, str(seller_id), clues)
+        return jsonify({"result": item})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/inventory/items/validate", methods=["POST"])
 def inventory_items_validate():
     seller_id = getattr(g, "seller_id", None)
