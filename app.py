@@ -723,7 +723,11 @@ def commerce_audit_start():
 
 @app.route("/api/commerce/recommendations", methods=["GET"])
 def commerce_recommendations():
-    return jsonify({"result": commerce_agent.recommendations(request.args.get("status", ""), getattr(g, "seller_id", None))})
+    try:
+        return jsonify({"result": commerce_agent.recommendations(request.args.get("status", ""), getattr(g, "seller_id", None))})
+    except Exception:
+        app.logger.exception("Failed to load commerce recommendations")
+        return jsonify({"error": "Commerce recommendations are temporarily unavailable. Verify DATABASE_URL and database connectivity."}), 503
 
 
 @app.route("/api/commerce/recommendations/page", methods=["GET"])
@@ -732,9 +736,11 @@ def commerce_recommendations_page():
     args = [request.args.get("status", ""), request.args.get("page", 1), request.args.get("pageSize", 25)]
     if seller_id:
         args.append(seller_id)
-    return jsonify({"result": commerce_agent.recommendations_page(
-        *args
-    )})
+    try:
+        return jsonify({"result": commerce_agent.recommendations_page(*args)})
+    except Exception:
+        app.logger.exception("Failed to load commerce recommendations page")
+        return jsonify({"error": "Commerce recommendations page is temporarily unavailable."}), 503
 
 
 @app.route("/api/commerce/recommendations/<recommendation_id>", methods=["GET"])
@@ -811,7 +817,11 @@ def commerce_rollback(action_id):
 
 @app.route("/api/commerce/history", methods=["GET"])
 def commerce_history():
-    return jsonify({"result": commerce_agent.history(getattr(g, "seller_id", None))})
+    try:
+        return jsonify({"result": commerce_agent.history(getattr(g, "seller_id", None))})
+    except Exception:
+        app.logger.exception("Failed to load commerce history")
+        return jsonify({"error": "Commerce history is temporarily unavailable."}), 503
 
 
 @app.route("/api/commerce/settings", methods=["GET", "PUT"])

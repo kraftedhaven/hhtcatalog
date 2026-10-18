@@ -20,6 +20,8 @@
         downloadJSON,
     } from "$lib/api";
 
+    export let onSwitchToWorkspace = () => {};
+
     const FIELD_LABELS = {
         title: "Title",
         price: "Price",
@@ -618,6 +620,24 @@
 <svelte:window on:keydown={handleDialogKeydown} />
 
 <section class="commerce-agent">
+    <div class="subtab-toggle-container">
+        <div class="subtab-pill-box">
+            <button
+                type="button"
+                class="subtab-pill"
+                on:click={onSwitchToWorkspace}
+            >
+                New inventory
+            </button>
+            <button
+                type="button"
+                class="subtab-pill active"
+            >
+                Listing optimization
+            </button>
+        </div>
+    </div>
+
     <div class="commerce-head">
         <div>
             <p class="eyebrow">COMMERCE AGENT</p>
@@ -1028,3 +1048,39 @@
         </div>
     {/if}
 </section>
+
+<style>
+    .subtab-toggle-container {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        margin-bottom: 16px;
+    }
+    .subtab-pill-box {
+        display: inline-flex;
+        background: #f1f5f9;
+        padding: 4px;
+        border-radius: 999px;
+        gap: 4px;
+    }
+    .subtab-pill {
+        border: none;
+        background: transparent;
+        color: #64748b;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 6px 18px;
+        border-radius: 999px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        min-height: auto;
+    }
+    .subtab-pill:hover:not(.active) {
+        color: #0f172a;
+    }
+    .subtab-pill.active {
+        background: #ffffff;
+        color: #0f172a;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    }
+</style>

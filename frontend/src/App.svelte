@@ -1,7 +1,7 @@
 <script>
     import { onMount } from "svelte";
     import "./app.css";
-    import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayFeedTask, ebayOAuthProbeScopes, ebayOAuthStart, ebayOAuthStatus, photoStorageStatus, sendDraftFeed, startNvidiaAnalysis, uploadListingPhotos } from "$lib/api";
+    import { analyzeImages, commerceApproveRotation, commerceJob, commercePerformance, commerceStartFulfillmentSync, commerceStartPerformanceSync, downloadCSV, downloadDraftCSV, downloadJSON, ebayCategoryAspects, ebayCategorySuggestions, ebayFeedTask, ebayOAuthProbeScopes, ebayOAuthStart, ebayOAuthStatus, inventoryPatchItem, photoStorageStatus, sendDraftFeed, startNvidiaAnalysis, uploadListingPhotos } from "$lib/api";
     import { applyClientItemRules, CATEGORY_OPTIONS, EMPTY_ITEM } from "$lib/ebay";
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
     import InventoryWorkspace from "$lib/components/InventoryWorkspace.svelte";
@@ -98,6 +98,19 @@
     $: selectedStagingPhotos = stagingPhotos.filter((photo) => selectedPhotoIds.includes(photo.id) && !photo.processed);
 
     onMount(() => {
+        const now = Date.now();
+        // Reconcile and recover stale jobs stuck in queued or running states
+        analysisJobs = analysisJobs.map((job) => {
+            const ageMs = job.createdAt ? (now - new Date(job.createdAt).getTime()) : 600000;
+            if (["queued", "running"].includes(job.status) && ageMs > 300000) {
+                return {
+                    ...job,
+                    status: "failed",
+                    error: "Analysis timed out or backend worker restarted.",
+                };
+            }
+            return job;
+        });
         updateFailedJobsCount();
         for (const job of analysisJobs.filter((entry) => ["queued", "running", "auditing"].includes(entry.status))) {
             void monitorListingAnalysis(job.jobId, []);
@@ -180,6 +193,67 @@
         updateFailedJobsCount();
         status = `Cleared ${failedIds.length} failed job${failedIds.length === 1 ? "" : "s"}.`;
         error = "";
+    }
+
+    function clearAllJobs() {
+        if (!analysisJobs.length) return;
+        const confirmed = window.confirm(`Clear all ${analysisJobs.length} analysis job record(s) from local browser history?`);
+        if (!confirmed) return;
+        analysisJobs = [];
+        analysisSourceFiles.clear();
+        updateFailedJobsCount();
+        status = "Cleared all analysis jobs.";
+        error = "";
+    }
+
+    function openWorkspaceItemInReview(workspaceItem) {
+        if (!workspaceItem) return;
+        const listing = workspaceItem.listing || {};
+        const photoUrls = (workspaceItem.photos || []).map((p) => p.previewUrl || p.storageUrl).filter(Boolean);
+        item = normalizeForForm({
+            ...emptyItem,
+            ...listing,
+            pic: photoUrls.join(" "),
+            inventoryItemId: workspaceItem.id,
+            inventoryBatchId: workspaceItem.batchId,
+            photoAssets: (workspaceItem.photos || []).map((p) => ({
+                id: p.photoAssetId,
+                ebayUrl: p.storageUrl || p.previewUrl,
+            })),
+        });
+        tab = "edit";
+        status = `Loaded workspace item ${workspaceItem.id.slice(0, 8)} into Review form.`;
+    }
+
+    async function saveReviewItemToWorkspace() {
+        if (!item.inventoryItemId) return;
+        loading = true;
+        try {
+            await inventoryPatchItem(item.inventoryItemId, {
+                title: item.title,
+                price: item.price,
+                cat: item.cat,
+                brand: item.brand,
+                size: item.size,
+                color: item.color,
+                dept: item.dept,
+                type: item.type,
+                model: item.model,
+                style: item.style,
+                notes: item.notes,
+                desc: item.desc,
+                cid: item.cid,
+                cnote: item.cnote,
+                mat: item.mat,
+                madeIn: item.madeIn,
+                sellerConfirmed: true,
+            });
+            status = "Item successfully updated in Inventory Workspace database.";
+        } catch (err) {
+            error = err?.message || "Failed to update item in workspace database.";
+        } finally {
+            loading = false;
+        }
     }
 
     async function retryAnalysisJob(jobId) {
@@ -387,7 +461,13 @@
                 updateFailedJobsCount();
                 if (item.analysisJobId === jobId && withJobId) item = normalizeForForm(withJobId);
                 if (job.status === "failed" || job.status === "completed") return;
-            } catch {
+            } catch (err) {
+                analysisJobs = analysisJobs.map((entry) => entry.jobId === jobId ? {
+                    ...entry,
+                    status: "failed",
+                    error: err?.message || "Job expired or not found on server.",
+                } : entry);
+                updateFailedJobsCount();
                 return;
             }
             await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -1104,7 +1184,7 @@
 
     <nav class="tabs" aria-label="Main navigation">
         <button class:on={tab === "workspace"} on:click={() => tab = "workspace"}>Workspace</button>
-        <button class:on={tab === "commerce"} on:click={() => tab = "commerce"}>Dashboard</button>
+        <button class:on={tab === "commerce"} on:click={() => tab = "commerce"}>Listing Optimization</button>
         <button class:on={tab === "analyze"} on:click={() => tab = "analyze"}>Analyze</button>
         <button class:on={tab === "edit"} on:click={() => tab = "edit"}>Review</button>
         <button class:on={tab === "queue"} on:click={() => tab = "queue"}>Queue</button>
@@ -1125,11 +1205,21 @@
     {#if status}<div class="notice info">{status}</div>{/if}
 
     {#if tab === "workspace"}
-        <InventoryWorkspace onSwitchToListingOptimization={() => tab = "commerce"} />
+        <InventoryWorkspace
+            onSwitchToListingOptimization={() => tab = "commerce"}
+            onOpenFullReview={openWorkspaceItemInReview}
+        />
     {/if}
 
     {#if tab === "analyze"}
         <section class="panel">
+            <div class="wide notice info" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+                <div>
+                    <strong>New Inventory Batches are now in Workspace</strong>
+                    <p style="margin: 4px 0 0;">Upload bulk photos, organize 1-3 photo items, track validation rules, and submit Seller Hub drafts with database persistence in the <b>Workspace</b>. Use this Analyze screen for single-item visual inspection and prompt clue tuning.</p>
+                </div>
+                <button type="button" class="primary" on:click={() => tab = "workspace"}>Open Inventory Workspace →</button>
+            </div>
             {#if breakGroundEnabled && !onboardingDismissed}
                 <div class="wide notice info onboarding-card">
                     <div class="section-heading"><div><strong>HHT quick start</strong><p>Group photos, analyze, review the eBay-aligned fields, then add only approved items to the Seller Hub draft queue.</p></div><button type="button" on:click={dismissOnboarding}>Dismiss</button></div>
@@ -1151,7 +1241,15 @@
             </p>
             {#if analysisJobs.length}
                 <div class="wide notice info">
-                    <strong>Item analysis jobs</strong>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <strong>Item analysis jobs ({analysisJobs.length})</strong>
+                        <div style="display: flex; gap: 8px;">
+                            {#if failedJobsCount > 0}
+                                <button type="button" on:click={clearAllFailedJobs}>Clear failed ({failedJobsCount})</button>
+                            {/if}
+                            <button type="button" on:click={clearAllJobs}>Clear all</button>
+                        </div>
+                    </div>
                     {#if analysisMedianFirstPass !== null}<p>Observed median (uncached): Groq first pass {analysisMedianFirstPass.toFixed(2)}s · full audit {analysisMedianTotal.toFixed(2)}s across {analysisTimingSamples.length} item{analysisTimingSamples.length === 1 ? "" : "s"}. No pre-change baseline is available in this browser.</p>{/if}
                     {#each analysisJobs as job}
                         <div class="queue-row">
@@ -1164,17 +1262,9 @@
                             {#if job.status === "failed"}
                                 <button type="button" on:click={() => retryAnalysisJob(job.jobId)} disabled={loading}>Retry</button>
                             {/if}
-                            {#if ["failed", "complete", "auditing"].includes(job.status)}
-                                <button type="button" on:click={() => clearFailedJob(job.jobId)}>Clear</button>
-                            {/if}
+                            <button type="button" on:click={() => clearFailedJob(job.jobId)}>Clear</button>
                         </div>
                     {/each}
-                    {#if failedJobsCount > 0}
-                        <div class="queue-row" style="margin-top: 12px; justify-content: space-between;">
-                            <span><strong>{failedJobsCount} failed job{failedJobsCount === 1 ? "" : "s"}</strong></span>
-                            <button type="button" on:click={clearAllFailedJobs}>Clear all failed</button>
-                        </div>
-                    {/if}
                 </div>
             {/if}
             <div class="wide notice info analysis-guidance">
@@ -1246,6 +1336,13 @@
 
     {#if tab === "capacity"}
         <section class="panel">
+            <div class="wide notice info" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;">
+                <div>
+                    <strong>Connected to Active eBay Catalog</strong>
+                    <p style="margin: 2px 0 0;">Traffic and capacity metrics inform your listing rotation. To optimize listings with low impressions or missing specifics, open <b>Listing Optimization</b>.</p>
+                </div>
+                <button type="button" on:click={() => tab = "commerce"}>Open Listing Optimization →</button>
+            </div>
             <div class="section-heading"><div><p class="eyebrow">LISTING CAP MANAGER</p><h2>Capacity &amp; rotation</h2><p>Use official eBay traffic evidence to decide what to optimize, keep, or review. HHT never changes listing status automatically.</p></div><div class="actions"><button on:click={syncPerformance} disabled={performanceSyncing}>{performanceSyncing ? "Syncing..." : "Sync eBay traffic"}</button><button on:click={syncFulfillment}>Sync orders</button></div></div>
             <div class="metric-grid">
                 <div class="metric-card"><span>Active listings</span><strong>{performanceData.capacity?.active ?? "—"}</strong></div>
@@ -1266,10 +1363,22 @@
     {/if}
 
     {#if tab === "commerce"}
-        <CommerceAgent />
+        <CommerceAgent onSwitchToWorkspace={() => tab = "workspace"} />
     {/if}
 
     {#if tab === "edit"}
+        {#if item.inventoryItemId}
+            <div class="wide notice info" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;">
+                <div>
+                    <strong>Workspace Item: {item.inventoryItemId.slice(0, 8)}</strong>
+                    <p style="margin: 2px 0 0;">Connected to live database inventory. Changes saved here update the batch item directly.</p>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button type="button" class="primary" disabled={loading} on:click={saveReviewItemToWorkspace}>{loading ? "Saving..." : "Save to Workspace"}</button>
+                    <button type="button" on:click={() => tab = "workspace"}>← Back to Workspace</button>
+                </div>
+            </div>
+        {/if}
         <div class="wide notice warn">
             <strong>Needs review ({itemReviewFindings.length})</strong>
             {#if item.auditStatus === "running"}<p>NVIDIA is checking for missed fields, label text, and visible flaws in the background.</p>{/if}
@@ -1389,6 +1498,13 @@
 
     {#if tab === "queue"}
         <section class="panel">
+            <div class="wide notice info" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;">
+                <div>
+                    <strong>Inventory Workspace is the primary draft hub</strong>
+                    <p style="margin: 2px 0 0;">New batches are validated, approved, and submitted directly within <b>Workspace</b> with database persistence. This local queue is retained for quick exports and backward compatibility.</p>
+                </div>
+                <button type="button" on:click={() => tab = "workspace"}>Open Inventory Workspace →</button>
+            </div>
             <div class="stats">
                 <div><strong>{queue.length}</strong><span>Items</span></div>
                 <div><strong>${queueTotal.toFixed(2)}</strong><span>Total</span></div>

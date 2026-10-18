@@ -24,6 +24,7 @@
     } from "$lib/image-compressor";
 
     export let onSwitchToListingOptimization = () => {};
+    export let onOpenFullReview = () => {};
 
     // Workspace modes: 'new_inventory' | 'listing_optimization'
     let activeSubTab = "new_inventory";
@@ -1232,9 +1233,19 @@
                             {inspectingItem.id.slice(0, 8)}
                         </p>
                     </div>
-                    <button class="close-btn" on:click={closeItemInspector}
-                        >✕</button
-                    >
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <button
+                            type="button"
+                            class="full-review-btn"
+                            title="Open in full-page Review form"
+                            on:click={() => onOpenFullReview(inspectingItem)}
+                        >
+                            Full Review ↗
+                        </button>
+                        <button class="close-btn" on:click={closeItemInspector}
+                            >✕</button
+                        >
+                    </div>
                 </div>
 
                 <div class="inspector-body">
@@ -1976,6 +1987,24 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+    }
+
+    .full-review-btn {
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        color: #334155;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+
+    .full-review-btn:hover {
+        background: #f8fafc;
+        border-color: #94a3b8;
+        color: #0f172a;
     }
 
     .close-btn {
