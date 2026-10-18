@@ -324,14 +324,19 @@
         researchLoading = true;
         globalError = "";
         try {
-            const updated = await inventoryEnrichFromResearch(inspectingItem.id, researchClues);
+            const updated = await inventoryEnrichFromResearch(
+                inspectingItem.id,
+                researchClues,
+            );
             const index = items.findIndex((item) => item.id === updated.id);
             if (index !== -1) items[index] = updated;
             items = [...items];
             inspectingItem = updated;
-            globalStatus = "Research clues saved. Title candidates and price options are ready for review.";
+            globalStatus =
+                "Research clues saved. Title candidates and price options are ready for review.";
         } catch (err) {
-            globalError = err.message || "Could not generate research suggestions.";
+            globalError =
+                err.message || "Could not generate research suggestions.";
         } finally {
             researchLoading = false;
         }
@@ -1279,7 +1284,9 @@
                     <div class="inspector-section">
                         <h4 class="inspector-section-title">Research clues</h4>
                         <p class="text-xs text-slate-500 mb-3">
-                            Paste factual clues from a comparable listing or label. HHT saves them as seller input and generates suggestions; verify every field before approval.
+                            Paste factual clues from a comparable listing or
+                            label. HHT saves them as seller input and generates
+                            suggestions; verify every field before approval.
                         </p>
                         <textarea
                             class="w-full text-xs p-2 border rounded-md h-20 text-slate-700 mb-2"
@@ -1287,12 +1294,43 @@
                             bind:value={researchClues.observedTitle}
                         ></textarea>
                         <div class="form-grid compact">
-                            <label class="field"><span>Brand</span><input bind:value={researchClues.brand} placeholder="e.g. Nike" /></label>
-                            <label class="field"><span>Item type</span><input bind:value={researchClues.itemType} placeholder="e.g. football jersey" /></label>
-                            <label class="field"><span>Model / number</span><input bind:value={researchClues.model} placeholder="e.g. #12" /></label>
-                            <label class="field"><span>Category</span><input bind:value={researchClues.category} placeholder="e.g. sports jersey" /></label>
-                            <label class="field"><span>Size</span><input bind:value={researchClues.size} placeholder="e.g. Men's Large" /></label>
-                            <label class="field"><span>Comparable price</span><input type="text" bind:value={researchClues.comparablePrice} placeholder="e.g. 54.99" /></label>
+                            <label class="field"
+                                ><span>Brand</span><input
+                                    bind:value={researchClues.brand}
+                                    placeholder="e.g. Nike"
+                                /></label
+                            >
+                            <label class="field"
+                                ><span>Item type</span><input
+                                    bind:value={researchClues.itemType}
+                                    placeholder="e.g. football jersey"
+                                /></label
+                            >
+                            <label class="field"
+                                ><span>Model / number</span><input
+                                    bind:value={researchClues.model}
+                                    placeholder="e.g. #12"
+                                /></label
+                            >
+                            <label class="field"
+                                ><span>Category</span><input
+                                    bind:value={researchClues.category}
+                                    placeholder="e.g. sports jersey"
+                                /></label
+                            >
+                            <label class="field"
+                                ><span>Size</span><input
+                                    bind:value={researchClues.size}
+                                    placeholder="e.g. Men's Large"
+                                /></label
+                            >
+                            <label class="field"
+                                ><span>Comparable price</span><input
+                                    type="text"
+                                    bind:value={researchClues.comparablePrice}
+                                    placeholder="e.g. 54.99"
+                                /></label
+                            >
                         </div>
                         <button
                             type="button"
@@ -1300,7 +1338,9 @@
                             on:click={generateResearchSuggestions}
                             disabled={researchLoading}
                         >
-                            {researchLoading ? "Generating..." : "Generate title & price options"}
+                            {researchLoading
+                                ? "Generating..."
+                                : "Generate title & price options"}
                         </button>
                     </div>
                     <!-- Provenance Breakdown for Key Fields -->
@@ -1538,7 +1578,9 @@
                             Click to choose or drag images here
                         </p>
                         <p class="text-xs text-slate-500 mt-1">
-                            Supports JPEG, PNG, WebP, HEIC. Large photos are automatically compressed before upload (max 10MB request).
+                            Supports JPEG, PNG, WebP, HEIC. Large photos are
+                            automatically compressed before upload (max 10MB
+                            request).
                         </p>
                     </label>
                 </div>
@@ -1554,7 +1596,8 @@
                                 <span class="text-[11px] text-slate-500 ml-2">
                                     Total original: {formatBytes(
                                         uploadPreviews.reduce(
-                                            (acc, p) => acc + (p.originalSize || 0),
+                                            (acc, p) =>
+                                                acc + (p.originalSize || 0),
                                             0,
                                         ),
                                     )}
@@ -1579,7 +1622,9 @@
                                 <div
                                     class="relative group rounded-lg overflow-hidden border border-slate-200 bg-white p-1.5 shadow-xs flex flex-col gap-1.5"
                                 >
-                                    <div class="relative aspect-video rounded overflow-hidden bg-slate-100">
+                                    <div
+                                        class="relative aspect-video rounded overflow-hidden bg-slate-100"
+                                    >
                                         <img
                                             src={prev.url}
                                             alt={prev.name}
@@ -1600,13 +1645,26 @@
                                         {/if}
                                     </div>
                                     <div class="px-0.5">
-                                        <p class="text-[11px] font-medium text-slate-800 truncate" title={prev.name}>
+                                        <p
+                                            class="text-[11px] font-medium text-slate-800 truncate"
+                                            title={prev.name}
+                                        >
                                             {prev.name}
                                         </p>
-                                        <div class="flex items-center justify-between text-[10px] text-slate-500 mt-0.5">
-                                            <span>Orig: {prev.formattedOriginalSize}</span>
-                                            <span class="font-semibold {prev.uploadSize ? 'text-emerald-700' : 'text-slate-600'}">
-                                                {prev.uploadSize ? `Upload: ${prev.formattedUploadSize}` : prev.formattedUploadSize}
+                                        <div
+                                            class="flex items-center justify-between text-[10px] text-slate-500 mt-0.5"
+                                        >
+                                            <span
+                                                >Orig: {prev.formattedOriginalSize}</span
+                                            >
+                                            <span
+                                                class="font-semibold {prev.uploadSize
+                                                    ? 'text-emerald-700'
+                                                    : 'text-slate-600'}"
+                                            >
+                                                {prev.uploadSize
+                                                    ? `Upload: ${prev.formattedUploadSize}`
+                                                    : prev.formattedUploadSize}
                                             </span>
                                         </div>
                                     </div>
@@ -1617,9 +1675,15 @@
                 {/if}
 
                 {#if isUploading}
-                    <div class="mt-3 p-2.5 rounded-lg bg-sky-50 border border-sky-200 text-xs text-sky-800 flex items-center gap-2">
+                    <div
+                        class="mt-3 p-2.5 rounded-lg bg-sky-50 border border-sky-200 text-xs text-sky-800 flex items-center gap-2"
+                    >
                         <span class="animate-spin">⏳</span>
-                        <span class="font-semibold">{uploadPhase === "compressing" ? "Compressing photos..." : "Uploading photos..."}</span>
+                        <span class="font-semibold"
+                            >{uploadPhase === "compressing"
+                                ? "Compressing photos..."
+                                : "Uploading photos..."}</span
+                        >
                         <span class="text-sky-600">{uploadPhaseMessage}</span>
                     </div>
                 {/if}

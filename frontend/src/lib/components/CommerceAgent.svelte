@@ -42,7 +42,9 @@
     };
 
     const LISTING_FIELD_MAP = { material: "mat" };
-    const PILOT_SIZES = Array.from({ length: 11 }, (_, index) => String(index + 10));
+    const PILOT_SIZES = Array.from({ length: 11 }, (_, index) =>
+        String(index + 10),
+    );
     const QUEUE_PAGE_SIZE = 25;
 
     let dashboard = null;
@@ -53,7 +55,12 @@
     let error = "";
     let selected = null;
     let queuePage = 1;
-    let queueMeta = { page: 1, pageSize: QUEUE_PAGE_SIZE, total: 0, totalPages: 1 };
+    let queueMeta = {
+        page: 1,
+        pageSize: QUEUE_PAGE_SIZE,
+        total: 0,
+        totalPages: 1,
+    };
     let statusFilter = "";
     let classificationFilter = "";
     let riskFilter = "";
@@ -76,7 +83,11 @@
         ),
     ).sort((left, right) => left.localeCompare(right));
     $: classificationOptions = Array.from(
-        new Set(recommendations.map((entry) => entry.classification).filter(Boolean)),
+        new Set(
+            recommendations
+                .map((entry) => entry.classification)
+                .filter(Boolean),
+        ),
     ).sort((left, right) => left.localeCompare(right));
 
     $: visible = recommendations.filter(
@@ -86,7 +97,8 @@
                 entry.classification === classificationFilter) &&
             (!riskFilter || entry.risk === riskFilter) &&
             (!confidenceFilter || entry.confidence === confidenceFilter) &&
-            (!categoryFilter || String(recommendedCategory(entry) || "") === categoryFilter),
+            (!categoryFilter ||
+                String(recommendedCategory(entry) || "") === categoryFilter),
     );
 
     $: selectedIdSet = new Set(selectedIds);
@@ -135,10 +147,13 @@
     function pricingSource(entry) {
         const source = entry?.soldPricing?.pricingSource;
         if (source === "exact_used_sold") return "Exact used sold comparables";
-        if (source === "similar_used_sold") return "Similar used sold comparables";
-        if (source === "active_comparable") return "Active listing estimate only";
+        if (source === "similar_used_sold")
+            return "Similar used sold comparables";
+        if (source === "active_comparable")
+            return "Active listing estimate only";
         if (source === "ai_estimate") return "AI estimate only";
-        if (source === "seller_price_fallback") return "Seller price retained — no market evidence";
+        if (source === "seller_price_fallback")
+            return "Seller price retained — no market evidence";
         return "No price evidence available";
     }
 
@@ -148,7 +163,9 @@
 
     function money(value) {
         const amount = Number(value);
-        return Number.isFinite(amount) && amount > 0 ? `$${amount.toFixed(2)}` : "Not available";
+        return Number.isFinite(amount) && amount > 0
+            ? `$${amount.toFixed(2)}`
+            : "Not available";
     }
 
     function demandSummary(entry) {
@@ -167,9 +184,20 @@
     function recommendationAction(entry) {
         const proposed = entry?.proposed || {};
         if (proposed.title) return "Improve the title first";
-        if (proposed.price !== undefined && proposed.price !== null && proposed.price !== "") return "Review the market price";
-        if (Object.keys(proposed).some((field) => field !== "title" && field !== "price")) return "Add searchable item specifics";
-        if (entry?.risk === "high" || entry?.confidence === "low") return "Seller review required";
+        if (
+            proposed.price !== undefined &&
+            proposed.price !== null &&
+            proposed.price !== ""
+        )
+            return "Review the market price";
+        if (
+            Object.keys(proposed).some(
+                (field) => field !== "title" && field !== "price",
+            )
+        )
+            return "Add searchable item specifics";
+        if (entry?.risk === "high" || entry?.confidence === "low")
+            return "Seller review required";
         return "Review the evidence";
     }
 
@@ -177,9 +205,21 @@
         const proposed = entry?.proposed || {};
         const changes = [];
         if (proposed.title) changes.push("better search matching");
-        if (proposed.price !== undefined && proposed.price !== null && proposed.price !== "") changes.push("a more competitive price");
-        if (Object.keys(proposed).some((field) => !["title", "price"].includes(field))) changes.push("more complete item specifics");
-        return changes.length ? `May improve ${changes.join(" and ")}.` : "No safe field change is ready from the available evidence.";
+        if (
+            proposed.price !== undefined &&
+            proposed.price !== null &&
+            proposed.price !== ""
+        )
+            changes.push("a more competitive price");
+        if (
+            Object.keys(proposed).some(
+                (field) => !["title", "price"].includes(field),
+            )
+        )
+            changes.push("more complete item specifics");
+        return changes.length
+            ? `May improve ${changes.join(" and ")}.`
+            : "No safe field change is ready from the available evidence.";
     }
 
     function scoreLabel(score) {
@@ -210,7 +250,8 @@
 
     function selectPilotBatch() {
         if (visible.length < 10) {
-            error = "At least 10 filtered listings are required to create a pilot batch.";
+            error =
+                "At least 10 filtered listings are required to create a pilot batch.";
             return;
         }
         error = "";
@@ -262,10 +303,17 @@
         loading = true;
         error = "";
         try {
-            const requestedPage = Math.max(1, Number(options.page ?? queuePage) || 1);
+            const requestedPage = Math.max(
+                1,
+                Number(options.page ?? queuePage) || 1,
+            );
             const [nextDashboard, nextQueue, nextHistory] = await Promise.all([
                 commerceDashboard(),
-                commerceRecommendationsPage(statusFilter, requestedPage, QUEUE_PAGE_SIZE),
+                commerceRecommendationsPage(
+                    statusFilter,
+                    requestedPage,
+                    QUEUE_PAGE_SIZE,
+                ),
                 commerceHistory(),
             ]);
             dashboard = nextDashboard;
@@ -325,7 +373,8 @@
     async function regenerateRecommendations() {
         loading = true;
         error = "";
-        message = "Regenerating title, pricing, taxonomy, and evidence recommendations. No eBay changes are being made.";
+        message =
+            "Regenerating title, pricing, taxonomy, and evidence recommendations. No eBay changes are being made.";
         try {
             const result = await auditInBackground();
             message = `Regenerated ${result.count || 0} current recommendation${result.count === 1 ? "" : "s"}.`;
@@ -378,12 +427,14 @@
             .map((entry) => String(entry?.listing?.listingId || "").trim())
             .filter(Boolean);
         if (!listingIds.length) {
-            error = "The selected records do not have active eBay listing IDs to enrich.";
+            error =
+                "The selected records do not have active eBay listing IDs to enrich.";
             return;
         }
         loading = true;
         error = "";
-        message = "Starting read-only eBay detail enrichment for the selected pilot...";
+        message =
+            "Starting read-only eBay detail enrichment for the selected pilot...";
         try {
             const started = await commerceStartEnrichment(listingIds);
             const enriched = await waitForJob(
@@ -467,10 +518,16 @@
 
     async function approveSelected() {
         const ids = selectedEntries
-            .filter((entry) => entry.status === "Pending" && entry.risk !== "high" && proposedEntries(entry).length)
+            .filter(
+                (entry) =>
+                    entry.status === "Pending" &&
+                    entry.risk !== "high" &&
+                    proposedEntries(entry).length,
+            )
             .map((entry) => entry.recommendationId);
         if (!ids.length) {
-            error = "Select pending low-risk recommendations with proposed fields first.";
+            error =
+                "Select pending low-risk recommendations with proposed fields first.";
             return;
         }
         loading = true;
@@ -533,8 +590,7 @@
     async function confirmApply() {
         if (!pendingApply) return;
         const latestEntry = recommendations.find(
-            (entry) =>
-                entry.recommendationId === pendingApply.recommendationId,
+            (entry) => entry.recommendationId === pendingApply.recommendationId,
         );
         if (latestEntry?.status !== "Approved" || !latestEntry?.actionId) {
             error =
@@ -592,7 +648,9 @@
             return;
         }
         if (event.key !== "Tab") return;
-        const focusable = [cancelApplyButton, confirmApplyButton].filter(Boolean);
+        const focusable = [cancelApplyButton, confirmApplyButton].filter(
+            Boolean,
+        );
         if (!focusable.length) return;
         const currentIndex = focusable.indexOf(document.activeElement);
         if (event.shiftKey) {
@@ -629,10 +687,7 @@
             >
                 New inventory
             </button>
-            <button
-                type="button"
-                class="subtab-pill active"
-            >
+            <button type="button" class="subtab-pill active">
                 Listing optimization
             </button>
         </div>
@@ -643,41 +698,106 @@
             <p class="eyebrow">COMMERCE AGENT</p>
             <h2>Improve listings, one clear action at a time</h2>
             <p class="help">
-                Start with the highest-value opportunities. The agent uses listing evidence,
-                eBay category rules, market pricing signals, and searchable item specifics.
-                You approve every change before anything is sent to eBay.
+                Start with the highest-value opportunities. The agent uses
+                listing evidence, eBay category rules, market pricing signals,
+                and searchable item specifics. You approve every change before
+                anything is sent to eBay.
             </p>
         </div>
         <span class="mode-badge">Recommend only</span>
     </div>
     {#if error}<div class="notice error" role="alert">{error}</div>{/if}
-    {#if message}<div class="notice info" aria-live="polite">{message}</div>{/if}
+    {#if message}<div class="notice info" aria-live="polite">
+            {message}
+        </div>{/if}
     <div class="agent-next-step panel">
         <div>
             <span class="step-label">NEXT STEP</span>
-            <h3>{dashboard?.titleImprovements ? `Start with ${dashboard.titleImprovements} title opportunities` : "Review the recommendations below"}</h3>
-            <p class="help">Recommended order: title and item specifics first, then price. Open evidence only when you need to verify a suggestion.</p>
+            <h3>
+                {dashboard?.titleImprovements
+                    ? `Start with ${dashboard.titleImprovements} title opportunities`
+                    : "Review the recommendations below"}
+            </h3>
+            <p class="help">
+                Recommended order: title and item specifics first, then price.
+                Open evidence only when you need to verify a suggestion.
+            </p>
         </div>
-        <button class="primary" disabled={loading} on:click={regenerateRecommendations}>{loading ? "Regenerating..." : "Regenerate recommendations"}</button>
+        <button
+            class="primary"
+            disabled={loading}
+            on:click={regenerateRecommendations}
+            >{loading
+                ? "Regenerating..."
+                : "Regenerate recommendations"}</button
+        >
     </div>
     <details class="panel advanced-panel">
         <summary>Import, enrich, and pilot tools</summary>
-        <p class="help">These tools are safe to run, but are not needed for everyday review.</p>
+        <p class="help">
+            These tools are safe to run, but are not needed for everyday review.
+        </p>
         <div class="actions commerce-actions">
-            <button class="primary" disabled={loading} on:click={importActiveAndAudit}>{loading ? "Working..." : "Analyze Active Listings"}</button>
-            <button disabled={loading} on:click={importAndAudit}>Import API Inventory</button>
-            <button disabled={loading} on:click={() => enrichFullCatalog(false)}>Enrich active catalog (read-only)</button>
-            <button disabled={loading} on:click={() => enrichFullCatalog(true)}>Resume failed enrichment</button>
+            <button
+                class="primary"
+                disabled={loading}
+                on:click={importActiveAndAudit}
+                >{loading ? "Working..." : "Analyze Active Listings"}</button
+            >
+            <button disabled={loading} on:click={importAndAudit}
+                >Import API Inventory</button
+            >
+            <button disabled={loading} on:click={() => enrichFullCatalog(false)}
+                >Enrich active catalog (read-only)</button
+            >
+            <button disabled={loading} on:click={() => enrichFullCatalog(true)}
+                >Resume failed enrichment</button
+            >
         </div>
         <div class="pilot-toolbar">
-            <div><strong>Pilot workflow</strong><p class="help">Review 10–20 listings before expanding to the full catalog.</p></div>
+            <div>
+                <strong>Pilot workflow</strong>
+                <p class="help">
+                    Review 10–20 listings before expanding to the full catalog.
+                </p>
+            </div>
             <div class="actions">
-                <label class="pilot-size"><span>Pilot size</span><select bind:value={pilotSize} aria-label="Pilot size">{#each PILOT_SIZES as size}<option value={size}>{size} listings</option>{/each}</select></label>
-                <button disabled={loading || visible.length < 10} on:click={selectPilotBatch}>Select first {pilotSize}</button>
-                <button disabled={!selectedIds.length} on:click={clearPilotSelection}>Clear selection</button>
-                <button disabled={selectedEntries.length < 10 || selectedEntries.length > 20} on:click={exportPilotResults}>Export pilot results</button>
-                <button class="primary" disabled={loading || !selectedEntries.some((entry) => entry?.listing?.listingId)} on:click={enrichSelectedPilot}>Enrich selected (read-only)</button>
-                <button disabled={loading || !selectedPendingCount} on:click={approveSelected}>Approve selected (no eBay write)</button>
+                <label class="pilot-size"
+                    ><span>Pilot size</span><select
+                        bind:value={pilotSize}
+                        aria-label="Pilot size"
+                        >{#each PILOT_SIZES as size}<option value={size}
+                                >{size} listings</option
+                            >{/each}</select
+                    ></label
+                >
+                <button
+                    disabled={loading || visible.length < 10}
+                    on:click={selectPilotBatch}>Select first {pilotSize}</button
+                >
+                <button
+                    disabled={!selectedIds.length}
+                    on:click={clearPilotSelection}>Clear selection</button
+                >
+                <button
+                    disabled={selectedEntries.length < 10 ||
+                        selectedEntries.length > 20}
+                    on:click={exportPilotResults}>Export pilot results</button
+                >
+                <button
+                    class="primary"
+                    disabled={loading ||
+                        !selectedEntries.some(
+                            (entry) => entry?.listing?.listingId,
+                        )}
+                    on:click={enrichSelectedPilot}
+                    >Enrich selected (read-only)</button
+                >
+                <button
+                    disabled={loading || !selectedPendingCount}
+                    on:click={approveSelected}
+                    >Approve selected (no eBay write)</button
+                >
             </div>
         </div>
     </details>
@@ -686,7 +806,11 @@
         <div class="filter-grid">
             <label>
                 <span>Status</span>
-                <select bind:value={statusFilter} aria-label="Filter by status" on:change={refreshForStatus}>
+                <select
+                    bind:value={statusFilter}
+                    aria-label="Filter by status"
+                    on:change={refreshForStatus}
+                >
                     <option value="">All statuses</option>
                     <option value="Pending">Pending</option>
                     <option value="Approved">Approved</option>
@@ -696,7 +820,10 @@
             </label>
             <label>
                 <span>Type</span>
-                <select bind:value={classificationFilter} aria-label="Filter by recommendation type">
+                <select
+                    bind:value={classificationFilter}
+                    aria-label="Filter by recommendation type"
+                >
                     <option value="">All recommendation types</option>
                     {#each classificationOptions as classification}
                         <option value={classification}>{classification}</option>
@@ -713,7 +840,10 @@
             </label>
             <label>
                 <span>Confidence</span>
-                <select bind:value={confidenceFilter} aria-label="Filter by confidence">
+                <select
+                    bind:value={confidenceFilter}
+                    aria-label="Filter by confidence"
+                >
                     <option value="">All confidence levels</option>
                     <option value="high">High</option>
                     <option value="medium">Medium</option>
@@ -722,7 +852,10 @@
             </label>
             <label>
                 <span>Category</span>
-                <select bind:value={categoryFilter} aria-label="Filter by category">
+                <select
+                    bind:value={categoryFilter}
+                    aria-label="Filter by category"
+                >
                     <option value="">All categories</option>
                     {#each categoryOptions as category}
                         <option value={category}>{category}</option>
@@ -733,26 +866,51 @@
     </details>
     {#if dashboard}
         <div class="attention-summary" aria-label="Catalog attention summary">
-            <div><strong>{dashboard.listingsFound}</strong><span>active listings analyzed</span></div>
-            <div class:attention={dashboard.titleImprovements > 0}><strong>{dashboard.titleImprovements || 0}</strong><span>search-title opportunities</span></div>
-            <div class:attention={dashboard.missingItemSpecifics > 0}><strong>{dashboard.missingItemSpecifics}</strong><span>missing specifics</span></div>
-            <div><strong>{dashboard.recovery?.appliedChanges || 0}</strong><span>changes applied</span></div>
+            <div>
+                <strong>{dashboard.listingsFound}</strong><span
+                    >active listings analyzed</span
+                >
+            </div>
+            <div class:attention={dashboard.titleImprovements > 0}>
+                <strong>{dashboard.titleImprovements || 0}</strong><span
+                    >search-title opportunities</span
+                >
+            </div>
+            <div class:attention={dashboard.missingItemSpecifics > 0}>
+                <strong>{dashboard.missingItemSpecifics}</strong><span
+                    >missing specifics</span
+                >
+            </div>
+            <div>
+                <strong>{dashboard.recovery?.appliedChanges || 0}</strong><span
+                    >changes applied</span
+                >
+            </div>
         </div>
-        <p class="help summary-note">Recommendations are suggestions, not automatic changes. Nothing is sent to eBay until you approve it.</p>
+        <p class="help summary-note">
+            Recommendations are suggestions, not automatic changes. Nothing is
+            sent to eBay until you approve it.
+        </p>
     {/if}
     <div class="commerce-grid">
         <div class="panel nested-panel">
             <div class="section-head">
                 <h3 bind:this={queueHeading} tabindex="-1">Approval queue</h3>
-                <span>Page {queueMeta.page} of {queueMeta.totalPages} · {queueMeta.total} total · {visible.length} shown</span>
+                <span
+                    >Page {queueMeta.page} of {queueMeta.totalPages} · {queueMeta.total}
+                    total · {visible.length} shown</span
+                >
             </div>
             <div class="queue-pagination" aria-label="Approval queue pages">
-                <button disabled={loading || queuePage <= 1} on:click={() => setQueuePage(queuePage - 1)}
+                <button
+                    disabled={loading || queuePage <= 1}
+                    on:click={() => setQueuePage(queuePage - 1)}
                     >Previous</button
                 >
                 <span>Page {queueMeta.page} of {queueMeta.totalPages}</span>
-                <button disabled={loading || queuePage >= queueMeta.totalPages} on:click={() => setQueuePage(queuePage + 1)}
-                    >Next</button
+                <button
+                    disabled={loading || queuePage >= queueMeta.totalPages}
+                    on:click={() => setQueuePage(queuePage + 1)}>Next</button
                 >
             </div>
             {#if !visible.length}<p class="empty">
@@ -764,16 +922,25 @@
                         <label class="pilot-select">
                             <input
                                 type="checkbox"
-                                checked={selectedIds.includes(entry.recommendationId)}
-                                disabled={!selectedIds.includes(entry.recommendationId) && selectedIds.length >= 20}
+                                checked={selectedIds.includes(
+                                    entry.recommendationId,
+                                )}
+                                disabled={!selectedIds.includes(
+                                    entry.recommendationId,
+                                ) && selectedIds.length >= 20}
                                 on:change={() => toggleSelection(entry)}
                             />
                             <span>Select for pilot</span>
                         </label>
                         <div class="recommendation-heading">
-                            <strong>{entry.listing.title || "Untitled listing"}</strong>
+                            <strong
+                                >{entry.listing.title ||
+                                    "Untitled listing"}</strong
+                            >
                             <span>
-                                {recommendationAction(entry)} · {scoreLabel(entry.score)} · {entry.status}
+                                {recommendationAction(entry)} · {scoreLabel(
+                                    entry.score,
+                                )} · {entry.status}
                             </span>
                         </div>
                         <span class="risk">{entry.risk} risk</span>
@@ -782,8 +949,13 @@
                         <b>{entry.listing.lifecycle || "Inventory record"}</b>
                         <span>SKU: {entry.listing.sku || "not provided"}</span>
                         <span>Offer: {entry.listing.offerId || "none"}</span>
-                        <span>Listing: {entry.listing.listingId || "none"}</span>
-                        {#if entry.listing.enrichedAt}<span>Official details enriched: {new Date(entry.listing.enrichedAt).toLocaleDateString()}</span>{/if}
+                        <span>Listing: {entry.listing.listingId || "none"}</span
+                        >
+                        {#if entry.listing.enrichedAt}<span
+                                >Official details enriched: {new Date(
+                                    entry.listing.enrichedAt,
+                                ).toLocaleDateString()}</span
+                            >{/if}
                         {#if entry.listing.ebayUrl}<a
                                 href={entry.listing.ebayUrl}
                                 target="_blank"
@@ -797,7 +969,10 @@
                     <div class="advisory-grid">
                         <div>
                             <span>Title candidate</span>
-                            <strong>{entry.proposed.title || "No title change proposed"}</strong>
+                            <strong
+                                >{entry.proposed.title ||
+                                    "No title change proposed"}</strong
+                            >
                         </div>
                         <div>
                             <span>Category recommendation</span>
@@ -811,120 +986,253 @@
                             <span>Demand score</span>
                             <strong>{demandSummary(entry)}</strong>
                         </div>
-                        <div><span>Confidence</span><strong>{entry.confidence}</strong></div>
-                        <div><span>Seller action</span><strong>{entry.risk === "high" ? "Review manually" : "Approve only if evidence is clear"}</strong></div>
+                        <div>
+                            <span>Confidence</span><strong
+                                >{entry.confidence}</strong
+                            >
+                        </div>
+                        <div>
+                            <span>Seller action</span><strong
+                                >{entry.risk === "high"
+                                    ? "Review manually"
+                                    : "Approve only if evidence is clear"}</strong
+                            >
+                        </div>
                     </div>
                     {#if titleCandidates(entry).length}
                         <details class="card-details" open>
-                            <summary>SEO title options ({titleCandidates(entry).length})</summary>
+                            <summary
+                                >SEO title options ({titleCandidates(entry)
+                                    .length})</summary
+                            >
                             <div class="advisory-grid">
                                 {#each titleCandidates(entry) as candidate}
                                     <div>
-                                        <span>{candidate[0].replaceAll("_", " ")}</span>
+                                        <span
+                                            >{candidate[0].replaceAll(
+                                                "_",
+                                                " ",
+                                            )}</span
+                                        >
                                         <strong>{candidate[1].title}</strong>
-                                        <small>{candidate[1].length}/80 characters · {candidate[1].confidence} confidence · {candidate[1].attributesUsed?.join(", ")}</small>
+                                        <small
+                                            >{candidate[1].length}/80 characters
+                                            · {candidate[1].confidence} confidence
+                                            · {candidate[1].attributesUsed?.join(
+                                                ", ",
+                                            )}</small
+                                        >
                                     </div>
                                 {/each}
                             </div>
-                            <p class="help meta-note">Each option is capped at 80 characters and uses confirmed stored attributes. Confirmed-keyword coverage: {Math.round(Number(entry.listing.titleSeoMetadata?.keywordCoverage || 0) * 100)}%. This is transparent metadata—not access to eBay's private ranking algorithm. Select or edit one yourself before approval; HHT does not automatically replace the current title.</p>
+                            <p class="help meta-note">
+                                Each option is capped at 80 characters and uses
+                                confirmed stored attributes. Confirmed-keyword
+                                coverage: {Math.round(
+                                    Number(
+                                        entry.listing.titleSeoMetadata
+                                            ?.keywordCoverage || 0,
+                                    ) * 100,
+                                )}%. This is transparent metadata—not access to
+                                eBay's private ranking algorithm. Select or edit
+                                one yourself before approval; HHT does not
+                                automatically replace the current title.
+                            </p>
                         </details>
                     {/if}
                     {#if entry.soldPricing?.status === "ok"}
                         <details class="card-details" open>
                             <summary>Pricing options</summary>
                             <div class="advisory-grid">
-                                <div><span>Quick sale</span><strong>{money(entry.soldPricing.quickSalePrice)}</strong></div>
-                                <div><span>Target</span><strong>{money(entry.soldPricing.targetPrice || entry.soldPricing.recommendedPrice)}</strong></div>
-                                <div><span>Premium</span><strong>{money(entry.soldPricing.premiumPrice)}</strong></div>
-                                <div><span>Evidence</span><strong>{pricingSource(entry)}</strong><small>{entry.soldPricing.sampleSize || 0} comparable item{Number(entry.soldPricing.sampleSize || 0) === 1 ? "" : "s"} · {entry.soldPricing.pricingConfidence || "low"} confidence</small></div>
+                                <div>
+                                    <span>Quick sale</span><strong
+                                        >{money(
+                                            entry.soldPricing.quickSalePrice,
+                                        )}</strong
+                                    >
+                                </div>
+                                <div>
+                                    <span>Target</span><strong
+                                        >{money(
+                                            entry.soldPricing.targetPrice ||
+                                                entry.soldPricing
+                                                    .recommendedPrice,
+                                        )}</strong
+                                    >
+                                </div>
+                                <div>
+                                    <span>Premium</span><strong
+                                        >{money(
+                                            entry.soldPricing.premiumPrice,
+                                        )}</strong
+                                    >
+                                </div>
+                                <div>
+                                    <span>Evidence</span><strong
+                                        >{pricingSource(entry)}</strong
+                                    ><small
+                                        >{entry.soldPricing.sampleSize || 0} comparable
+                                        item{Number(
+                                            entry.soldPricing.sampleSize || 0,
+                                        ) === 1
+                                            ? ""
+                                            : "s"} · {entry.soldPricing
+                                            .pricingConfidence || "low"} confidence</small
+                                    >
+                                </div>
                             </div>
-                            <p class="help meta-note">The target price is the recommendation currently eligible for seller review. Tier prices are advisory and never update eBay automatically.</p>
+                            <p class="help meta-note">
+                                The target price is the recommendation currently
+                                eligible for seller review. Tier prices are
+                                advisory and never update eBay automatically.
+                            </p>
                         </details>
                     {/if}
                     {#if proposedEntries(entry).length}
                         <details class="card-details">
-                            <summary>Show proposed changes ({proposedEntries(entry).length})</summary>
-                        <div class="table-scroll">
-                            <table class="comparison-table" aria-label="Current and proposed changes">
-                                <thead>
-                                    <tr>
-                                        <th scope="col">Attribute</th>
-                                        <th scope="col">Current listing</th>
-                                        <th scope="col">Proposed change</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {#each proposedEntries(entry) as change}
+                            <summary
+                                >Show proposed changes ({proposedEntries(entry)
+                                    .length})</summary
+                            >
+                            <div class="table-scroll">
+                                <table
+                                    class="comparison-table"
+                                    aria-label="Current and proposed changes"
+                                >
+                                    <thead>
                                         <tr>
-                                            <th scope="row" class="comparison-attribute">
-                                                {fieldLabel(change[0])}
-                                            </th>
-                                            <td>{currentValue(entry, change[0])}</td>
-                                            <td class="comparison-proposed">{String(change[1])}</td>
+                                            <th scope="col">Attribute</th>
+                                            <th scope="col">Current listing</th>
+                                            <th scope="col">Proposed change</th>
                                         </tr>
-                                    {/each}
-                                </tbody>
-                            </table>
-                        </div>
+                                    </thead>
+                                    <tbody>
+                                        {#each proposedEntries(entry) as change}
+                                            <tr>
+                                                <th
+                                                    scope="row"
+                                                    class="comparison-attribute"
+                                                >
+                                                    {fieldLabel(change[0])}
+                                                </th>
+                                                <td
+                                                    >{currentValue(
+                                                        entry,
+                                                        change[0],
+                                                    )}</td
+                                                >
+                                                <td class="comparison-proposed"
+                                                    >{String(change[1])}</td
+                                                >
+                                            </tr>
+                                        {/each}
+                                    </tbody>
+                                </table>
+                            </div>
                         </details>
                     {:else}<p class="help">
-                            No field changes recommended from the available evidence.
+                            No field changes recommended from the available
+                            evidence.
                         </p>{/if}
                     {#if entry.evidence?.length}
                         <details class="card-details">
-                            <summary>Show evidence ({entry.evidence.length} fields)</summary>
-                        <div class="table-scroll">
-                            <table class="evidence-table" aria-label="Attribute evidence">
-                                <thead>
-                                    <tr>
-                                        <th scope="col">Attribute</th>
-                                        <th scope="col">Value</th>
-                                        <th scope="col">Confidence / source</th>
-                                        <th scope="col">Evidence</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {#each entry.evidence as evidence}
+                            <summary
+                                >Show evidence ({entry.evidence.length} fields)</summary
+                            >
+                            <div class="table-scroll">
+                                <table
+                                    class="evidence-table"
+                                    aria-label="Attribute evidence"
+                                >
+                                    <thead>
                                         <tr>
-                                            <th scope="row" class="comparison-attribute">
-                                                {fieldLabel(evidence.field)}
-                                            </th>
-                                            <td>{displayText(evidence.value, "Not provided")}</td>
-                                            <td>
-                                                {displayText(evidence.confidence, "Unknown")} · {displayText(evidence.source, "Unknown")}
-                                            </td>
-                                            <td>{displayText(evidence.evidence, "No evidence text provided")}</td>
+                                            <th scope="col">Attribute</th>
+                                            <th scope="col">Value</th>
+                                            <th scope="col"
+                                                >Confidence / source</th
+                                            >
+                                            <th scope="col">Evidence</th>
                                         </tr>
-                                    {/each}
-                                </tbody>
-                            </table>
-                        </div>
+                                    </thead>
+                                    <tbody>
+                                        {#each entry.evidence as evidence}
+                                            <tr>
+                                                <th
+                                                    scope="row"
+                                                    class="comparison-attribute"
+                                                >
+                                                    {fieldLabel(evidence.field)}
+                                                </th>
+                                                <td
+                                                    >{displayText(
+                                                        evidence.value,
+                                                        "Not provided",
+                                                    )}</td
+                                                >
+                                                <td>
+                                                    {displayText(
+                                                        evidence.confidence,
+                                                        "Unknown",
+                                                    )} · {displayText(
+                                                        evidence.source,
+                                                        "Unknown",
+                                                    )}
+                                                </td>
+                                                <td
+                                                    >{displayText(
+                                                        evidence.evidence,
+                                                        "No evidence text provided",
+                                                    )}</td
+                                                >
+                                            </tr>
+                                        {/each}
+                                    </tbody>
+                                </table>
+                            </div>
                         </details>
                     {/if}
                     {#if entry.taxonomy}<div class="help meta-note">
-                            <b>Taxonomy:</b> {entry.taxonomy.message}
+                            <b>Taxonomy:</b>
+                            {entry.taxonomy.message}
                         </div>{/if}
                     {#if entry.soldPricing}<div class="help meta-note">
-                            <b>Pricing:</b> {entry.soldPricing.message}
+                            <b>Pricing:</b>
+                            {entry.soldPricing.message}
                         </div>{/if}
                     {#if entry.demand}<div class="help meta-note">
-                            <b>Demand proxy:</b> {entry.demand.message}
+                            <b>Demand proxy:</b>
+                            {entry.demand.message}
                         </div>{/if}
                     <div class="actions">
-                        <button on:click={() => (selected = entry)}>Review details</button>
-                        <button disabled={loading} on:click={() => explain(entry)}>Explain</button>
+                        <button on:click={() => (selected = entry)}
+                            >Review details</button
+                        >
+                        <button
+                            disabled={loading}
+                            on:click={() => explain(entry)}>Explain</button
+                        >
                         {#if entry.status === "Pending" && entry.risk !== "high" && proposedEntries(entry).length}<button
                                 class="primary"
                                 disabled={loading}
                                 on:click={() => approve(entry)}
                                 >Approve only</button
                             >{/if}
-                        {#if entry.status === "Pending"}<button disabled={loading} on:click={() => decide(entry, "skip")}>Skip</button>
-                            <button disabled={loading} on:click={() => decide(entry, "reject")}>Reject</button>{/if}
-                        {#if entry.status === "Pending" && entry.risk === "high"}<span class="help status-readonly"
+                        {#if entry.status === "Pending"}<button
+                                disabled={loading}
+                                on:click={() => decide(entry, "skip")}
+                                >Skip</button
+                            >
+                            <button
+                                disabled={loading}
+                                on:click={() => decide(entry, "reject")}
+                                >Reject</button
+                            >{/if}
+                        {#if entry.status === "Pending" && entry.risk === "high"}<span
+                                class="help status-readonly"
                                 >High risk — seller review only</span
                             >{/if}
-                        {#if entry.status === "Pending" && entry.risk !== "high" && !proposedEntries(entry).length}<span class="help status-readonly"
+                        {#if entry.status === "Pending" && entry.risk !== "high" && !proposedEntries(entry).length}<span
+                                class="help status-readonly"
                                 >No safe field change proposed</span
                             >{/if}
                         {#if entry.status === "Approved"}<button
@@ -933,19 +1241,27 @@
                                 on:click={() => requestApply(entry)}
                                 >Apply approved change</button
                             >{/if}
-                        {#if entry.status === "Applied"}<span class="help status-readonly"
+                        {#if entry.status === "Applied"}<span
+                                class="help status-readonly"
                                 >Applied — read only</span
                             >{/if}
                     </div>
                 </article>
             {/each}
             {#if visible.length}
-                <div class="queue-pagination queue-pagination-bottom" aria-label="Approval queue pages">
-                    <button disabled={loading || queuePage <= 1} on:click={() => setQueuePage(queuePage - 1)}
+                <div
+                    class="queue-pagination queue-pagination-bottom"
+                    aria-label="Approval queue pages"
+                >
+                    <button
+                        disabled={loading || queuePage <= 1}
+                        on:click={() => setQueuePage(queuePage - 1)}
                         >Previous</button
                     >
                     <span>Page {queueMeta.page} of {queueMeta.totalPages}</span>
-                    <button disabled={loading || queuePage >= queueMeta.totalPages} on:click={() => setQueuePage(queuePage + 1)}
+                    <button
+                        disabled={loading || queuePage >= queueMeta.totalPages}
+                        on:click={() => setQueuePage(queuePage + 1)}
                         >Next</button
                     >
                 </div>
@@ -954,7 +1270,8 @@
         <aside class="panel nested-panel explanation">
             <h3>Pilot review</h3>
             <p class="help">
-                Use the pilot set to review recommendations before expanding to the full catalog.
+                Use the pilot set to review recommendations before expanding to
+                the full catalog.
             </p>
             <div class="pilot-summary-grid">
                 <div>
@@ -970,11 +1287,19 @@
                     <span>Pending approval</span>
                 </div>
                 <div>
-                    <strong>{selectedEntries.filter((entry) => entry.risk === "high").length}</strong>
+                    <strong
+                        >{selectedEntries.filter(
+                            (entry) => entry.risk === "high",
+                        ).length}</strong
+                    >
                     <span>High risk</span>
                 </div>
                 <div>
-                    <strong>{selectedEntries.filter((entry) => entry.status === "Applied").length}</strong>
+                    <strong
+                        >{selectedEntries.filter(
+                            (entry) => entry.status === "Applied",
+                        ).length}</strong
+                    >
                     <span>Applied</span>
                 </div>
             </div>
@@ -982,19 +1307,30 @@
                 <div class="detail-block">
                     <h4>{selected.listing.title || selected.listing.sku}</h4>
                     <p>{selected.explanation?.reason || selected.reason}</p>
-                    {#if selected.explanation}<p class="help">Loaded from stored evidence and rationale; no new facts were generated.</p>{/if}
+                    {#if selected.explanation}<p class="help">
+                            Loaded from stored evidence and rationale; no new
+                            facts were generated.
+                        </p>{/if}
                     <p>
-                        <b>Confidence:</b> {selected.confidence}. <b>Risk:</b> {selected.risk}.
+                        <b>Confidence:</b>
+                        {selected.confidence}. <b>Risk:</b>
+                        {selected.risk}.
                     </p>
                     <ul>
                         {#each selected.findings || [] as finding}
-                            <li><b>{fieldLabel(finding.field)}:</b> {finding.message}</li>
+                            <li>
+                                <b>{fieldLabel(finding.field)}:</b>
+                                {finding.message}
+                            </li>
                         {/each}
                     </ul>
                     <button on:click={() => (selected = null)}>Close</button>
                 </div>
             {:else}
-                <p class="empty">Select “Review details” on a recommendation for more context.</p>
+                <p class="empty">
+                    Select “Review details” on a recommendation for more
+                    context.
+                </p>
             {/if}
         </aside>
     </div>
@@ -1004,13 +1340,24 @@
         {#each history.slice(0, 10) as entry}
             <div class="history-row">
                 <strong>{entry.listing.title || entry.listing.sku}</strong>
-                <span>{entry.status} · {new Date(entry.createdAt).toLocaleString()}</span>
-                {#if entry.rollbackEligible}<button disabled={loading} on:click={() => rollback(entry)}>Rollback safely</button>{/if}
+                <span
+                    >{entry.status} · {new Date(
+                        entry.createdAt,
+                    ).toLocaleString()}</span
+                >
+                {#if entry.rollbackEligible}<button
+                        disabled={loading}
+                        on:click={() => rollback(entry)}>Rollback safely</button
+                    >{/if}
             </div>
         {/each}
     </div>
     {#if pendingApply}
-        <div class="modal-backdrop" role="presentation" on:click={handleBackdropClick}>
+        <div
+            class="modal-backdrop"
+            role="presentation"
+            on:click={handleBackdropClick}
+        >
             <div
                 class="modal-card"
                 bind:this={modalCard}
@@ -1023,18 +1370,20 @@
                 <h3 id="apply-dialog-title">Confirm eBay update</h3>
                 <p>
                     Apply the approved eBay update for
-                    <b>{pendingApply.listing.title || pendingApply.listing.sku}</b>?
+                    <b
+                        >{pendingApply.listing.title ||
+                            pendingApply.listing.sku}</b
+                    >?
                 </p>
                 <p id="apply-dialog-description" class="help">
-                    This sends only the already-approved fields to eBay. Reviewing or approving a
-                    recommendation does not apply it.
+                    This sends only the already-approved fields to eBay.
+                    Reviewing or approving a recommendation does not apply it.
                 </p>
                 <div class="actions">
                     <button
                         bind:this={cancelApplyButton}
                         disabled={loading}
-                        on:click={() => void cancelApply()}
-                        >Cancel</button
+                        on:click={() => void cancelApply()}>Cancel</button
                     >
                     <button
                         bind:this={confirmApplyButton}
