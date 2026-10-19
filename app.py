@@ -862,12 +862,14 @@ def inventory_batches():
         return jsonify({"error": str(exc)}), 400
 
 
-@app.route("/api/inventory/batches/<batch_id>", methods=["GET"])
+@app.route("/api/inventory/batches/<batch_id>", methods=["GET", "DELETE"])
 def inventory_batch_get(batch_id):
     seller_id = getattr(g, "seller_id", None)
     if not seller_id:
         return jsonify({"error": "Seller authentication is required."}), 401
     try:
+        if request.method == "DELETE":
+            return jsonify({"result": inventory_workspace.delete_batch(batch_id, str(seller_id))})
         batch = inventory_workspace.get_batch(batch_id, str(seller_id))
         return jsonify({"result": batch})
     except KeyError as exc:

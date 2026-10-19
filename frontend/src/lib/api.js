@@ -381,6 +381,14 @@ export async function inventoryGetBatch(batchId) {
     return body.result || body;
 }
 
+export async function inventoryDeleteBatch(batchId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}`, {
+        method: 'DELETE',
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
 export async function inventoryUploadBatchPhotos(batchId, files = [], photos = []) {
     if (files.length > 0) {
         const form = new FormData();

@@ -4,6 +4,7 @@
         inventoryCreateBatch,
         inventoryListBatches,
         inventoryGetBatch,
+        inventoryDeleteBatch,
         inventoryUploadBatchPhotos,
         inventoryUpdatePhotoGrouping,
         inventoryListBatchItems,
@@ -167,6 +168,35 @@
             globalStatus = `Batch "${name}" created.`;
         } catch (err) {
             globalError = err.message || "Failed to create batch.";
+        } finally {
+            batchLoading = false;
+        }
+    }
+
+    async function deleteSelectedBatch() {
+        if (!selectedBatchId || !selectedBatch) return;
+        const confirmed = window.confirm(
+            `Delete batch "${selectedBatch.name}" and its grouped photos? This cannot be undone.`
+        );
+        if (!confirmed) return;
+        batchLoading = true;
+        globalError = "";
+        try {
+            await inventoryDeleteBatch(selectedBatchId);
+            selectedBatchId = "";
+            selectedBatch = null;
+            items = [];
+            batches = await inventoryListBatches();
+            if (batches.length) {
+                await selectBatch(batches[0].id);
+            } else {
+                const newBatch = await inventoryCreateBatch("First Inventory Batch", "3");
+                batches = [newBatch];
+                await selectBatch(newBatch.id);
+            }
+            globalStatus = "Batch deleted. You can start over with a clean batch.";
+        } catch (err) {
+            globalError = err.message || "Unable to delete this batch.";
         } finally {
             batchLoading = false;
         }
@@ -786,6 +816,17 @@
                 on:click={createNewBatch}
                 title="Create new batch">+ New Batch</button
             >
+            <button
+                class="batch-new-btn"
+                on:click={deleteSelectedBatch}
+                disabled={batchLoading || !selectedBatchId}
+                title="Delete this unsubmitted batch"
+            >
+                Delete batch
+            </button>
+            <button class="batch-new-btn" on:click={() => regroupBatchPhotos("1")} disabled={batchLoading} title="Regroup one photo per item">Group 1</button>
+            <button class="batch-new-btn" on:click={() => regroupBatchPhotos("2")} disabled={batchLoading} title="Regroup two photos per item">Group 2</button>
+            <button class="batch-new-btn" on:click={() => regroupBatchPhotos("3")} disabled={batchLoading} title="Regroup three photos per item">Group 3</button>
         </div>
     </div>
 

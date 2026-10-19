@@ -154,6 +154,26 @@ def get_batch(batch_id: str, seller_id: str) -> dict[str, Any]:
         }
 
 
+def delete_batch(batch_id: str, seller_id: str) -> dict[str, Any]:
+    """Delete an unused seller-owned batch before it reaches eBay."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    get_batch(batch_id, seller_id)
+    with connect() as db:
+        submitted = db.execute(
+            """SELECT COUNT(*) AS count FROM inventory_submissions
+               WHERE batch_id = ? AND status NOT IN ('failed', 'cancelled')""",
+            (batch_id,),
+        ).fetchone()
+        if submitted and int(submitted["count"] or 0) > 0:
+            raise ValueError("This batch cannot be deleted after an eBay draft submission.")
+        db.execute(
+            "DELETE FROM inventory_batches WHERE id = ? AND seller_id = ?",
+            (batch_id, seller_id),
+        )
+    return {"deleted": True, "batchId": batch_id}
+
+
 # ---------------------------------------------------------------------------
 # Photo Registration & Grouping
 # ---------------------------------------------------------------------------
