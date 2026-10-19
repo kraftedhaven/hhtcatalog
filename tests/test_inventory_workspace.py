@@ -156,6 +156,8 @@ class InventoryWorkspaceTests(unittest.TestCase):
         self.assertTrue(all(len(v["title"]) <= 80 for v in enriched["titleCandidates"].values()))
         self.assertIn("quick_sale", enriched["pricingOptions"])
         self.assertEqual(enriched["listing"]["researchClues"]["comparablePrice"], "$54.99")
+        self.assertEqual(enriched["listing"]["price"], "54.99")
+        self.assertEqual(enriched["provenance"]["price"]["source"], "ai_estimate")
         self.assertEqual(enriched["provenance"]["type"]["source"], "seller_input")
         self.assertEqual(enriched["workflowStatus"], "needs_review")
 

@@ -1160,6 +1160,14 @@ def enrich_item_from_research_clues(
             "balanced": {"price": round(base_price, 2), "label": "Balanced", "confidence": "medium", "reason": "Centered on the supplied/recommended reference."},
             "premium": {"price": round(base_price * 1.15, 2), "label": "Premium", "confidence": "low", "reason": "Higher asking price; expect a longer sales cycle."},
         }
+        if not str(listing.get("price") or "").strip():
+            listing["price"] = f"{pricing_options['balanced']['price']:.2f}"
+            provenance["price"] = {
+                "source": "ai_estimate",
+                "confidence": "medium",
+                "evidence": "Balanced suggestion generated from the seller-provided comparable price; verify before approval.",
+                "sellerConfirmed": False,
+            }
     validation = check_listing_rules(listing, item["photoCount"], {})
     now = _now_iso()
     with connect() as db:
