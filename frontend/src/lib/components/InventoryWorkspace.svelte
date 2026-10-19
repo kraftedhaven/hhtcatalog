@@ -372,6 +372,25 @@
         }
     }
 
+    async function analyzeWorkspaceItem(itemId) {
+        if (!selectedBatchId || !itemId) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            const result = await inventoryAnalyzeBatch(selectedBatchId, [itemId]);
+            items = await inventoryListBatchItems(selectedBatchId);
+            if (inspectingItemId === itemId) {
+                inspectingItem = items.find((item) => item.id === itemId) || inspectingItem;
+            }
+            globalStatus = "Photo analysis queued. HHT will populate the title and estimated price when it finishes.";
+            return result;
+        } catch (err) {
+            globalError = err.message || "Could not queue photo analysis.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Batch Actions: Validate, Approve, Submit
     // -----------------------------------------------------------------------
@@ -534,6 +553,7 @@
         uploadError = "";
         uploadPhase = "compressing";
         uploadPhaseMessage = "";
+        const existingItemIds = new Set(items.map((item) => item.id));
 
         try {
             // Partition into bounded chunks matching grouping mode to ensure request body stays under limit
@@ -585,8 +605,17 @@
 
             // Refresh items (backend handles initial grouping or safely appends new item groups without touching existing items)
             items = await inventoryListBatchItems(selectedBatchId);
+            const newItemIds = items
+                .filter((item) => !existingItemIds.has(item.id))
+                .map((item) => item.id);
+            if (newItemIds.length) {
+                await inventoryAnalyzeBatch(selectedBatchId, newItemIds);
+                items = await inventoryListBatchItems(selectedBatchId);
+            }
             closeUploadModal();
-            globalStatus = `Successfully uploaded ${uploadFiles.length} photo(s) (under 10MB limit) and updated item groups.`;
+            globalStatus = newItemIds.length
+                ? `Uploaded and grouped ${uploadFiles.length} photo(s). AI title and price analysis is now running.`
+                : `Successfully uploaded ${uploadFiles.length} photo(s) (under 10MB limit) and updated item groups.`;
         } catch (err) {
             uploadError = err.message || "Failed to upload and group photos.";
         } finally {
@@ -1321,6 +1350,19 @@
                         </div>
                     </div>
 
+                    <div class="inspector-section">
+                        <button
+                            type="button"
+                            class="action-btn-primary w-full"
+                            on:click={() => analyzeWorkspaceItem(inspectingItem.id)}
+                            disabled={actionLoading || !inspectingItem.photos?.length}
+                        >
+                            {actionLoading ? "Queueing photo analysis..." : "Analyze photos & estimate price"}
+                        </button>
+                        <p class="text-xs text-slate-500 mt-2">
+                            Runs the existing vision worker from Workspace. No Analyze-tab upload is required.
+                        </p>
+                    </div>
                     <!-- Seller research clues -->
                     <div class="inspector-section">
                         <h4 class="inspector-section-title">Research clues</h4>

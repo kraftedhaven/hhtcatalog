@@ -1522,6 +1522,18 @@ def run_job(job_id: str) -> dict[str, Any] | None:
             result = {"route": payload.get("route", {}), "groups": results, "processedPhotos": len(decoded), "readOnly": True}
         else:
             raise ValueError("Unsupported Commerce Agent job kind.")
+        workspace_item_id = str(payload.get("workspaceItemId") or "") if isinstance(payload, dict) else ""
+        if kind == "listing_analysis" and workspace_item_id and isinstance(result, dict):
+            try:
+                from .inventory_workspace import prepopulate_item_from_analysis
+                prepopulate_item_from_analysis(
+                    workspace_item_id,
+                    str(row["seller_id"] or ""),
+                    result,
+                    preserve_seller_edits=True,
+                )
+            except Exception:
+                logger.exception("Workspace item enrichment failed after listing analysis")
         _update_job(job_id, "completed", 100, result, "")
         return active_import_job(job_id)
     except Exception as exc:

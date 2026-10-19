@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -1183,28 +1184,54 @@ def enrich_item_from_research_clues(
 def start_workspace_analysis(
     batch_id: str, seller_id: str, item_ids: list[str] | None = None
 ) -> dict[str, Any]:
-    """Queue analysis for grouped items in a batch."""
+    """Create real vision jobs from the grouped item's hosted photos."""
     if not seller_id:
         raise ValueError("Seller ownership is required.")
     items = list_batch_items(batch_id, seller_id)
     if item_ids:
         items = [it for it in items if it["id"] in item_ids]
 
-    queued_count = 0
-    now = _now_iso()
-
+    job_ids: list[str] = []
     for item in items:
-        # Mark as queued
+        images: list[dict[str, Any]] = []
+        for photo in (item.get("photos") or [])[:5]:
+            url = str(photo.get("storageUrl") or photo.get("previewUrl") or "").strip()
+            if not url.lower().startswith("https://"):
+                continue
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "HHT-Commerce-Agent/1.0"})
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    data = response.read(12 * 1024 * 1024 + 1)
+                if len(data) > 12 * 1024 * 1024:
+                    raise ValueError("Photo exceeds the analysis size limit.")
+                if data:
+                    images.append({
+                        "data": data,
+                        "mimeType": "image/jpeg",
+                        "filename": str(photo.get("originalFilename") or "photo.jpg"),
+                    })
+            except Exception as exc:
+                logger.warning("Workspace photo download failed for item %s: %s", item["id"], type(exc).__name__)
+        if not images:
+            raise ValueError(f"No usable hosted photos are available for item {item['id'][:8]}.")
+        job = start_listing_analysis_job(
+            images,
+            seller_id,
+            {
+                "workspaceItemId": item["id"],
+                "analysisHints": item.get("listing", {}).get("researchClues", {}),
+            },
+        )
+        job_ids.append(str(job["jobId"]))
         with connect() as db:
             db.execute(
                 """UPDATE inventory_items
-                   SET workflow_status = 'analysis_queued', updated_at = ?
+                   SET workflow_status = 'analysis_queued', analysis_job_id = ?, updated_at = ?
                    WHERE id = ? AND seller_id = ?""",
-                (now, item["id"], seller_id),
+                (job["jobId"], _now_iso(), item["id"], seller_id),
             )
-        queued_count += 1
 
-    return {"queuedCount": queued_count, "batchId": batch_id}
+    return {"queuedCount": len(job_ids), "jobIds": job_ids, "batchId": batch_id}
 
 
 # ---------------------------------------------------------------------------

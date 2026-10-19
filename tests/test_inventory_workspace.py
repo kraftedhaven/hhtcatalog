@@ -161,6 +161,34 @@ class InventoryWorkspaceTests(unittest.TestCase):
         self.assertEqual(enriched["provenance"]["type"]["source"], "seller_input")
         self.assertEqual(enriched["workflowStatus"], "needs_review")
 
+    def test_workspace_analysis_creates_job_from_hosted_photos(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Auto Analysis", grouping_mode="1")
+        inventory_workspace.register_batch_photos(
+            batch["id"], self.seller_id,
+            [{"filename": "item.jpg", "previewUrl": "https://example.com/item.jpg"}],
+        )
+        item = inventory_workspace.list_batch_items(batch["id"], self.seller_id)[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit=None):
+                return b"image-bytes"
+
+        with mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=Response()), \
+             mock.patch("hht_app.inventory_workspace.start_listing_analysis_job", return_value={"jobId": "job-auto-1"}) as start_job:
+            result = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item["id"]])
+
+        self.assertEqual(result["jobIds"], ["job-auto-1"])
+        start_job.assert_called_once()
+        reloaded = inventory_workspace.get_item(item["id"], self.seller_id)
+        self.assertEqual(reloaded["workflowStatus"], "analysis_queued")
+        self.assertEqual(reloaded["analysisJobId"], "job-auto-1")
+
     def test_validation_and_approval_gating(self):
         batch = inventory_workspace.create_batch(self.seller_id, name="Approval Test", grouping_mode="1")
         inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
