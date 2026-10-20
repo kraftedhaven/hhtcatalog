@@ -1800,32 +1800,15 @@
 
         <nav class="tabs" aria-label="Main navigation">
             <button
-                class:on={tab === "workspace"}
-                on:click={() => (tab = "workspace")}>Workspace</button
+                class:on={tab === "workspace" || tab === "edit" || tab === "queue"}
+                on:click={() => (tab = "workspace")}>New Listings</button
             >
             <button
                 class:on={tab === "commerce"}
-                on:click={() => (tab = "commerce")}>Listing Optimization</button
+                on:click={() => (tab = "commerce")}>Existing Listings</button
             >
             <button
-                class:on={tab === "analyze"}
-                on:click={() => (tab = "analyze")}>Analyze</button
-            >
-            <button class:on={tab === "edit"} on:click={() => (tab = "edit")}
-                >Review</button
-            >
-            <button class:on={tab === "queue"} on:click={() => (tab = "queue")}
-                >Queue</button
-            >
-            <button
-                class:on={tab === "capacity"}
-                on:click={() => {
-                    tab = "capacity";
-                    loadPerformance();
-                }}>Capacity</button
-            >
-            <button
-                class:on={tab === "settings"}
+                class:on={tab === "settings" || tab === "capacity"}
                 on:click={() => (tab = "settings")}>Settings</button
             >
         </nav>
