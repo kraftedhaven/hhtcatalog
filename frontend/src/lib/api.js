@@ -496,3 +496,37 @@ export async function inventoryGetItemSubmission(itemId) {
     const body = await parseResponse(res);
     return body.result || body;
 }
+
+export async function inventoryExportBatchDraftCSV(batchId, itemIds = null, templateCsv = null) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/export-draft-csv`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds, templateCsv }),
+    });
+    if (!res.ok) {
+        const body = await parseResponse(res).catch(() => ({}));
+        const err = new Error(body.error || 'Failed to export Seller Hub Draft CSV.');
+        err.validationErrors = body.validationErrors || [];
+        throw err;
+    }
+    const text = await res.text();
+    triggerDownload(text, `hht_seller_hub_drafts_${batchId.slice(0, 8)}.csv`, 'text/csv');
+    return text;
+}
+
+export async function downloadSellerHubDraftCSV(items, templateCsv = null) {
+    const res = await authenticatedFetch(`${baseUrl()}/export/draft-csv`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items, templateCsv }),
+    });
+    if (!res.ok) {
+        const body = await parseResponse(res).catch(() => ({}));
+        const err = new Error(body.error || 'Failed to export Seller Hub Draft CSV.');
+        err.validationErrors = body.validationErrors || [];
+        throw err;
+    }
+    const text = await res.text();
+    triggerDownload(text, 'hht_seller_hub_drafts.csv', 'text/csv');
+    return text;
+}

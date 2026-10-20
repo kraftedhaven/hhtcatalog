@@ -1378,3 +1378,40 @@ def get_item_submission_status(item_id: str, seller_id: str) -> dict[str, Any]:
             "status": current_status,
             "details": result,
         }
+
+
+def export_batch_seller_hub_draft_csv(
+    batch_id: str,
+    seller_id: str,
+    item_ids: list[str] | None = None,
+    template_text: str | None = None,
+) -> str:
+    """Export approved items from an inventory batch into official Seller Hub Create Drafts CSV format."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+
+    items = list_batch_items(batch_id, seller_id)
+    if item_ids:
+        item_id_set = set(item_ids)
+        items = [i for i in items if i["id"] in item_id_set]
+
+    # Only explicitly approved items may enter draft submission / export
+    approved_items = [i for i in items if i.get("workflowStatus") == "approved" or i.get("sellerConfirmed") is True]
+    if not approved_items:
+        raise ValueError("No approved items found to export. Review and approve items before exporting to Seller Hub Draft CSV.")
+
+    # Retrieve live category metadata for relevant categories
+    from .ebay_taxonomy import category_aspects
+    category_metadata_map: dict[str, Any] = {}
+    for itm in approved_items:
+        cat_id = str(itm.get("listing", {}).get("cat") or itm.get("cat") or "").strip()
+        if cat_id and cat_id not in category_metadata_map:
+            try:
+                meta = category_aspects(cat_id, timeout=2.0)
+                if meta and meta.get("status") == "ok":
+                    category_metadata_map[cat_id] = meta
+            except Exception:
+                pass
+
+    from .seller_hub_draft_template import export_seller_hub_draft_csv
+    return export_seller_hub_draft_csv(approved_items, template_text=template_text, category_metadata_map=category_metadata_map)

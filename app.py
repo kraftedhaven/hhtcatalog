@@ -16,6 +16,7 @@ from hht_app.ebay_taxonomy import category_aspects, suggest_category
 from hht_app import commerce_agent, inventory_workspace
 from hht_app.providers import ProviderError, UploadedImage, analyze_images, configured_providers, demo_mode
 from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, normalize_listing
+from hht_app.seller_hub_draft_template import DraftExportValidationError, export_seller_hub_draft_csv
 from hht_app.photo_quality import assess_image
 from hht_app.photo_storage import PhotoStorageError, storage_status, store_photo
 from hht_app.supabase_auth import authenticate_request
@@ -331,11 +332,23 @@ def export_csv():
 def export_draft_csv():
     body = request.get_json(silent=True) or {}
     items = body.get("items") or body.get("results") or []
+    template_text = body.get("template") or body.get("templateCsv") or None
     if not isinstance(items, list):
         return jsonify({"error": "Request body must include an items array."}), 400
     try:
-        validate_draft_photo_urls(items)
-        csv_text = export_ebay_draft_csv(items)
+        cat_map = {}
+        for itm in items:
+            c = str(itm.get("cat") or itm.get("listing", {}).get("cat") or "").strip()
+            if c and c not in cat_map:
+                try:
+                    meta = category_aspects(c, timeout=2.0)
+                    if meta.get("status") == "ok":
+                        cat_map[c] = meta
+                except Exception:
+                    pass
+        csv_text = export_seller_hub_draft_csv(items, template_text=template_text, category_metadata_map=cat_map)
+    except DraftExportValidationError as exc:
+        return jsonify({"error": str(exc), "validationErrors": exc.errors}), 400
     except EbayFeedError as exc:
         return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
     except Exception as exc:
@@ -343,7 +356,7 @@ def export_draft_csv():
     return Response(
         csv_text,
         mimetype="text/csv",
-        headers={"Content-Disposition": "attachment; filename=hht_ebay_draft_template.csv"},
+        headers={"Content-Disposition": "attachment; filename=hht_seller_hub_drafts.csv"},
     )
 
 
@@ -876,6 +889,31 @@ def inventory_batch_get(batch_id):
         return jsonify({"error": str(exc)}), 404
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/batches/<batch_id>/export-draft-csv", methods=["POST"])
+def inventory_batch_export_draft_csv(batch_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    item_ids = body.get("itemIds")
+    template_csv = body.get("templateCsv") or body.get("template")
+    try:
+        csv_text = inventory_workspace.export_batch_seller_hub_draft_csv(
+            batch_id, str(seller_id), item_ids=item_ids, template_text=template_csv
+        )
+    except DraftExportValidationError as exc:
+        return jsonify({"error": str(exc), "validationErrors": exc.errors}), 400
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    return Response(
+        csv_text,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=hht_seller_hub_drafts_{batch_id[:8]}.csv"},
+    )
 
 
 @app.route("/api/inventory/batches/<batch_id>/photos", methods=["POST"])

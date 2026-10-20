@@ -1718,9 +1718,11 @@ def check_listing_rules(
     if str(listing.get("cid") or "") in {"3000", "4000", "5000", "6000"} and not str(listing.get("cnote") or "").strip():
         findings.append({"rule": "used_condition", "message": "Add a condition description for this used item."})
     taxonomy = taxonomy or {}
-    if taxonomy.get("status") == "valid":
+    if taxonomy.get("status") in {"valid", "invalid_value"}:
         for aspect in taxonomy.get("missingRequiredAspects", []):
             findings.append({"rule": "taxonomy_required_specific", "message": f"Required eBay specific is missing: {aspect}."})
+        for inv in taxonomy.get("invalidValues", []):
+            findings.append({"rule": "taxonomy_invalid_value", "message": f"Invalid value '{inv['value']}' for eBay specific '{inv['aspect']}'."})
     else:
         findings.append({"rule": "taxonomy_unverified", "message": "Required item specifics could not be verified with eBay Taxonomy; review this listing."})
     return {"passed": not findings, "findings": findings, "taxonomyStatus": taxonomy.get("status", "unavailable")}

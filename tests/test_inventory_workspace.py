@@ -469,6 +469,65 @@ class InventoryWorkspaceTests(unittest.TestCase):
         self.assertEqual(existing["listing"]["title"], "Existing Item 1 Edited")
         self.assertEqual(existing["listing"]["price"], "99.00")
 
+    def test_export_batch_seller_hub_draft_csv_requires_approved_items(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Export Gate Batch", grouping_mode="1")
+        photos = [{"filename": "unapproved.jpg", "previewUrl": "https://example.com/unapp.jpg"}]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos)
+        items = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        item_id = items[0]["id"]
+
+        # Attempting export with no approved items raises ValueError
+        with self.assertRaises(ValueError) as ctx:
+            inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], self.seller_id)
+        self.assertIn("approved", str(ctx.exception).lower())
+
+        # Complete and approve the item
+        inventory_workspace.patch_item(item_id, self.seller_id, {
+            "title": "Vintage Approved Item 1",
+            "price": "49.99",
+            "cat": "57988",
+            "cid": "3000",
+            "size": "M",
+            "brand": "Vintage",
+            "confirmAll": True,
+        })
+        inventory_workspace.approve_items([item_id], self.seller_id)
+
+        # Now export succeeds and produces valid Seller Hub Draft CSV
+        csv_out = inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], self.seller_id)
+        self.assertIn("#INFO", csv_out)
+        self.assertIn("Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)", csv_out)
+        self.assertIn("Draft", csv_out)
+        self.assertIn("57988", csv_out)
+        self.assertIn("Vintage Approved Item 1", csv_out)
+
+    def test_delete_batch_blocked_after_draft_submission(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Submission Protected Batch", grouping_mode="1")
+        photos = [
+            {"filename": f"p{i}.jpg", "previewUrl": f"https://example.com/p{i}.jpg", "storageUrl": f"https://example.com/p{i}.jpg"}
+            for i in range(3)
+        ]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos)
+        items = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        for it in items:
+            inventory_workspace.patch_item(it["id"], self.seller_id, {
+                "title": f"Brand Approved Item {it['id'][:4]}",
+                "price": "29.99",
+                "cat": "57988",
+                "size": "M",
+                "brand": "Brand",
+                "confirmAll": True,
+            })
+            inventory_workspace.approve_items([it["id"]], self.seller_id)
+
+        with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "feed-task-123", "status": "submitted"}):
+            inventory_workspace.submit_approved_drafts([it["id"] for it in items], self.seller_id)
+
+        # Deleting this batch must now be rejected
+        with self.assertRaises(ValueError) as ctx:
+            inventory_workspace.delete_batch(batch["id"], self.seller_id)
+        self.assertIn("cannot be deleted after an eBay draft submission", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

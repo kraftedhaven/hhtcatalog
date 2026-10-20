@@ -322,7 +322,16 @@ def draft_photo_urls(item: dict[str, Any]) -> list[str]:
     if isinstance(assets, list):
         for asset in assets:
             if isinstance(asset, dict):
-                urls.extend(_split_draft_urls(asset.get("ebayUrl")))
+                urls.extend(
+                    _split_draft_urls(
+                        asset.get("ebayUrl")
+                        or asset.get("storageUrl")
+                        or asset.get("storage_url")
+                        or asset.get("previewUrl")
+                        or asset.get("preview_url")
+                        or asset.get("url")
+                    )
+                )
     result: list[str] = []
     seen: set[str] = set()
     for url in urls:

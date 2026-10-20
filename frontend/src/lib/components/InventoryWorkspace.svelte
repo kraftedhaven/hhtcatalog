@@ -16,7 +16,9 @@
         inventoryApproveItems,
         inventorySubmitDrafts,
         inventoryGetItemSubmission,
+        inventoryExportBatchDraftCSV,
         ebayCategorySuggestions,
+        ebayCategoryAspects,
     } from "$lib/api";
     import {
         formatBytes,
@@ -26,6 +28,7 @@
 
     export let onSwitchToListingOptimization = () => {};
     export let onOpenFullReview = () => {};
+    export let onOpenAnalysisMonitor = () => {};
 
     // Workspace modes: 'new_inventory' | 'listing_optimization'
     let activeSubTab = "new_inventory";
@@ -35,6 +38,22 @@
     let selectedBatchId = "";
     let selectedBatch = null;
     let batchLoading = false;
+
+    // Batch actions & template states
+    let isBatchActionsMenuOpen = false;
+    let sellerTemplateCsv = "";
+    let templateFileName = "";
+    let isTemplateModalOpen = false;
+    let exportCsvLoading = false;
+
+    // Category aspects state for inspecting item
+    let categoryAspects = [];
+    let categoryAspectsLoading = false;
+    let categoryAspectsError = "";
+    let lastLoadedAspectCategoryId = "";
+    let categoryQuery = "";
+    let categorySuggestions = [];
+    let categorySearching = false;
 
     // Items and selection
     let items = [];
@@ -52,6 +71,41 @@
         comparablePrice: "",
     };
     let researchLoading = false;
+
+    // Reactive Batch Lifecycle Counts
+    $: totalItemCount = items.length;
+    $: analyzingCount = items.filter(
+        (it) => it.workflowStatus === "analysis_queued" || it.workflowStatus === "analysis_running"
+    ).length;
+    $: readyCount = items.filter((it) => it.workflowStatus === "ready_for_approval").length;
+    $: needsReviewCount = items.filter((it) => it.workflowStatus === "needs_review").length;
+    $: approvedCount = items.filter((it) => it.workflowStatus === "approved").length;
+    $: submittedCount = items.filter(
+        (it) => it.workflowStatus === "draft_submitted" || it.workflowStatus === "draft_result_available"
+    ).length;
+
+    // State-Dependent Action Analysis
+    $: relevantItems = selectedItemIds.size > 0
+        ? items.filter((it) => selectedItemIds.has(it.id))
+        : items;
+    $: hasAnalyzing = relevantItems.some(
+        (it) => it.workflowStatus === "analysis_queued" || it.workflowStatus === "analysis_running"
+    );
+    $: hasGrouped = relevantItems.some(
+        (it) => it.workflowStatus === "grouped" || it.workflowStatus === "photo_staged"
+    );
+    $: hasMissingRequired = relevantItems.some((it) => {
+        const l = it.listing || {};
+        return !l.title || !l.price || !l.cat;
+    });
+    $: hasNeedsReview = relevantItems.some((it) => it.workflowStatus === "needs_review");
+    $: hasValidated = relevantItems.some(
+        (it) => it.rulesCheck?.valid && it.workflowStatus !== "approved"
+    );
+    $: allApproved = relevantItems.length > 0 && relevantItems.every((it) => it.workflowStatus === "approved");
+    $: allSubmitted = relevantItems.length > 0 && relevantItems.every(
+        (it) => it.workflowStatus === "draft_submitted" || it.workflowStatus === "draft_result_available"
+    );
 
     // Filters and sorting
     let searchQuery = "";
@@ -175,6 +229,13 @@
 
     async function deleteSelectedBatch() {
         if (!selectedBatchId || !selectedBatch) return;
+        const hasSubmitted = items.some(
+            (it) => it.workflowStatus === "draft_submitted" || it.workflowStatus === "draft_result_available"
+        );
+        if (hasSubmitted) {
+            globalError = "Cannot delete batch: draft items have already been submitted to eBay.";
+            return;
+        }
         const confirmed = window.confirm(
             `Delete batch "${selectedBatch.name}" and its grouped photos? This cannot be undone.`
         );
@@ -199,6 +260,266 @@
             globalError = err.message || "Unable to delete this batch.";
         } finally {
             batchLoading = false;
+        }
+    }
+
+    async function loadCategoryAspects(categoryId) {
+        const catId = String(categoryId || "").trim();
+        if (!catId) {
+            categoryAspects = [];
+            categoryAspectsError = "";
+            lastLoadedAspectCategoryId = "";
+            return;
+        }
+        if (catId === lastLoadedAspectCategoryId && categoryAspects.length > 0) {
+            return;
+        }
+        categoryAspectsLoading = true;
+        categoryAspectsError = "";
+        try {
+            const res = await ebayCategoryAspects(catId);
+            if (res.status === "unavailable" || res.status === "not_configured") {
+                categoryAspects = [];
+                categoryAspectsError = res.message || "eBay category options temporarily unavailable.";
+            } else {
+                categoryAspects = res.fields || [];
+                lastLoadedAspectCategoryId = catId;
+                if (!categoryAspects.length && res.message) {
+                    categoryAspectsError = res.message;
+                }
+            }
+        } catch (err) {
+            categoryAspectsError = "eBay category options temporarily unavailable.";
+        } finally {
+            categoryAspectsLoading = false;
+        }
+    }
+
+    $: if (inspectingItem && inspectingItem.listing?.cat) {
+        loadCategoryAspects(inspectingItem.listing.cat);
+    }
+
+    async function searchCategories(query) {
+        if (!query || query.trim().length < 2) {
+            categorySuggestions = [];
+            return;
+        }
+        categorySearching = true;
+        try {
+            const res = await ebayCategorySuggestions(query.trim());
+            categorySuggestions = res.suggestions || [];
+        } catch {
+            categorySuggestions = [];
+        } finally {
+            categorySearching = false;
+        }
+    }
+
+    async function selectCategorySuggestion(item, suggestion) {
+        handleInlineEdit(item, "cat", suggestion.categoryId);
+        handleInlineEdit(item, "categoryName", suggestion.path || suggestion.categoryName);
+        categorySuggestions = [];
+        categoryQuery = "";
+        await loadCategoryAspects(suggestion.categoryId);
+    }
+
+    function getAspectValue(item, aspectName) {
+        if (!item?.listing) return "";
+        const specifics = item.listing.itemSpecifics || {};
+        for (const [k, v] of Object.entries(specifics)) {
+            if (k.toLowerCase() === aspectName.toLowerCase()) return v;
+        }
+        const aliases = {
+            brand: "brand",
+            size: "size",
+            color: "color",
+            department: "dept",
+            type: "type",
+            style: "style",
+            material: "mat",
+            pattern: "pat",
+            "country/region of manufacture": "madeIn",
+        };
+        const canonicalKey = aliases[aspectName.toLowerCase()];
+        if (canonicalKey && item.listing[canonicalKey]) {
+            return item.listing[canonicalKey];
+        }
+        return "";
+    }
+
+    function setAspectValue(item, aspectName, value) {
+        const specifics = { ...(item.listing?.itemSpecifics || {}) };
+        specifics[aspectName] = value;
+        handleInlineEdit(item, "itemSpecifics", specifics);
+
+        const aliases = {
+            brand: "brand",
+            size: "size",
+            color: "color",
+            department: "dept",
+            type: "type",
+            style: "style",
+            material: "mat",
+            pattern: "pat",
+            "country/region of manufacture": "madeIn",
+        };
+        const canonicalKey = aliases[aspectName.toLowerCase()];
+        if (canonicalKey) {
+            handleInlineEdit(item, canonicalKey, Array.isArray(value) ? value.join(" | ") : value);
+        }
+        handleInlineEdit(item, "confirmField", aspectName);
+    }
+
+    function toggleMultiAspectValue(item, aspectName, val) {
+        const current = getAspectValue(item, aspectName);
+        let list = Array.isArray(current)
+            ? [...current]
+            : String(current || "").split("|").map((s) => s.trim()).filter(Boolean);
+        if (list.includes(val)) {
+            list = list.filter((v) => v !== val);
+        } else {
+            list.push(val);
+        }
+        setAspectValue(item, aspectName, list);
+    }
+
+    function getAspectProvenance(item, aspect) {
+        const val = getAspectValue(item, aspect.name);
+        const prov = item.provenance?.[aspect.name] || item.provenance?.[aspect.name.toLowerCase()] || {};
+        if (prov.sellerConfirmed || item.sellerConfirmed) {
+            return { label: "Seller confirmed", color: "bg-emerald-100 text-emerald-800 border-emerald-300" };
+        }
+        if (!val || String(val).trim() === "") {
+            if (aspect.required) {
+                return { label: "Required — missing", color: "bg-rose-100 text-rose-800 border-rose-300 font-bold" };
+            }
+            if (aspect.recommended) {
+                return { label: "Recommended", color: "bg-slate-100 text-slate-600 border-slate-300" };
+            }
+            return { label: "Optional", color: "bg-gray-100 text-gray-500 border-gray-200" };
+        }
+        if (prov.source === "photo") {
+            return { label: "Auto-filled from photo", color: "bg-blue-100 text-blue-800 border-blue-300" };
+        }
+        if (prov.source === "clue") {
+            return { label: "Auto-filled from seller clue", color: "bg-purple-100 text-purple-800 border-purple-300" };
+        }
+        if (prov.source === "default") {
+            return { label: "Seller default", color: "bg-slate-100 text-slate-700 border-slate-300" };
+        }
+        return { label: "Auto-filled from photo", color: "bg-blue-100 text-blue-800 border-blue-300" };
+    }
+
+    async function handleDownloadDraftCsv() {
+        const approvedItems = items.filter((it) => it.workflowStatus === "approved");
+        if (approvedItems.length === 0) {
+            globalError = "No approved items to export. Validate and approve items first.";
+            return;
+        }
+        exportCsvLoading = true;
+        globalError = "";
+        try {
+            const itemIds = selectedItemIds.size > 0
+                ? Array.from(selectedItemIds).filter((id) => {
+                    const it = items.find((i) => i.id === id);
+                    return it && it.workflowStatus === "approved";
+                })
+                : approvedItems.map((it) => it.id);
+            if (itemIds.length === 0) {
+                globalError = "None of the selected items are approved. Approve items before CSV export.";
+                return;
+            }
+            await inventoryExportBatchDraftCSV(selectedBatchId, itemIds, sellerTemplateCsv || null);
+            globalStatus = `Exported official eBay Seller Hub Create Drafts CSV with ${itemIds.length} approved item(s). Upload via eBay Seller Hub → Reports → Upload.`;
+        } catch (err) {
+            if (err.validationErrors?.length) {
+                const first = err.validationErrors[0];
+                globalError = `CSV Validation Failed: Row ${first.row} (${first.sku || first.title || "Item"}): ${first.field} — ${first.message}`;
+            } else {
+                globalError = err.message || "Failed to export Seller Hub Draft CSV.";
+            }
+        } finally {
+            exportCsvLoading = false;
+        }
+    }
+
+    function handleTemplateFileUpload(event) {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        templateFileName = file.name;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            sellerTemplateCsv = e.target.result;
+            globalStatus = `Configured official eBay Create Drafts template: ${file.name}.`;
+            isTemplateModalOpen = false;
+        };
+        reader.readAsText(file);
+    }
+
+    async function analyzeSelectedOrBatch() {
+        const ids = selectedItemIds.size > 0
+            ? Array.from(selectedItemIds)
+            : items.map((it) => it.id);
+        if (!ids.length) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            await inventoryAnalyzeBatch(selectedBatchId, ids);
+            items = await inventoryListBatchItems(selectedBatchId);
+            globalStatus = `Analysis queued for ${ids.length} item(s). Vision worker is populating titles and price estimates.`;
+        } catch (err) {
+            globalError = err.message || "Failed to start analysis.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function reprocessBatch() {
+        const unconfirmedIds = items
+            .filter((it) => !it.sellerConfirmed && it.workflowStatus !== "draft_submitted" && it.workflowStatus !== "draft_result_available")
+            .map((it) => it.id);
+        if (!unconfirmedIds.length) {
+            globalStatus = "All items in this batch are already seller-confirmed or submitted.";
+            return;
+        }
+        actionLoading = true;
+        globalError = "";
+        try {
+            await inventoryAnalyzeBatch(selectedBatchId, unconfirmedIds);
+            items = await inventoryListBatchItems(selectedBatchId);
+            globalStatus = `Reprocessing ${unconfirmedIds.length} unconfirmed item(s). Seller-confirmed edits are preserved.`;
+        } catch (err) {
+            globalError = err.message || "Reprocessing failed.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    function fixHighlightedFields() {
+        const target = items.find((it) => {
+            const l = it.listing || {};
+            return !l.title || !l.price || !l.cat || it.workflowStatus === "needs_review";
+        });
+        if (target) {
+            openItemInspector(target);
+            globalStatus = `Inspect item ${target.id.slice(0, 8)} to complete missing fields.`;
+        }
+    }
+
+    function reviewSelectedOrFirst() {
+        const target = (selectedItemIds.size > 0 ? items.find((it) => selectedItemIds.has(it.id)) : null) ||
+            items.find((it) => it.workflowStatus === "needs_review") ||
+            items[0];
+        if (target) {
+            openItemInspector(target);
+        }
+    }
+
+    function viewDraftResult() {
+        const target = items.find((it) => it.workflowStatus === "draft_submitted" || it.workflowStatus === "draft_result_available");
+        if (target) {
+            openItemInspector(target);
+            globalStatus = `Draft result for item ${target.id.slice(0, 8)}: ${target.workflowStatus}. Check Seller Hub Reports for eBay feed task details.`;
         }
     }
 
@@ -683,54 +1004,58 @@
         handleInlineEdit(item, "confirmAll", true);
     }
 
-    // Helper to get status badge classes
+    // Helper to get status badge classes matching Content 16 requirements
     function getStatusBadge(status) {
         switch (status) {
-            case "ready_for_approval":
-            case "approved":
+            case "photo_staged":
                 return {
-                    text: "Ready",
+                    text: "Uploading photos…",
+                    bg: "bg-indigo-50 text-indigo-700 border-indigo-200",
+                };
+            case "grouped":
+                return {
+                    text: "Grouping photos…",
+                    bg: "bg-gray-100 text-gray-700 border-gray-200",
+                };
+            case "analysis_queued":
+                return {
+                    text: "Analyzing item…",
+                    bg: "bg-blue-50 text-blue-700 border-blue-200 animate-pulse",
+                };
+            case "analysis_running":
+                return {
+                    text: "Generating title and price…",
+                    bg: "bg-blue-50 text-blue-700 border-blue-200 animate-pulse",
+                };
+            case "ready_for_approval":
+                return {
+                    text: "Ready for review",
                     bg: "bg-emerald-50 text-emerald-700 border-emerald-200",
                 };
             case "needs_review":
                 return {
-                    text: "Review",
-                    bg: "bg-slate-100 text-slate-700 border-slate-300",
+                    text: "Needs review",
+                    bg: "bg-amber-50 text-amber-700 border-amber-200",
                 };
-            case "grouped":
+            case "approved":
                 return {
-                    text: "Grouped",
-                    bg: "bg-gray-100 text-gray-700 border-gray-200",
-                };
-            case "photo_staged":
-                return {
-                    text: "Staged",
-                    bg: "bg-indigo-50 text-indigo-700 border-indigo-200",
-                };
-            case "analysis_queued":
-            case "analysis_running":
-                return {
-                    text: "Analyzing...",
-                    bg: "bg-blue-50 text-blue-700 border-blue-200 animate-pulse",
+                    text: "Approved",
+                    bg: "bg-teal-50 text-teal-700 border-teal-200",
                 };
             case "draft_submitted":
-                return {
-                    text: "Submitted",
-                    bg: "bg-cyan-50 text-cyan-700 border-cyan-200",
-                };
             case "draft_result_available":
                 return {
-                    text: "eBay Available",
-                    bg: "bg-teal-50 text-teal-700 border-teal-200",
+                    text: "Draft submitted",
+                    bg: "bg-cyan-50 text-cyan-700 border-cyan-200",
                 };
             case "draft_failed":
                 return {
-                    text: "Failed",
+                    text: "Draft failed",
                     bg: "bg-rose-50 text-rose-700 border-rose-200",
                 };
             default:
                 return {
-                    text: status,
+                    text: status || "Ready for review",
                     bg: "bg-gray-100 text-gray-700 border-gray-200",
                 };
         }
@@ -823,7 +1148,7 @@
             </button>
         </div>
 
-        <!-- Batch Selector & Creation -->
+        <!-- Batch Selector & Creation & Lifecycle Summary -->
         <div class="batch-selector-box">
             <label
                 for="batch-select-dropdown"
@@ -845,17 +1170,127 @@
                 on:click={createNewBatch}
                 title="Create new batch">+ New Batch</button
             >
-            <button
-                class="batch-new-btn"
-                on:click={deleteSelectedBatch}
-                disabled={batchLoading || !selectedBatchId}
-                title="Delete this unsubmitted batch"
-            >
-                Delete batch
-            </button>
-            <button class="batch-new-btn" on:click={() => regroupBatchPhotos("1")} disabled={batchLoading} title="Regroup one photo per item">Group 1</button>
-            <button class="batch-new-btn" on:click={() => regroupBatchPhotos("2")} disabled={batchLoading} title="Regroup two photos per item">Group 2</button>
-            <button class="batch-new-btn" on:click={() => regroupBatchPhotos("3")} disabled={batchLoading} title="Regroup three photos per item">Group 3</button>
+
+            <!-- Batch Actions Menu -->
+            <div class="batch-actions-dropdown-container">
+                <button
+                    type="button"
+                    class="batch-new-btn batch-actions-trigger"
+                    on:click={() => (isBatchActionsMenuOpen = !isBatchActionsMenuOpen)}
+                >
+                    Batch actions ▾
+                </button>
+                {#if isBatchActionsMenuOpen}
+                    <div class="batch-actions-menu">
+                        <button
+                            type="button"
+                            class="menu-item"
+                            on:click={() => {
+                                isBatchActionsMenuOpen = false;
+                                regroupBatchPhotos("1");
+                            }}
+                        >
+                            Regroup: 1 photo per item
+                        </button>
+                        <button
+                            type="button"
+                            class="menu-item"
+                            on:click={() => {
+                                isBatchActionsMenuOpen = false;
+                                regroupBatchPhotos("2");
+                            }}
+                        >
+                            Regroup: 2 photos per item
+                        </button>
+                        <button
+                            type="button"
+                            class="menu-item"
+                            on:click={() => {
+                                isBatchActionsMenuOpen = false;
+                                regroupBatchPhotos("3");
+                            }}
+                        >
+                            Regroup: 3 photos per item
+                        </button>
+                        <hr class="menu-divider" />
+                        <button
+                            type="button"
+                            class="menu-item"
+                            on:click={() => {
+                                isBatchActionsMenuOpen = false;
+                                reprocessBatch();
+                            }}
+                        >
+                            Reprocess / Re-analyze batch
+                        </button>
+                        <button
+                            type="button"
+                            class="menu-item"
+                            on:click={() => {
+                                isBatchActionsMenuOpen = false;
+                                onOpenAnalysisMonitor();
+                            }}
+                        >
+                            Analysis Monitor &amp; Diagnostics ↗
+                        </button>
+                        <button
+                            type="button"
+                            class="menu-item"
+                            on:click={() => {
+                                isBatchActionsMenuOpen = false;
+                                isTemplateModalOpen = true;
+                            }}
+                        >
+                            Configure eBay Draft Template (.csv)...
+                        </button>
+                        <hr class="menu-divider" />
+                        <button
+                            type="button"
+                            class="menu-item menu-danger"
+                            on:click={() => {
+                                isBatchActionsMenuOpen = false;
+                                deleteSelectedBatch();
+                            }}
+                            disabled={batchLoading || !selectedBatchId || items.some(it => it.workflowStatus === 'draft_submitted' || it.workflowStatus === 'draft_result_available')}
+                            title={items.some(it => it.workflowStatus === 'draft_submitted' || it.workflowStatus === 'draft_result_available') ? "Cannot delete batch after eBay draft submission" : "Delete unsubmitted batch"}
+                        >
+                            Delete batch
+                        </button>
+                    </div>
+                {/if}
+            </div>
+        </div>
+    </div>
+
+    <!-- Batch Lifecycle Summary Bar -->
+    <div class="batch-lifecycle-summary">
+        <div class="lifecycle-chip">
+            <span class="chip-label">Batch:</span>
+            <strong class="chip-value">{selectedBatch?.name || "No batch"}</strong>
+        </div>
+        <div class="lifecycle-chip">
+            <span class="chip-label">Total items:</span>
+            <strong class="chip-value">{totalItemCount}</strong>
+        </div>
+        <div class="lifecycle-chip" class:highlight={analyzingCount > 0}>
+            <span class="chip-label">Analyzing:</span>
+            <strong class="chip-value">{analyzingCount}</strong>
+        </div>
+        <div class="lifecycle-chip">
+            <span class="chip-label">Ready for review:</span>
+            <strong class="chip-value">{readyCount}</strong>
+        </div>
+        <div class="lifecycle-chip" class:highlight-warn={needsReviewCount > 0}>
+            <span class="chip-label">Needs review:</span>
+            <strong class="chip-value">{needsReviewCount}</strong>
+        </div>
+        <div class="lifecycle-chip" class:highlight-success={approvedCount > 0}>
+            <span class="chip-label">Approved:</span>
+            <strong class="chip-value">{approvedCount}</strong>
+        </div>
+        <div class="lifecycle-chip">
+            <span class="chip-label">Draft submitted:</span>
+            <strong class="chip-value">{submittedCount}</strong>
         </div>
     </div>
 
@@ -1173,79 +1608,71 @@
                                     </span>
                                 </td>
 
-                                <!-- Price (with Tier options popover) -->
+                                <!-- Price (with Tier options popover and AI Estimate notice) -->
                                 <td>
-                                    <div
-                                        class="relative flex items-center gap-1"
-                                    >
-                                        <span class="text-slate-400 text-sm"
-                                            >$</span
-                                        >
-                                        <input
-                                            type="number"
-                                            step="0.01"
-                                            class="table-input w-24 text-right"
-                                            value={listing.price || ""}
-                                            placeholder="0.00"
-                                            on:input={(e) =>
-                                                handleInlineEdit(
-                                                    item,
-                                                    "price",
-                                                    e.target.value,
-                                                )}
-                                        />
-                                        {#if item.pricingOptions && Object.keys(item.pricingOptions).length > 0}
-                                            <button
-                                                type="button"
-                                                class="price-tiers-btn"
-                                                title="View recommended price tiers"
-                                                on:click|stopPropagation={() => {
-                                                    activePriceTiersItemId =
-                                                        activePriceTiersItemId ===
-                                                        item.id
-                                                            ? null
-                                                            : item.id;
+                                    <div class="relative flex flex-col gap-0.5">
+                                        <div class="flex items-center gap-1">
+                                            <span class="text-slate-400 text-sm">$</span>
+                                            <input
+                                                type="number"
+                                                step="0.01"
+                                                class="table-input w-20 text-right font-semibold"
+                                                value={listing.price || ""}
+                                                placeholder="0.00"
+                                                on:input={(e) => {
+                                                    handleInlineEdit(item, "price", e.target.value);
+                                                    handleInlineEdit(item, "confirmField", "price");
                                                 }}
-                                            >
-                                                🏷️
-                                            </button>
-                                            {#if activePriceTiersItemId === item.id}
-                                                <div class="candidate-dropdown">
-                                                    <div
-                                                        class="p-2 border-b text-xs font-bold text-slate-700"
-                                                    >
-                                                        Recommended Price Tiers
-                                                    </div>
-                                                    {#each Object.entries(item.pricingOptions) as [tKey, opt]}
-                                                        <button
-                                                            type="button"
-                                                            class="candidate-option-btn"
-                                                            on:click={() =>
-                                                                selectPricingOption(
-                                                                    item,
-                                                                    tKey,
-                                                                )}
-                                                        >
-                                                            <div
-                                                                class="flex justify-between items-center text-xs font-bold"
-                                                            >
-                                                                <span
-                                                                    >{opt.label}</span
-                                                                >
-                                                                <span
-                                                                    class="text-emerald-700"
-                                                                    >${opt.price}</span
-                                                                >
-                                                            </div>
-                                                            <p
-                                                                class="text-xs text-slate-500 mt-0.5"
-                                                            >
-                                                                {opt.reason}
-                                                            </p>
-                                                        </button>
-                                                    {/each}
-                                                </div>
+                                            />
+                                            {#if item.pricingOptions && Object.keys(item.pricingOptions).length > 0}
+                                                <button
+                                                    type="button"
+                                                    class="price-tiers-btn"
+                                                    title="View recommended price tiers"
+                                                    on:click|stopPropagation={() => {
+                                                        activePriceTiersItemId =
+                                                            activePriceTiersItemId === item.id ? null : item.id;
+                                                    }}
+                                                >
+                                                    🏷️
+                                                </button>
                                             {/if}
+                                        </div>
+                                        <div class="text-[10px] text-slate-500 flex items-center gap-1 whitespace-nowrap">
+                                            {#if item.provenance?.price?.sellerConfirmed || item.sellerConfirmed}
+                                                <span class="text-emerald-700 font-bold">✓ Confirmed</span>
+                                            {:else}
+                                                <span class="text-amber-700 font-medium" title="AI estimate — verify before approval">AI estimate</span>
+                                            {/if}
+                                            {#if item.pricingOptions?.quickSale?.price}
+                                                <span class="text-slate-400" title="Quick Sale price">· Q:${item.pricingOptions.quickSale.price}</span>
+                                            {/if}
+                                            {#if item.pricingOptions?.balanced?.price}
+                                                <span class="text-slate-400" title="Balanced price">· B:${item.pricingOptions.balanced.price}</span>
+                                            {/if}
+                                        </div>
+                                        {#if activePriceTiersItemId === item.id}
+                                            <div class="candidate-dropdown">
+                                                <div class="p-2 border-b text-xs font-bold text-slate-700 flex justify-between items-center">
+                                                    <span>Recommended Price Tiers</span>
+                                                    <span class="text-[10px] text-amber-700 font-normal">AI estimate — verify before approval</span>
+                                                </div>
+                                                {#each Object.entries(item.pricingOptions) as [tKey, opt]}
+                                                    <button
+                                                        type="button"
+                                                        class="candidate-option-btn"
+                                                        on:click={() => selectPricingOption(item, tKey)}
+                                                    >
+                                                        <div class="flex justify-between items-center text-xs font-bold">
+                                                            <span>{opt.label}</span>
+                                                            <span class="text-emerald-700">${opt.price}</span>
+                                                        </div>
+                                                        <p class="text-xs text-slate-500 mt-0.5">
+                                                            {opt.reason}
+                                                        </p>
+                                                    </button>
+                                                {/each}
+                                            </div>
                                         {/if}
                                     </div>
                                 </td>
@@ -1363,6 +1790,334 @@
                             Runs the existing vision worker from Workspace. No Analyze-tab upload is required.
                         </p>
                     </div>
+
+                    <!-- Title & SKU Section -->
+                    <div class="inspector-section">
+                        <div class="flex items-center justify-between mb-1">
+                            <h4 class="inspector-section-title mb-0">Title & SKU</h4>
+                            <span class="text-xs font-semibold" class:text-rose-600={(inspectingItem.listing?.title || "").length > 80} class:text-slate-500={(inspectingItem.listing?.title || "").length <= 80}>
+                                {(inspectingItem.listing?.title || "").length}/80 chars
+                            </span>
+                        </div>
+                        <input
+                            type="text"
+                            class="w-full text-xs p-2 border rounded-md text-slate-800 font-medium mb-1"
+                            placeholder="Enter eBay listing title (1-80 characters)..."
+                            value={inspectingItem.listing?.title || ""}
+                            maxlength="80"
+                            on:input={(e) => {
+                                handleInlineEdit(inspectingItem, "title", e.target.value);
+                                handleInlineEdit(inspectingItem, "confirmField", "title");
+                            }}
+                        />
+                        {#if (inspectingItem.titleCandidates || []).length > 1}
+                            <div class="mt-1">
+                                <span class="text-[11px] text-slate-500 font-medium">Alternative suggested titles:</span>
+                                <div class="flex flex-col gap-1 mt-1">
+                                    {#each inspectingItem.titleCandidates as cand}
+                                        <button
+                                            type="button"
+                                            class="text-left text-xs p-1.5 border rounded hover:bg-slate-50 text-slate-700 transition"
+                                            on:click={() => {
+                                                handleInlineEdit(inspectingItem, "title", cand);
+                                                handleInlineEdit(inspectingItem, "confirmField", "title");
+                                            }}
+                                        >
+                                            {cand}
+                                        </button>
+                                    {/each}
+                                </div>
+                            </div>
+                        {/if}
+                        <div class="mt-2">
+                            <label class="block text-xs font-semibold text-slate-600 mb-0.5">
+                                Custom Label (SKU)
+                                <input
+                                    type="text"
+                                    class="w-full text-xs p-1.5 border rounded text-slate-800 mt-0.5"
+                                    placeholder="e.g. HHT-2026-001"
+                                    value={inspectingItem.listing?.sku || inspectingItem.sku || ""}
+                                    on:input={(e) => {
+                                        handleInlineEdit(inspectingItem, "sku", e.target.value);
+                                    }}
+                                />
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Pricing & Visible Price Tiers (Requirement 8) -->
+                    <div class="inspector-section">
+                        <div class="flex items-center justify-between mb-1">
+                            <h4 class="inspector-section-title mb-0">Pricing & Tiers</h4>
+                            {#if inspectingItem.sellerConfirmed || inspectingItem.provenance?.price?.sellerConfirmed}
+                                <span class="text-[11px] px-2 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                    ✓ Confirmed
+                                </span>
+                            {:else}
+                                <span class="text-[11px] px-2 py-0.5 rounded font-semibold bg-amber-100 text-amber-800 border border-amber-300">
+                                    AI estimate — verify before approval
+                                </span>
+                            {/if}
+                        </div>
+                        <div class="flex items-center gap-2 mb-2">
+                            <div class="relative flex-1">
+                                <span class="absolute left-2.5 top-2 text-slate-400 text-sm">$</span>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0.01"
+                                    class="w-full text-sm pl-6 pr-2 py-1.5 border rounded-md font-bold text-slate-900"
+                                    placeholder="0.00"
+                                    value={inspectingItem.listing?.price || ""}
+                                    on:input={(e) => {
+                                        handleInlineEdit(inspectingItem, "price", parseFloat(e.target.value) || 0);
+                                        handleInlineEdit(inspectingItem, "confirmField", "price");
+                                    }}
+                                />
+                            </div>
+                            <div class="w-24">
+                                <label class="text-[10px] uppercase font-bold text-slate-500 block">
+                                    Quantity
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        class="w-full text-xs p-1.5 border rounded text-slate-800 mt-0.5"
+                                        value={inspectingItem.listing?.quantity || 1}
+                                        on:input={(e) => handleInlineEdit(inspectingItem, "quantity", parseInt(e.target.value, 10) || 1)}
+                                    />
+                                </label>
+                            </div>
+                        </div>
+                        <div class="price-tiers-inspector-grid">
+                            <button
+                                type="button"
+                                class="price-tier-btn"
+                                title="Fast inventory turnover"
+                                on:click={() => {
+                                    const p = inspectingItem.quickSalePrice || inspectingItem.pricingTiers?.quickSale?.price || inspectingItem.listing?.price;
+                                    if (p) {
+                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
+                                        handleInlineEdit(inspectingItem, "confirmField", "price");
+                                    }
+                                }}
+                            >
+                                <span class="tier-name">Quick Sale</span>
+                                <span class="tier-val">${inspectingItem.quickSalePrice || inspectingItem.pricingTiers?.quickSale?.price || "--"}</span>
+                            </button>
+                            <button
+                                type="button"
+                                class="price-tier-btn"
+                                title="Balanced profit and velocity"
+                                on:click={() => {
+                                    const p = inspectingItem.balancedPrice || inspectingItem.pricingTiers?.balanced?.price || inspectingItem.listing?.price;
+                                    if (p) {
+                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
+                                        handleInlineEdit(inspectingItem, "confirmField", "price");
+                                    }
+                                }}
+                            >
+                                <span class="tier-name">Balanced</span>
+                                <span class="tier-val">${inspectingItem.balancedPrice || inspectingItem.pricingTiers?.balanced?.price || "--"}</span>
+                            </button>
+                            <button
+                                type="button"
+                                class="price-tier-btn"
+                                title="Maximum margin"
+                                on:click={() => {
+                                    const p = inspectingItem.premiumPrice || inspectingItem.pricingTiers?.premium?.price || inspectingItem.listing?.price;
+                                    if (p) {
+                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
+                                        handleInlineEdit(inspectingItem, "confirmField", "price");
+                                    }
+                                }}
+                            >
+                                <span class="tier-name">Premium</span>
+                                <span class="tier-val">${inspectingItem.premiumPrice || inspectingItem.pricingTiers?.premium?.price || "--"}</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- eBay Category & Live Aspects (Critical Requirement) -->
+                    <div class="inspector-section">
+                        <div class="flex items-center justify-between mb-1">
+                            <h4 class="inspector-section-title mb-0">eBay Category</h4>
+                            {#if inspectingItem.listing?.cat}
+                                <span class="text-xs font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded border">
+                                    ID: {inspectingItem.listing.cat}
+                                </span>
+                            {/if}
+                        </div>
+                        <div class="text-xs text-slate-600 mb-2 font-medium">
+                            {inspectingItem.listing?.categoryName || "(No category selected)"}
+                        </div>
+                        <div class="relative mb-2">
+                            <input
+                                type="text"
+                                class="w-full text-xs p-2 border rounded text-slate-800"
+                                placeholder="Search eBay category (e.g. vintage jacket, boots)..."
+                                bind:value={categoryQuery}
+                                on:input={(e) => searchCategories(e.target.value)}
+                            />
+                            {#if categorySearching}
+                                <span class="absolute right-2 top-2 text-[11px] text-slate-400">Searching...</span>
+                            {/if}
+                            {#if categorySuggestions.length > 0}
+                                <div class="category-suggestions-dropdown">
+                                    {#each categorySuggestions as sug}
+                                        <button
+                                            type="button"
+                                            class="sug-item"
+                                            on:click={() => selectCategorySuggestion(inspectingItem, sug)}
+                                        >
+                                            <span class="sug-path">{sug.path || sug.categoryName}</span>
+                                            <span class="sug-id">#{sug.categoryId}</span>
+                                        </button>
+                                    {/each}
+                                </div>
+                            {/if}
+                        </div>
+
+                        <!-- Live Category Aspects -->
+                        <div class="category-aspects-container mt-3">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-xs font-bold uppercase text-slate-700">eBay Item Specifics</span>
+                                {#if categoryAspectsLoading}
+                                    <span class="text-[11px] text-blue-600 animate-pulse">Loading live options...</span>
+                                {/if}
+                            </div>
+
+                            {#if categoryAspectsError}
+                                <div class="p-2.5 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-900 mb-2 flex items-center justify-between">
+                                    <span>{categoryAspectsError}</span>
+                                    <button
+                                        type="button"
+                                        class="px-2 py-1 bg-amber-200 hover:bg-amber-300 rounded font-semibold text-[11px]"
+                                        on:click={() => loadCategoryAspects(inspectingItem.listing?.cat)}
+                                    >
+                                        Retry
+                                    </button>
+                                </div>
+                            {/if}
+
+                            {#if categoryAspects.length > 0}
+                                {@const reqAspects = categoryAspects.filter((a) => a.required)}
+                                {@const recAspects = categoryAspects.filter((a) => a.recommended && !a.required)}
+
+                                {#if reqAspects.length > 0}
+                                    <div class="aspect-group mb-3">
+                                        <span class="text-[11px] font-bold text-rose-700 uppercase tracking-wide block mb-1.5">
+                                            Required by eBay ({reqAspects.length})
+                                        </span>
+                                        <div class="space-y-2">
+                                            {#each reqAspects as aspect}
+                                                {@const aVal = getAspectValue(inspectingItem, aspect.name)}
+                                                {@const aProv = getAspectProvenance(inspectingItem, aspect)}
+                                                <div class="aspect-field-card border-rose-200 bg-rose-50/20">
+                                                    <div class="flex items-center justify-between mb-1">
+                                                        <span class="text-xs font-bold text-slate-800">{aspect.name} *</span>
+                                                        <span class="text-[10px] px-1.5 py-0.5 rounded border {aProv.color}">{aProv.label}</span>
+                                                    </div>
+                                                    {#if aspect.values && aspect.values.length > 0}
+                                                        {#if aspect.multiSelect}
+                                                            <div class="flex flex-wrap gap-1 mt-1">
+                                                                {#each aspect.values as optVal}
+                                                                    {@const isSelected = Array.isArray(aVal) ? aVal.includes(optVal) : String(aVal || "").split("|").map(s => s.trim()).includes(optVal)}
+                                                                    <button
+                                                                        type="button"
+                                                                        class="aspect-val-pill"
+                                                                        class:selected={isSelected}
+                                                                        on:click={() => toggleMultiAspectValue(inspectingItem, aspect.name, optVal)}
+                                                                    >
+                                                                        {optVal}
+                                                                    </button>
+                                                                {/each}
+                                                            </div>
+                                                        {:else}
+                                                            <select
+                                                                class="w-full text-xs p-1.5 border rounded bg-white"
+                                                                value={aVal}
+                                                                on:change={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                            >
+                                                                <option value="">-- Select {aspect.name} --</option>
+                                                                {#each aspect.values as optVal}
+                                                                    <option value={optVal}>{optVal}</option>
+                                                                {/each}
+                                                            </select>
+                                                        {/if}
+                                                    {:else}
+                                                        <input
+                                                            type="text"
+                                                            class="w-full text-xs p-1.5 border rounded bg-white"
+                                                            placeholder={`Enter ${aspect.name}...`}
+                                                            value={aVal}
+                                                            on:input={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                        />
+                                                    {/if}
+                                                </div>
+                                            {/each}
+                                        </div>
+                                    </div>
+                                {/if}
+
+                                {#if recAspects.length > 0}
+                                    <div class="aspect-group mb-3">
+                                        <span class="text-[11px] font-bold text-slate-600 uppercase tracking-wide block mb-1.5">
+                                            Recommended Specifics ({recAspects.length})
+                                        </span>
+                                        <div class="space-y-2">
+                                            {#each recAspects.slice(0, 10) as aspect}
+                                                {@const aVal = getAspectValue(inspectingItem, aspect.name)}
+                                                {@const aProv = getAspectProvenance(inspectingItem, aspect)}
+                                                <div class="aspect-field-card">
+                                                    <div class="flex items-center justify-between mb-1">
+                                                        <span class="text-xs font-semibold text-slate-700">{aspect.name}</span>
+                                                        <span class="text-[10px] px-1.5 py-0.5 rounded border {aProv.color}">{aProv.label}</span>
+                                                    </div>
+                                                    {#if aspect.values && aspect.values.length > 0}
+                                                        {#if aspect.multiSelect}
+                                                            <div class="flex flex-wrap gap-1 mt-1">
+                                                                {#each aspect.values.slice(0, 12) as optVal}
+                                                                    {@const isSelected = Array.isArray(aVal) ? aVal.includes(optVal) : String(aVal || "").split("|").map(s => s.trim()).includes(optVal)}
+                                                                    <button
+                                                                        type="button"
+                                                                        class="aspect-val-pill"
+                                                                        class:selected={isSelected}
+                                                                        on:click={() => toggleMultiAspectValue(inspectingItem, aspect.name, optVal)}
+                                                                    >
+                                                                        {optVal}
+                                                                    </button>
+                                                                {/each}
+                                                            </div>
+                                                        {:else}
+                                                            <select
+                                                                class="w-full text-xs p-1.5 border rounded bg-white"
+                                                                value={aVal}
+                                                                on:change={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                            >
+                                                                <option value="">-- Select {aspect.name} --</option>
+                                                                {#each aspect.values as optVal}
+                                                                    <option value={optVal}>{optVal}</option>
+                                                                {/each}
+                                                            </select>
+                                                        {/if}
+                                                    {:else}
+                                                        <input
+                                                            type="text"
+                                                            class="w-full text-xs p-1.5 border rounded bg-white"
+                                                            placeholder={`Enter ${aspect.name}...`}
+                                                            value={aVal}
+                                                            on:input={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                        />
+                                                    {/if}
+                                                </div>
+                                            {/each}
+                                        </div>
+                                    </div>
+                                {/if}
+                            {/if}
+                        </div>
+                    </div>
+
                     <!-- Seller research clues -->
                     <div class="inspector-section">
                         <h4 class="inspector-section-title">Research clues</h4>
@@ -1426,6 +2181,7 @@
                                 : "Generate title & price options"}
                         </button>
                     </div>
+
                     <!-- Provenance Breakdown for Key Fields -->
                     <div class="inspector-section">
                         <div class="flex items-center justify-between mb-2">
@@ -1534,9 +2290,10 @@
         {/if}
     </div>
 
-    <!-- Sticky Bottom Action Bar matching Mockup media_1792112229.png -->
+    <!-- Sticky Bottom Action Bar with State-Dependent Main Action (Requirements 4, 5, 7) -->
     <div class="bottom-action-bar">
         <div class="action-bar-inner">
+            <!-- Dedicated Upload Photos entry point (Requirement 6) -->
             <button
                 type="button"
                 class="action-btn-outline"
@@ -1546,32 +2303,103 @@
                 Upload photos
             </button>
 
-            <button
-                type="button"
-                class="action-btn-primary"
-                on:click={validateSelected}
-                disabled={actionLoading || selectedItemIds.size === 0}
-            >
-                Validate selected drafts ({selectedItemIds.size})
-            </button>
+            <!-- State-Dependent Main Action -->
+            {#if hasAnalyzing}
+                <button
+                    type="button"
+                    class="action-btn-primary"
+                    disabled={true}
+                >
+                    Analyzing…
+                </button>
+            {:else if hasGrouped}
+                <button
+                    type="button"
+                    class="action-btn-primary"
+                    on:click={analyzeSelectedOrBatch}
+                    disabled={actionLoading || items.length === 0}
+                >
+                    Analyze photos
+                </button>
+            {:else if hasMissingRequired}
+                <button
+                    type="button"
+                    class="action-btn-primary"
+                    style="background: #e11d48;"
+                    on:click={fixHighlightedFields}
+                    disabled={actionLoading}
+                >
+                    Fix highlighted fields
+                </button>
+            {:else if hasNeedsReview}
+                <button
+                    type="button"
+                    class="action-btn-primary"
+                    on:click={reviewSelectedOrFirst}
+                    disabled={actionLoading}
+                >
+                    Review and edit
+                </button>
+            {:else if hasValidated}
+                <button
+                    type="button"
+                    class="action-btn-approve"
+                    on:click={approveSelected}
+                    disabled={actionLoading}
+                >
+                    Approve selected ({selectedItemIds.size > 0 ? selectedItemIds.size : items.filter(it => it.rulesCheck?.valid).length})
+                </button>
+            {:else if allApproved}
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <button
+                        type="button"
+                        class="action-btn-submit"
+                        on:click={submitSelectedDrafts}
+                        disabled={actionLoading}
+                    >
+                        Create eBay drafts
+                    </button>
+                    <button
+                        type="button"
+                        class="action-btn-secondary-export"
+                        title="Generate official eBay Seller Hub Reports Create Drafts CSV from approved items"
+                        on:click={handleDownloadDraftCsv}
+                        disabled={exportCsvLoading}
+                    >
+                        {exportCsvLoading ? "Generating CSV..." : "Download Seller Hub Draft CSV"}
+                    </button>
+                </div>
+            {:else if allSubmitted}
+                <button
+                    type="button"
+                    class="action-btn-outline"
+                    on:click={viewDraftResult}
+                    disabled={actionLoading}
+                >
+                    View draft result
+                </button>
+            {:else}
+                <button
+                    type="button"
+                    class="action-btn-primary"
+                    on:click={validateSelected}
+                    disabled={actionLoading || items.length === 0}
+                >
+                    Validate selected ({selectedItemIds.size > 0 ? selectedItemIds.size : items.length})
+                </button>
+            {/if}
 
-            <button
-                type="button"
-                class="action-btn-approve"
-                on:click={approveSelected}
-                disabled={actionLoading || selectedItemIds.size === 0}
-            >
-                Approve valid ({selectedItemIds.size})
-            </button>
-
-            <button
-                type="button"
-                class="action-btn-submit"
-                on:click={submitSelectedDrafts}
-                disabled={actionLoading || selectedItemIds.size === 0}
-            >
-                Submit drafts to eBay ({selectedItemIds.size})
-            </button>
+            {#if approvedCount > 0 && !allApproved}
+                <button
+                    type="button"
+                    class="action-btn-secondary-export"
+                    title="Generate official eBay Seller Hub Reports Create Drafts CSV from approved items"
+                    on:click={handleDownloadDraftCsv}
+                    disabled={exportCsvLoading}
+                >
+                    {exportCsvLoading ? "Generating CSV..." : `Download Seller Hub Draft CSV (${approvedCount} approved)`}
+                </button>
+            {/if}
         </div>
     </div>
 </div>
@@ -1800,6 +2628,81 @@
                     {:else}
                         Create Groups ({uploadFiles.length} photos)
                     {/if}
+                </button>
+            </div>
+        </div>
+    </div>
+{/if}
+
+<!-- Official eBay Seller Hub Draft Template Configuration Modal -->
+{#if isTemplateModalOpen}
+    <div class="modal-backdrop">
+        <button
+            type="button"
+            class="modal-backdrop-btn"
+            aria-label="Close modal overlay"
+            tabindex="-1"
+            on:click={() => (isTemplateModalOpen = false)}
+        />
+        <div
+            class="modal-box"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="template-modal-title"
+            style="max-width: 540px;"
+        >
+            <div class="modal-header">
+                <div>
+                    <h3 id="template-modal-title" class="text-lg font-bold text-slate-900">
+                        Official eBay Seller Hub Draft Template
+                    </h3>
+                    <p class="text-xs text-slate-500">
+                        Configure source schema for Seller Hub Reports Draft CSV exports
+                    </p>
+                </div>
+                <button
+                    class="close-btn"
+                    aria-label="Close modal"
+                    on:click={() => (isTemplateModalOpen = false)}
+                >✕</button>
+            </div>
+            <div class="modal-body space-y-4">
+                <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900 space-y-1.5">
+                    <p class="font-bold">How to download the current eBay template:</p>
+                    <ol class="list-decimal pl-4 space-y-1">
+                        <li>Go to <strong>eBay Seller Hub → Reports → Upload</strong></li>
+                        <li>Click <strong>Get template</strong></li>
+                        <li>Select <strong>Listings</strong> → <strong>Create drafts template</strong></li>
+                        <li>Download the CSV file and select it below</li>
+                    </ol>
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 mb-1">
+                        Upload Downloaded eBay Template CSV:
+                        <input
+                            type="file"
+                            accept=".csv"
+                            class="w-full text-xs p-2 border rounded-lg bg-slate-50 mt-1 font-normal"
+                            on:change={handleTemplateFileUpload}
+                        />
+                    </label>
+                </div>
+                {#if templateFileName}
+                    <div class="p-2 bg-emerald-50 border border-emerald-200 rounded text-xs text-emerald-800">
+                        Active configured template: <strong>{templateFileName}</strong>
+                    </div>
+                {:else}
+                    <div class="p-2 bg-slate-50 border border-slate-200 rounded text-xs text-slate-600">
+                        Using built-in official eBay Seller Hub Drafts schema with standard eBay headers and #INFO metadata.
+                    </div>
+                {/if}
+            </div>
+            <div class="modal-footer">
+                <button
+                    class="px-4 py-2 border rounded-lg text-xs font-bold"
+                    on:click={() => (isTemplateModalOpen = false)}
+                >
+                    Close
                 </button>
             </div>
         </div>
@@ -2437,5 +3340,255 @@
 
     .dropzone-box:hover {
         border-color: #2563eb;
+    }
+
+    /* Batch Actions Dropdown */
+    .batch-actions-dropdown {
+        position: relative;
+        display: inline-block;
+    }
+
+    .batch-actions-trigger-btn {
+        padding: 5px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #ffffff;
+        color: #334155;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+
+    .batch-actions-trigger-btn:hover {
+        background: #f8fafc;
+        border-color: #94a3b8;
+    }
+
+    .batch-actions-menu {
+        position: absolute;
+        right: 0;
+        top: 100%;
+        margin-top: 4px;
+        width: 260px;
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        z-index: 50;
+        padding: 4px 0;
+    }
+
+    .menu-item {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 14px;
+        font-size: 12px;
+        font-weight: 500;
+        color: #334155;
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        transition: background 0.1s ease;
+    }
+
+    .menu-item:hover:not(:disabled) {
+        background: #f1f5f9;
+        color: #0f172a;
+    }
+
+    .menu-item:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+
+    .menu-item.menu-danger {
+        color: #dc2626;
+    }
+
+    .menu-item.menu-danger:hover:not(:disabled) {
+        background: #fef2f2;
+        color: #b91c1c;
+    }
+
+    .menu-divider {
+        margin: 4px 0;
+        border: none;
+        border-top: 1px solid #e2e8f0;
+    }
+
+    /* Batch Lifecycle Summary Bar */
+    .batch-lifecycle-summary {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        margin-bottom: 4px;
+    }
+
+    .lifecycle-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        color: #475569;
+    }
+
+    .lifecycle-chip.highlight {
+        background: #eff6ff;
+        border-color: #bfdbfe;
+        color: #1d4ed8;
+    }
+
+    .chip-label {
+        color: #64748b;
+    }
+
+    .chip-value {
+        font-weight: 700;
+        color: #0f172a;
+    }
+
+    /* Price Tiers in Inspector */
+    .price-tiers-inspector-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+    }
+
+    .price-tier-btn {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 6px 4px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+
+    .price-tier-btn:hover {
+        background: #f1f5f9;
+        border-color: #cbd5e1;
+    }
+
+    .price-tier-btn .tier-name {
+        font-size: 10px;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+    }
+
+    .price-tier-btn .tier-val {
+        font-size: 13px;
+        font-weight: 700;
+        color: #0f172a;
+        margin-top: 2px;
+    }
+
+    /* Category Suggestions Dropdown */
+    .category-suggestions-dropdown {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        z-index: 60;
+        max-height: 220px;
+        overflow-y: auto;
+    }
+
+    .sug-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        width: 100%;
+        text-align: left;
+        padding: 6px 10px;
+        border: none;
+        border-bottom: 1px solid #f1f5f9;
+        background: transparent;
+        cursor: pointer;
+        font-size: 11px;
+    }
+
+    .sug-item:hover {
+        background: #f8fafc;
+    }
+
+    .sug-path {
+        color: #1e293b;
+        font-weight: 500;
+    }
+
+    .sug-id {
+        color: #64748b;
+        font-family: monospace;
+        font-size: 10px;
+    }
+
+    /* Aspects in Inspector */
+    .aspect-field-card {
+        padding: 8px 10px;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        background: #f8fafc;
+    }
+
+    .aspect-val-pill {
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid #cbd5e1;
+        background: #ffffff;
+        color: #334155;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+
+    .aspect-val-pill:hover {
+        background: #f1f5f9;
+    }
+
+    .aspect-val-pill.selected {
+        background: #0f172a;
+        color: #ffffff;
+        border-color: #0f172a;
+    }
+
+    /* Secondary CSV Export Button */
+    .action-btn-secondary-export {
+        min-height: 42px;
+        padding: 0 18px;
+        font-size: 13px;
+        font-weight: 700;
+        border: 1px solid #0f766e;
+        border-radius: 999px;
+        background: #f0fdfa;
+        color: #0f766e;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+
+    .action-btn-secondary-export:hover:not(:disabled) {
+        background: #ccfbf1;
+    }
+
+    .action-btn-secondary-export:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
     }
 </style>

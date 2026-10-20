@@ -1809,7 +1809,10 @@
             >
             <button
                 class:on={tab === "settings" || tab === "capacity"}
-                on:click={() => (tab = "settings")}>Settings</button
+                on:click={() => {
+                    tab = "settings";
+                    loadPerformance();
+                }}>Settings</button
             >
         </nav>
 
@@ -1836,6 +1839,7 @@
             <InventoryWorkspace
                 onSwitchToListingOptimization={() => (tab = "commerce")}
                 onOpenFullReview={openWorkspaceItemInReview}
+                onOpenAnalysisMonitor={() => (tab = "analyze")}
             />
         {/if}
 
@@ -1847,21 +1851,17 @@
                 >
                     <div>
                         <strong
-                            >New Inventory Batches are now in Workspace</strong
+                            >Analysis Monitor &amp; Diagnostics (Troubleshooting)</strong
                         >
                         <p style="margin: 4px 0 0;">
-                            Upload bulk photos, organize 1-3 photo items, track
-                            validation rules, and submit Seller Hub drafts with
-                            database persistence in the <b>Workspace</b>. Use
-                            this Analyze screen for single-item visual
-                            inspection and prompt clue tuning.
+                            Live vision engine telemetry and background analysis job statuses. New inventory creation and photo grouping are centralized in <b>New Listings</b>.
                         </p>
                     </div>
                     <button
                         type="button"
                         class="primary"
                         on:click={() => (tab = "workspace")}
-                        >Open Inventory Workspace →</button
+                        >← Back to New Listings</button
                     >
                 </div>
                 {#if breakGroundEnabled && !onboardingDismissed}
@@ -1913,7 +1913,7 @@
                 </label>
                 <p class="help">
                     {engine === "hosted"
-                        ? "Add many photos to the staging grid, select one item group at a time, and keep grouping while submitted items process. HHT tries Groq first, then automatically uses configured NVIDIA and OpenRouter fallbacks when Groq is unavailable. Providers only create reviewable drafts; none changes eBay."
+                        ? "HHT tries Groq first, then automatically uses configured NVIDIA and OpenRouter fallbacks when Groq is unavailable. Providers only create reviewable drafts; none changes eBay."
                         : "The browser downloads an open-source model locally. It may be slow or unsupported on phones."}
                 </p>
                 {#if analysisJobs.length}
@@ -1945,8 +1945,7 @@
                                 )}s across {analysisTimingSamples.length} item{analysisTimingSamples.length ===
                                 1
                                     ? ""
-                                    : "s"}. No pre-change baseline is available
-                                in this browser.
+                                    : "s"}.
                             </p>{/if}
                         {#each analysisJobs as job}
                             <div class="queue-row">
@@ -2040,255 +2039,17 @@
                         >
                     </div>
                 </div>
-                <div
-                    class:drag-active={dragActive}
-                    class="dropzone bulk-staging-dropzone"
-                    role="button"
-                    tabindex="0"
-                    on:dragover|preventDefault={() => (dragActive = true)}
-                    on:dragleave={() => (dragActive = false)}
-                    on:drop={onDrop}
-                    on:keydown={(event) =>
-                        (event.key === "Enter" || event.key === " ") &&
-                        stagingInput?.click()}
-                    on:click={() => stagingInput?.click()}
-                >
-                    <input
-                        bind:this={stagingInput}
-                        type="file"
-                        accept="image/*"
-                        multiple
-                        on:click|stopPropagation
-                        on:change={onFilesSelected}
-                    />
-                    <strong>Drop 100+ product photos here</strong>
-                    <span
-                        >Or choose a photo folder. Click thumbnails to group up
-                        to 3 views for one item.</span
-                    >
-                </div>
-                {#if stagingPhotos.length}
-                    <div class="staging-toolbar">
-                        <div>
-                            <strong>{stagingPhotos.length} staged</strong>
-                            <span
-                                >{stagingPhotos.filter(
-                                    (photo) => !photo.processed,
-                                ).length} available · {stagingPhotos.filter(
-                                    (photo) => photo.processed,
-                                ).length} processed and locked</span
-                            >
-                        </div>
-                        <button type="button" on:click={clearStagingPhotos}
-                            >Clear available photos</button
-                        >
-                    </div>
-                    <div
-                        class="bulk-staging-grid"
-                        aria-label="Bulk photo staging grid"
-                    >
-                        {#each stagingPhotos as photo}
-                            <div
-                                class:staging-selected={selectedPhotoIds.includes(
-                                    photo.id,
-                                )}
-                                class:staging-processed={photo.processed}
-                                class="staging-photo"
-                            >
-                                <button
-                                    type="button"
-                                    class="staging-photo-button"
-                                    disabled={photo.processed || loading}
-                                    on:click={() => toggleStagingPhoto(photo)}
-                                    aria-label={photo.processed
-                                        ? `${photo.name} processed`
-                                        : `Select ${photo.name}`}
-                                >
-                                    <img
-                                        src={photo.url}
-                                        alt={photo.name}
-                                        loading="lazy"
-                                    />
-                                    {#if photo.processed}<span
-                                            class="staging-lock">Processed</span
-                                        >{:else if selectedPhotoIds.includes(photo.id)}<span
-                                            class="staging-order"
-                                            >{selectedPhotoIds.indexOf(
-                                                photo.id,
-                                            ) + 1}</span
-                                        >{/if}
-                                </button>
-                                <div class="staging-photo-meta">
-                                    <span title={photo.name}>{photo.name}</span
-                                    >{#if !photo.processed}<button
-                                            type="button"
-                                            on:click={() =>
-                                                removeStagingPhoto(photo)}
-                                            aria-label={`Remove ${photo.name}`}
-                                            >×</button
-                                        >{/if}
-                                </div>
-                            </div>
-                        {/each}
-                    </div>
-                    <div class="staging-actions">
-                        <span
-                            >{selectedStagingPhotos.length
-                                ? `${selectedStagingPhotos.length} photo${selectedStagingPhotos.length === 1 ? "" : "s"} selected for one item.`
-                                : "Select the photos belonging to one item."}</span
-                        >
-                        <button
-                            class="primary"
-                            type="button"
-                            disabled={loading || !selectedStagingPhotos.length}
-                            on:click={processStagedItem}
-                            >{loading
-                                ? "Processing item..."
-                                : "Process Item with Groq"}</button
-                        >
-                    </div>
-                {/if}
-                {#if previews.length && !stagingPhotos.length}
-                    <div class="preview-grid">
-                        {#each previews as preview, index}
-                            <div class="thumb">
-                                <img src={preview.url} alt={preview.name} />
-                                <button
-                                    type="button"
-                                    on:click={() => removeFile(index)}
-                                    aria-label="Remove photo">x</button
-                                >
-                            </div>
-                        {/each}
-                    </div>
-                {/if}
-                <div class="actions">
-                    <button
-                        class="primary"
-                        disabled={loading ||
-                            !files.length ||
-                            stagingPhotos.length > 0}
-                        on:click={analyze}
-                        >{loading ? "Analyzing..." : "Analyze photos"}</button
-                    >
-                    <button type="button" on:click={() => setFiles([])}
-                        >Clear photos</button
-                    >
-                </div>
-            </section>
-        {/if}
 
-        {#if tab === "capacity"}
-            <section class="panel">
-                <div
-                    class="wide notice info"
-                    style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;"
-                >
-                    <div>
-                        <strong>Connected to Active eBay Catalog</strong>
-                        <p style="margin: 2px 0 0;">
-                            Traffic and capacity metrics inform your listing
-                            rotation. To optimize listings with low impressions
-                            or missing specifics, open <b
-                                >Listing Optimization</b
-                            >.
-                        </p>
-                    </div>
-                    <button type="button" on:click={() => (tab = "commerce")}
-                        >Open Listing Optimization →</button
-                    >
-                </div>
-                <div class="section-heading">
-                    <div>
-                        <p class="eyebrow">LISTING CAP MANAGER</p>
-                        <h2>Capacity &amp; rotation</h2>
-                        <p>
-                            Use official eBay traffic evidence to decide what to
-                            optimize, keep, or review. HHT never changes listing
-                            status automatically.
-                        </p>
-                    </div>
-                    <div class="actions">
-                        <button
-                            on:click={syncPerformance}
-                            disabled={performanceSyncing}
-                            >{performanceSyncing
-                                ? "Syncing..."
-                                : "Sync eBay traffic"}</button
-                        ><button on:click={syncFulfillment}>Sync orders</button>
-                    </div>
-                </div>
-                <div class="metric-grid">
-                    <div class="metric-card">
-                        <span>Active listings</span><strong
-                            >{performanceData.capacity?.active ?? "—"}</strong
-                        >
-                    </div>
-                    <div class="metric-card">
-                        <span>Configured maximum</span><strong
-                            >{performanceData.capacity?.maximum ??
-                                "Not configured"}</strong
-                        >
-                    </div>
-                    <div class="metric-card">
-                        <span>Remaining</span><strong
-                            >{performanceData.capacity?.remaining ??
-                                "—"}</strong
-                        >
-                    </div>
-                    <div class="metric-card">
-                        <span>Evidence date</span><strong
-                            >{performanceData.lastSync || "Not synced"}</strong
-                        >
-                    </div>
-                </div>
-                <div class="notice info">
-                    <strong>Source and safety</strong>
+                <div class="wide notice info" style="margin-top: 16px;">
+                    <strong>New Inventory Entry Point</strong>
                     <p>
-                        {performanceData.capacity?.note ||
-                            "Sync traffic to populate official metrics."} Rotation
-                        decisions are approval-only. Approving below records your
-                        decision; it does not deactivate, reactivate, or publish
-                        a listing.
+                        Upload bulk photos, automatic grouping, and draft processing are managed in <b>New Listings</b>. This Analysis Monitor provides diagnostics, background worker metrics, and clue tuning.
                     </p>
-                </div>
-                <div class="rotation-list">
-                    {#if performanceLoading}<p>
-                            Loading performance evidence...
-                        </p>{:else if !(performanceData.rotation || []).length}<p
-                        >
-                            No performance snapshots yet. Import active
-                            listings, then sync eBay traffic.
-                        </p>{:else}
-                        {#each performanceData.rotation as entry}
-                            <label class="rotation-row"
-                                ><input
-                                    type="checkbox"
-                                    checked={rotationSelected.includes(
-                                        entry.id,
-                                    )}
-                                    on:change={() => toggleRotation(entry.id)}
-                                /><span
-                                    ><strong>{entry.title}</strong><small
-                                        >{entry.action} · {entry.reason}</small
-                                    ><small
-                                        >Impressions {entry.evidence
-                                            .impressions} · Views {entry
-                                            .evidence.views} · CTR {Number(
-                                            entry.evidence.ctr || 0,
-                                        ).toFixed(2)}% · Transactions {entry
-                                            .evidence.transactions}</small
-                                    ></span
-                                ><b>{entry.risk}</b></label
-                            >
-                        {/each}
-                        <button
-                            class="primary"
-                            disabled={!rotationSelected.length}
-                            on:click={approveRotation}
-                            >Approve Actions ({rotationSelected.length})</button
-                        >
-                    {/if}
+                    <div class="actions" style="margin-top: 10px;">
+                        <button type="button" class="primary" on:click={() => (tab = "workspace")}>
+                            ← Go to New Listings
+                        </button>
+                    </div>
                 </div>
             </section>
         {/if}
@@ -2840,7 +2601,7 @@
             </section>
         {/if}
 
-        {#if tab === "settings"}
+        {#if tab === "settings" || tab === "capacity"}
             <section class="panel form">
                 <div class="wide notice info">
                     <strong>eBay connection</strong>
@@ -2873,6 +2634,7 @@
                         >
                     </div>
                 </div>
+
                 <div class="wide notice info">
                     <strong>Photo storage</strong>
                     <p>
@@ -2880,6 +2642,91 @@
                             ? `Configured: ${photoStorage.provider}. Compressed derivatives can receive signed HTTPS URLs for eBay.`
                             : "Not configured. Analysis still works, but browser-local photos are not yet durable eBay image URLs."}
                     </p>
+                </div>
+
+                <div class="wide notice info">
+                    <strong>AI Providers</strong>
+                    <p>
+                        Hosted vision analysis utilizes server-configured keys: <code>GROQ_API_KEY</code>, <code>NVIDIA_NIM_API_KEY</code>, and <code>OPENROUTER_API_KEY</code> with automatic provider fallback order. Local experimental mode uses SmolVLM in WebGPU.
+                    </p>
+                    <p class="help" style="margin-top: 4px;">
+                        Analysis engine: {engine === "hosted" ? "Automatic batch: Groq → NVIDIA → OpenRouter" : "Browser-local SmolVLM experimental"}.
+                    </p>
+                </div>
+
+                <div class="wide" style="margin: 12px 0;">
+                    <div class="section-heading" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                        <div>
+                            <p class="eyebrow" style="font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase;">System Status / Capacity</p>
+                            <h3 style="margin: 2px 0; font-size: 18px; font-weight: 700;">Active eBay Listing Capacity &amp; Performance</h3>
+                            <p style="font-size: 13px; color: var(--muted); margin: 0;">
+                                Real-time eBay catalog metrics and traffic evidence. Rotation decisions are approval-only.
+                            </p>
+                        </div>
+                        <div class="actions" style="display: flex; gap: 8px;">
+                            <button
+                                type="button"
+                                on:click={syncPerformance}
+                                disabled={performanceSyncing}
+                                >{performanceSyncing
+                                    ? "Syncing..."
+                                    : "Sync eBay traffic"}</button
+                            >
+                            <button type="button" on:click={syncFulfillment}>Sync orders</button>
+                        </div>
+                    </div>
+
+                    <div class="metric-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 12px 0;">
+                        <div class="metric-card" style="padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
+                            <span style="font-size: 12px; color: var(--muted); display: block;">Active listings</span>
+                            <strong style="font-size: 18px;">{performanceData.capacity?.active ?? "—"}</strong>
+                        </div>
+                        <div class="metric-card" style="padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
+                            <span style="font-size: 12px; color: var(--muted); display: block;">Configured maximum</span>
+                            <strong style="font-size: 18px;">{performanceData.capacity?.maximum ?? "Not configured"}</strong>
+                        </div>
+                        <div class="metric-card" style="padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
+                            <span style="font-size: 12px; color: var(--muted); display: block;">Remaining</span>
+                            <strong style="font-size: 18px;">{performanceData.capacity?.remaining ?? "—"}</strong>
+                        </div>
+                        <div class="metric-card" style="padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
+                            <span style="font-size: 12px; color: var(--muted); display: block;">Evidence date</span>
+                            <strong style="font-size: 18px;">{performanceData.lastSync || "Not synced"}</strong>
+                        </div>
+                    </div>
+
+                    {#if performanceData.capacity?.note}
+                        <p class="help" style="margin-bottom: 8px;">{performanceData.capacity.note}</p>
+                    {/if}
+
+                    {#if (performanceData.rotation || []).length > 0}
+                        <div class="rotation-list" style="margin-top: 12px;">
+                            <strong style="font-size: 13px;">Rotation Recommendations ({performanceData.rotation.length})</strong>
+                            {#each performanceData.rotation as entry}
+                                <label class="rotation-row" style="display: flex; gap: 8px; align-items: center; margin-top: 6px;">
+                                    <input
+                                        type="checkbox"
+                                        checked={rotationSelected.includes(entry.id)}
+                                        on:change={() => toggleRotation(entry.id)}
+                                    />
+                                    <span>
+                                        <strong>{entry.title}</strong>
+                                        <small style="color: var(--muted);"> · {entry.action} · {entry.reason}</small>
+                                    </span>
+                                </label>
+                            {/each}
+                            {#if rotationSelected.length > 0}
+                                <button
+                                    type="button"
+                                    class="primary"
+                                    style="margin-top: 8px;"
+                                    on:click={approveRotation}
+                                >
+                                    Approve Actions ({rotationSelected.length})
+                                </button>
+                            {/if}
+                        </div>
+                    {/if}
                 </div>
                 <label class="field wide checkbox-field">
                     <input
@@ -2944,144 +2791,4 @@
 </AuthGate>
 
 <style>
-    .bulk-staging-dropzone {
-        display: flex;
-        min-height: 112px;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-        transition:
-            border-color 0.15s ease,
-            background 0.15s ease;
-    }
-
-    .bulk-staging-dropzone.drag-active {
-        border-color: var(--blue);
-        background: #eff6ff;
-    }
-
-    .bulk-staging-dropzone input {
-        display: none;
-    }
-
-    .staging-toolbar,
-    .staging-actions {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        margin-top: 12px;
-    }
-
-    .staging-toolbar div {
-        display: grid;
-        gap: 2px;
-    }
-
-    .staging-toolbar span,
-    .staging-actions span {
-        color: var(--muted);
-        font-size: 13px;
-    }
-
-    .bulk-staging-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
-        gap: 10px;
-        max-height: 560px;
-        margin-top: 12px;
-        overflow: auto;
-        padding: 2px;
-    }
-
-    .staging-photo {
-        min-width: 0;
-        border: 2px solid transparent;
-        border-radius: 10px;
-        background: #f8fafc;
-        overflow: hidden;
-    }
-
-    .staging-photo.staging-selected {
-        border-color: var(--blue);
-        box-shadow: 0 0 0 2px #bfdbfe;
-    }
-
-    .staging-photo.staging-processed {
-        border-color: #cbd5e1;
-        opacity: 0.58;
-    }
-
-    .staging-photo-button {
-        position: relative;
-        display: block;
-        width: 100%;
-        min-height: 112px;
-        padding: 0;
-        border: 0;
-        border-radius: 0;
-        background: #e2e8f0;
-        overflow: hidden;
-    }
-
-    .staging-photo-button img {
-        display: block;
-        width: 100%;
-        height: 112px;
-        object-fit: cover;
-    }
-
-    .staging-order,
-    .staging-lock {
-        position: absolute;
-        right: 6px;
-        top: 6px;
-        border-radius: 999px;
-        background: var(--blue);
-        color: #fff;
-        padding: 3px 7px;
-        font-size: 11px;
-        font-weight: 800;
-    }
-
-    .staging-lock {
-        background: #475569;
-    }
-
-    .staging-photo-meta {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 4px;
-        padding: 5px 6px;
-        font-size: 11px;
-    }
-
-    .staging-photo-meta span {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    .staging-photo-meta button {
-        min-height: 24px;
-        padding: 0 5px;
-        border: 0;
-        background: transparent;
-        color: var(--red);
-    }
-
-    @media (max-width: 640px) {
-        .staging-toolbar,
-        .staging-actions {
-            align-items: stretch;
-            flex-direction: column;
-        }
-
-        .staging-toolbar button,
-        .staging-actions button {
-            width: 100%;
-        }
-    }
 </style>

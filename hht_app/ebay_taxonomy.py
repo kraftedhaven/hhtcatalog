@@ -39,12 +39,42 @@ def validate_listing(item: dict[str, Any], timeout: float = 5.0) -> dict[str, An
             return {**metadata, "message": metadata.get("message") or "eBay Taxonomy validation was unavailable; seller review required."}
         required = metadata["requiredAspects"]
         missing = [name for name in required if not has_confirmed_value(_aspect_value(item, name))]
+
+        # Check if any filled aspect violates eBay allowed values
+        invalid_values = []
+        for field in metadata.get("fields", []):
+            name = str(field.get("name") or "").strip()
+            allowed = field.get("values") or []
+            if allowed and name:
+                val = _aspect_value(item, name)
+                if has_confirmed_value(val):
+                    val_str = str(val).strip()
+                    allowed_set = {v.casefold(): v for v in allowed}
+                    if val_str.casefold() not in allowed_set and val_str.casefold() != "other":
+                        invalid_values.append({
+                            "aspect": name,
+                            "value": val_str,
+                            "allowed": allowed[:5],
+                        })
+
+        if invalid_values:
+            return {
+                "status": "invalid_value",
+                "categoryId": category,
+                "requiredAspects": required[:80],
+                "missingRequiredAspects": missing[:80],
+                "invalidValues": invalid_values,
+                "aspectReviewRequired": True,
+                "message": f"Invalid value '{invalid_values[0]['value']}' for eBay specific '{invalid_values[0]['aspect']}'.",
+            }
+
         message = "Required item specifics are missing." if missing else "Category and required item specifics accepted by eBay Taxonomy API."
         return {
             "status": "valid",
             "categoryId": category,
             "requiredAspects": required[:80],
             "missingRequiredAspects": missing[:80],
+            "invalidValues": [],
             "aspectReviewRequired": bool(missing),
             "message": message,
         }
