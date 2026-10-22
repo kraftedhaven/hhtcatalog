@@ -353,6 +353,30 @@ class InventoryWorkspaceTests(unittest.TestCase):
                 self.assertEqual(res.status_code, 200)
                 self.assertEqual(res.get_json()["result"]["status"], "completed")
 
+    def test_multipart_upload_without_hosted_url_fails_before_registration(self):
+        client = hht_app.app.test_client()
+
+        def authenticate():
+            # pyrefly: ignore[missing-import]
+            from flask import g
+            g.supabase_user = {"sub": self.auth_user_id}
+
+        with mock.patch("app.authenticate_request", side_effect=authenticate), \
+             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}), \
+             mock.patch("app.store_photo", return_value={"assetId": "asset-1", "ebayUrl": ""}), \
+             mock.patch("app.inventory_workspace.register_batch_photos") as register:
+            batch = inventory_workspace.create_batch(self.seller_id, name="Storage Failure", grouping_mode="1")
+            from io import BytesIO
+            res = client.post(
+                f"/api/inventory/batches/{batch['id']}/photos",
+                data={"files": (BytesIO(b"not-used"), "photo.jpg")},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(res.status_code, 502)
+        self.assertEqual(res.get_json()["error"], "Photo upload could not create a hosted HTTPS image URL. Check IBM COS configuration and retry.")
+        register.assert_not_called()
+
     def test_no_live_ebay_mutations_called(self):
         """Confirm that EBAY_MUTATIONS_ENABLED remains false and live mutation endpoints are forbidden."""
         self.assertFalse(commerce_agent.ebay_mutations_enabled())

@@ -924,6 +924,7 @@ def inventory_batch_photos(batch_id):
     
     files = request.files.getlist("files") or request.files.getlist("file")
     photos_to_register = []
+    storage_failures = []
     if files:
         for file in files:
             filename = file.filename or "photo.jpg"
@@ -937,28 +938,39 @@ def inventory_batch_photos(batch_id):
                     data=data,
                     listing_key=f"batch_{batch_id[:8]}",
                 )
+                hosted_url = str(asset.get("ebayUrl") or "").strip()
+                if not hosted_url.lower().startswith("https://"):
+                    storage_failures.append(filename)
+                    continue
                 photos_to_register.append({
                     "photoAssetId": asset.get("assetId"),
                     "filename": filename,
-                    "previewUrl": asset.get("ebayUrl") or "",
-                    "storageUrl": asset.get("ebayUrl") or "",
+                    "previewUrl": hosted_url,
+                    "storageUrl": hosted_url,
                 })
             except Exception as exc:
                 app.logger.warning("Photo storage failed during batch upload: %s", exc)
-                photos_to_register.append({
-                    "filename": filename,
-                    "previewUrl": "",
-                    "storageUrl": "",
-                })
+                storage_failures.append(filename)
     else:
         body = request.get_json(silent=True) or {}
         photos_to_register = body.get("photos") or []
+
+    if files and not photos_to_register:
+        return jsonify({
+            "error": "Photo upload could not create a hosted HTTPS image URL. Check IBM COS configuration and retry.",
+            "code": "PHOTO_STORAGE_UNAVAILABLE",
+        }), 502
 
     try:
         registered = inventory_workspace.register_batch_photos(
             batch_id, str(seller_id), photos_to_register
         )
-        return jsonify({"result": {"count": len(registered), "photos": registered}}), 201
+        result = {"count": len(registered), "photos": registered}
+        if storage_failures:
+            result["warning"] = "Some photos could not be stored as hosted HTTPS images."
+            result["failedCount"] = len(storage_failures)
+            return jsonify({"result": result}), 207
+        return jsonify({"result": result}), 201
     except (KeyError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
 
