@@ -188,5 +188,21 @@ class PhotoStorageTests(unittest.TestCase):
         ])
 
 
+    def test_derive_public_endpoint_normalizes_scheme_and_strips_private(self):
+        from hht_app.photo_storage import _derive_public_endpoint
+        self.assertEqual(
+            _derive_public_endpoint("s3.private.us-east.cloud-object-storage.appdomain.cloud"),
+            "https://s3.us-east.cloud-object-storage.appdomain.cloud",
+        )
+        self.assertEqual(
+            _derive_public_endpoint("https://s3.private.us-east.cloud-object-storage.appdomain.cloud"),
+            "https://s3.us-east.cloud-object-storage.appdomain.cloud",
+        )
+        self.assertEqual(
+            _derive_public_endpoint("https://s3.us-east.cloud-object-storage.appdomain.cloud"),
+            "https://s3.us-east.cloud-object-storage.appdomain.cloud",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

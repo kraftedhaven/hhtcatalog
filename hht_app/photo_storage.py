@@ -225,15 +225,18 @@ def _ibm_endpoint(*, public: bool = False) -> str:
 def _derive_public_endpoint(endpoint: str) -> str:
     if not endpoint:
         return ""
-    parts = urlsplit(endpoint)
+    clean = endpoint.strip()
+    if "://" not in clean:
+        clean = f"https://{clean}"
+    parts = urlsplit(clean)
     host = parts.hostname or ""
     labels = host.split(".")
     if len(labels) > 1 and labels[0].lower() == "s3" and labels[1].lower() == "private":
         del labels[1]
         host = ".".join(labels)
-        netloc = host + (f":{parts.port}" if parts.port else "")
-        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-    return endpoint
+    netloc = host + (f":{parts.port}" if parts.port else "")
+    scheme = parts.scheme or "https"
+    return urlunsplit((scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def _ibm_endpoint_source() -> str:
