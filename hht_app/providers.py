@@ -33,8 +33,11 @@ HEIC_SUPPORT_ENABLED = _register_heic_support()
 
 ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 ZAI_DEFAULT_MODEL = "glm-4.6v-flash"
-GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-GROQ_FALLBACK_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# Current Groq multimodal model documented for image inputs and JSON mode.
+# Existing deployments may still have the former Llama 4 IDs in GROQ_MODEL;
+# _groq_model() maps those stale values to this supported model.
+GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b"
+GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
 NVIDIA_DEFAULT_VISION_MODEL = "z-ai/glm-5.3-flash"
 NVIDIA_FAST_FALLBACK_VISION_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 MAX_PROVIDER_IMAGES = 5
@@ -882,7 +885,13 @@ def _zai_model() -> str:
 
 
 def _groq_model() -> str:
-    return (os.environ.get("GROQ_MODEL") or GROQ_DEFAULT_MODEL).strip() or GROQ_DEFAULT_MODEL
+    configured = (os.environ.get("GROQ_MODEL") or GROQ_DEFAULT_MODEL).strip()
+    if configured in {
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+    }:
+        return GROQ_DEFAULT_MODEL
+    return configured or GROQ_DEFAULT_MODEL
 
 
 def _groq_fallback_model() -> str:
