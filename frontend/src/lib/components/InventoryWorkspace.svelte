@@ -46,6 +46,11 @@
     let isTemplateModalOpen = false;
     let exportCsvLoading = false;
 
+    // View mode: 'cards' (MetaMuse-style visual listing cards, default) | 'table' (11-column CSV draft verification)
+    let viewMode = "cards";
+    let isDraftResultModalOpen = false;
+    let lastDraftResult = null;
+
     // Category aspects state for inspecting item
     let categoryAspects = [];
     let categoryAspectsLoading = false;
@@ -424,6 +429,53 @@
         return { label: "Auto-filled from photo", color: "bg-blue-100 text-blue-800 border-blue-300" };
     }
 
+    function getItemReadiness(item) {
+        if (!item) return { ready: false, percent: 0, missing: [] };
+        const l = item.listing || {};
+        const missing = [];
+        if (!item.photos || item.photos.length === 0) missing.push("Photos");
+        if (!l.title || !l.title.trim()) missing.push("Title");
+        if (!l.price || Number(l.price) <= 0) missing.push("Price");
+        if (!l.cat) missing.push("Category");
+        if (item.rulesCheck?.missingRequiredAspects?.length) {
+            missing.push(...item.rulesCheck.missingRequiredAspects.map((a) => `Aspect: ${a}`));
+        }
+        const totalChecks = 4 + (item.rulesCheck?.requiredAspects?.length || 0);
+        const passedChecks = Math.max(0, totalChecks - missing.length);
+        const percent = Math.max(15, Math.min(100, Math.round((passedChecks / Math.max(1, totalChecks)) * 100)));
+        const isApproved = item.workflowStatus === "approved";
+        const isSubmitted = item.workflowStatus === "draft_submitted" || item.workflowStatus === "draft_result_available";
+        const isReady = isApproved || isSubmitted || (missing.length === 0 && (item.workflowStatus === "ready_for_approval" || item.rulesCheck?.valid));
+        return {
+            ready: isReady,
+            percent: isReady ? 100 : percent,
+            missing,
+        };
+    }
+
+    async function approveSingleItem(item) {
+        if (!item || !item.id) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            await flushPendingPatches();
+            const res = await inventoryApproveItems([item.id]);
+            items = await inventoryListBatchItems(selectedBatchId);
+            if (inspectingItemId === item.id) {
+                inspectingItem = items.find((it) => it.id === item.id) || null;
+            }
+            if (res.approvedCount > 0) {
+                globalStatus = `Item approved and ready for eBay Seller Hub draft creation.`;
+            } else if (res.rejectedCount > 0) {
+                globalError = `Item requires seller verification of title, price, or category before approval.`;
+            }
+        } catch (err) {
+            globalError = err.message || "Approval failed.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
     async function handleDownloadDraftCsv() {
         const approvedItems = items.filter((it) => it.workflowStatus === "approved");
         if (approvedItems.length === 0) {
@@ -530,11 +582,7 @@
     }
 
     function viewDraftResult() {
-        const target = items.find((it) => it.workflowStatus === "draft_submitted" || it.workflowStatus === "draft_result_available");
-        if (target) {
-            openItemInspector(target);
-            globalStatus = `Draft result for item ${target.id.slice(0, 8)}: ${target.workflowStatus}. Check Seller Hub Reports for eBay feed task details.`;
-        }
+        isDraftResultModalOpen = true;
     }
 
     // -----------------------------------------------------------------------
@@ -756,9 +804,14 @@
     }
 
     async function approveSelected() {
-        const ids = Array.from(selectedItemIds);
+        const readyItems = items.filter(
+            (it) => it.rulesCheck?.valid || it.workflowStatus === "ready_for_approval" || it.workflowStatus === "needs_review"
+        );
+        const ids = selectedItemIds.size > 0
+            ? Array.from(selectedItemIds)
+            : readyItems.map((it) => it.id);
         if (!ids.length) {
-            globalError = "Select at least one item to approve.";
+            globalError = "No items ready to approve. Validate items first.";
             return;
         }
         actionLoading = true;
@@ -785,17 +838,16 @@
     }
 
     async function submitSelectedDrafts() {
-        const ids = Array.from(selectedItemIds);
+        const approvedBatchItems = items.filter((it) => it.workflowStatus === "approved");
+        const ids = selectedItemIds.size > 0
+            ? Array.from(selectedItemIds).filter((id) => {
+                const it = items.find((i) => i.id === id);
+                return it && it.workflowStatus === "approved";
+            })
+            : approvedBatchItems.map((it) => it.id);
+
         if (!ids.length) {
-            globalError = "Select approved items to submit.";
-            return;
-        }
-        // Check if all selected items are approved
-        const nonApproved = items.filter(
-            (it) => ids.includes(it.id) && it.workflowStatus !== "approved",
-        );
-        if (nonApproved.length > 0) {
-            globalError = `Cannot submit: ${nonApproved.length} selected item(s) are not in 'approved' status. Validate and approve items first.`;
+            globalError = "No approved items to submit. Validate and approve items before creating eBay drafts.";
             return;
         }
 
@@ -808,12 +860,18 @@
         globalError = "";
         try {
             const res = await inventorySubmitDrafts(ids);
+            lastDraftResult = {
+                ...res,
+                submittedCount: res.submittedCount || ids.length,
+                feedTaskId: res.feedTaskId,
+            };
+            isDraftResultModalOpen = true;
             items = await inventoryListBatchItems(selectedBatchId);
             if (inspectingItemId) {
                 inspectingItem =
                     items.find((it) => it.id === inspectingItemId) || null;
             }
-            globalStatus = `Submitted ${res.submittedCount} draft(s) to eBay Seller Hub! Task ID: ${res.feedTaskId}. Polling results...`;
+            globalStatus = `Submitted ${res.submittedCount || ids.length} draft(s) to eBay Seller Hub! Task ID: ${res.feedTaskId || 'N/A'}.`;
         } catch (err) {
             globalError = err.message || "Seller Hub draft submission failed.";
         } finally {
@@ -1309,13 +1367,38 @@
         </div>
     </div>
 
-    <!-- Instruction Help Bar -->
+    <!-- Instruction Help Bar with View Mode Toggle -->
     <div class="instruction-bar">
-        <span
-            >Edit fields directly. Select a row to review its photos and full
-            listing details.</span
-        >
         <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-600 font-medium">
+                {viewMode === "cards"
+                    ? "Listing Cards · Visual review with live eBay readiness & 1-click pricing. Click any card for item specifics."
+                    : "CSV Draft Verification Table · 11-column spreadsheet for verifying draft export values."}
+            </span>
+        </div>
+        <div class="flex items-center gap-3">
+            <!-- View Mode Segmented Control -->
+            <div class="view-mode-toggle">
+                <button
+                    type="button"
+                    class="view-toggle-btn"
+                    class:active={viewMode === "cards"}
+                    on:click={() => (viewMode = "cards")}
+                    title="Visual card grid (MetaMuse style)"
+                >
+                    <span class="mr-1">🎴</span> Cards
+                </button>
+                <button
+                    type="button"
+                    class="view-toggle-btn"
+                    class:active={viewMode === "table"}
+                    on:click={() => (viewMode = "table")}
+                    title="11-column spreadsheet table for CSV verification"
+                >
+                    <span class="mr-1">📊</span> Table
+                </button>
+            </div>
+
             <!-- Search & Filter Controls -->
             <input
                 type="text"
@@ -1346,11 +1429,299 @@
         </div>
     {/if}
 
-    <!-- Main Workspace Container with Spreadsheet Table & Inspector -->
+    <!-- Main Workspace Container with Cards Grid / Spreadsheet Table & Inspector -->
     <div class="spreadsheet-container">
-        <!-- Main Spreadsheet Table -->
-        <div class="table-scroll-wrapper">
-            <table class="inventory-table">
+        {#if viewMode === "cards"}
+            <!-- MetaMuse-Style Listing Cards Grid -->
+            <div class="cards-grid-container">
+                {#if batchLoading}
+                    <div class="cards-empty-state">
+                        <p class="text-slate-400 font-medium animate-pulse">Loading batch items...</p>
+                    </div>
+                {:else if filteredItems.length === 0}
+                    <div class="cards-empty-state">
+                        <div class="text-4xl mb-2">📸</div>
+                        <h3 class="text-base font-bold text-slate-800">No items found</h3>
+                        <p class="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                            Upload photos to automatically create, group, and analyze your inventory items.
+                        </p>
+                        <button
+                            type="button"
+                            class="action-btn-primary mt-3 inline-block"
+                            on:click={openUploadModal}
+                        >
+                            Upload photos
+                        </button>
+                    </div>
+                {:else}
+                    <div class="cards-grid">
+                        {#each filteredItems as item (item.id)}
+                            {@const listing = item.listing || {}}
+                            {@const readiness = getItemReadiness(item)}
+                            {@const isSelected = selectedItemIds.has(item.id)}
+                            {@const isInspecting = inspectingItemId === item.id}
+                            {@const statusInfo = getStatusBadge(item.workflowStatus)}
+
+                            <div
+                                class="listing-card"
+                                class:selected={isSelected}
+                                class:inspecting={isInspecting}
+                                class:is-approved={item.workflowStatus === 'approved'}
+                            >
+                                <!-- Card Header / Media Container -->
+                                <div class="card-header-container">
+                                    <button
+                                        type="button"
+                                        class="card-media"
+                                        on:click={() => openItemInspector(item)}
+                                        aria-label="Inspect item details and specifics"
+                                    >
+                                        {#if item.coverThumbnail}
+                                            <img
+                                                src={item.coverThumbnail}
+                                                alt={listing.title || "Item"}
+                                                class="card-img"
+                                                loading="lazy"
+                                            />
+                                        {:else}
+                                            <div class="card-img-placeholder">📷</div>
+                                        {/if}
+                                    </button>
+
+                                    <!-- Top Overlay Badges -->
+                                    <div class="card-overlay-top">
+                                        <div class="card-checkbox-label">
+                                            <input
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                on:change={() => toggleSelectItem(item.id)}
+                                                class="row-checkbox"
+                                                aria-label="Select item"
+                                            />
+                                        </div>
+
+                                        <span class="card-photo-count">
+                                            📷 {item.photoCount} photo{item.photoCount === 1 ? '' : 's'}
+                                        </span>
+                                    </div>
+
+                                    <!-- Readiness Pill -->
+                                    <div class="card-readiness-badge" class:ready={readiness.ready}>
+                                        {#if readiness.ready}
+                                            <span class="readiness-dot bg-emerald-500"></span>
+                                            <span>Ready for eBay Draft</span>
+                                        {:else if readiness.missing.length > 0}
+                                            <span class="readiness-dot bg-amber-500"></span>
+                                            <span>Missing {readiness.missing[0]}</span>
+                                        {:else}
+                                            <span class="readiness-dot bg-blue-500"></span>
+                                            <span>{statusInfo.text}</span>
+                                        {/if}
+                                    </div>
+                                </div>
+
+                                <!-- Card Content -->
+                                <div class="card-content">
+                                    <!-- Category Tag -->
+                                    <div class="card-category-row">
+                                        <button
+                                            type="button"
+                                            class="card-category-btn"
+                                            title="Click to search or change eBay category"
+                                            on:click={() => openItemInspector(item)}
+                                        >
+                                            <span class="cat-icon">🏷️</span>
+                                            <span class="cat-name">
+                                                {listing.categoryName || (listing.cat ? `Category #${listing.cat}` : "Select Category...")}
+                                            </span>
+                                        </button>
+                                        {#if listing.cid === "1000" || listing.condition === "New"}
+                                            <span class="cond-pill cond-new">New</span>
+                                        {:else}
+                                            <span class="cond-pill cond-preowned">Pre-owned</span>
+                                        {/if}
+                                    </div>
+
+                                    <!-- Listing Title with Character Count -->
+                                    <div class="card-title-row">
+                                        <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1">
+                                            <span class="font-medium text-slate-500">eBay Title</span>
+                                            <span
+                                                class="font-mono font-bold"
+                                                class:text-rose-600={(listing.title || "").length > 80}
+                                                class:text-emerald-700={(listing.title || "").length > 0 && (listing.title || "").length <= 80}
+                                            >
+                                                {(listing.title || "").length}/80
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="text"
+                                            class="card-title-input"
+                                            value={listing.title || ""}
+                                            placeholder="Enter listing title..."
+                                            maxlength="80"
+                                            on:input={(e) => handleInlineEdit(item, "title", e.target.value)}
+                                            on:blur={() => handleInlineEdit(item, "confirmField", "title")}
+                                        />
+
+                                        {#if item.titleCandidates && Object.keys(item.titleCandidates).length > 1}
+                                            <div class="mt-1 flex items-center justify-between">
+                                                <button
+                                                    type="button"
+                                                    class="card-cand-toggle-btn"
+                                                    on:click|stopPropagation={() => {
+                                                        activeTitleCandidatesItemId = activeTitleCandidatesItemId === item.id ? null : item.id;
+                                                    }}
+                                                >
+                                                    ✨ Alternative Titles ({Object.keys(item.titleCandidates).length})
+                                                </button>
+                                            </div>
+
+                                            {#if activeTitleCandidatesItemId === item.id}
+                                                <div class="candidate-dropdown mt-1">
+                                                    <div class="p-2 border-b text-[11px] font-bold text-slate-700">Choose Title Option</div>
+                                                    {#each Object.entries(item.titleCandidates) as [cKey, cand]}
+                                                        <button
+                                                            type="button"
+                                                            class="candidate-option-btn"
+                                                            on:click={() => selectTitleCandidate(item, cKey)}
+                                                        >
+                                                            <div class="flex justify-between text-[11px] font-semibold text-slate-700">
+                                                                <span class="capitalize">{cKey.replace("_", " ")}</span>
+                                                                <span class="text-slate-400">{cand.length}/80</span>
+                                                            </div>
+                                                            <p class="text-xs text-slate-900 mt-0.5">{cand.title || cand}</p>
+                                                        </button>
+                                                    {/each}
+                                                </div>
+                                            {/if}
+                                        {/if}
+                                    </div>
+
+                                    <!-- Specifics Chips -->
+                                    <div class="card-specifics-chips">
+                                        {#if listing.brand}
+                                            <span class="spec-chip"><strong>Brand:</strong> {listing.brand}</span>
+                                        {/if}
+                                        {#if listing.size && listing.size !== "Not visible"}
+                                            <span class="spec-chip"><strong>Size:</strong> {listing.size}</span>
+                                        {/if}
+                                        {#if listing.color}
+                                            <span class="spec-chip"><strong>Color:</strong> {listing.color}</span>
+                                        {/if}
+                                        {#if listing.sku}
+                                            <span class="spec-chip font-mono"><strong>SKU:</strong> {listing.sku}</span>
+                                        {/if}
+                                    </div>
+
+                                    <!-- Price Display & Quick Tiers -->
+                                    <div class="card-price-section">
+                                        <div class="flex items-center justify-between mb-1.5">
+                                            <span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">Listing Price</span>
+                                            <div class="relative flex items-center">
+                                                <span class="absolute left-2 text-xs font-bold text-slate-400">$</span>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0.01"
+                                                    class="card-price-input"
+                                                    value={listing.price || ""}
+                                                    placeholder="0.00"
+                                                    on:input={(e) => handleInlineEdit(item, "price", parseFloat(e.target.value) || 0)}
+                                                    on:blur={() => handleInlineEdit(item, "confirmField", "price")}
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <!-- Fast 1-click Price Tiers -->
+                                        <div class="card-price-tiers">
+                                            <button
+                                                type="button"
+                                                class="price-tier-chip"
+                                                title="Quick sale price"
+                                                on:click={() => {
+                                                    const p = item.quickSalePrice || item.pricingTiers?.quickSale?.price;
+                                                    if (p) {
+                                                        handleInlineEdit(item, "price", parseFloat(p));
+                                                        handleInlineEdit(item, "confirmField", "price");
+                                                    }
+                                                }}
+                                            >
+                                                <span class="tier-lbl">Quick</span>
+                                                <span class="tier-cost">${item.quickSalePrice || item.pricingTiers?.quickSale?.price || "--"}</span>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="price-tier-chip active-tier"
+                                                title="Balanced price"
+                                                on:click={() => {
+                                                    const p = item.balancedPrice || item.pricingTiers?.balanced?.price || listing.price;
+                                                    if (p) {
+                                                        handleInlineEdit(item, "price", parseFloat(p));
+                                                        handleInlineEdit(item, "confirmField", "price");
+                                                    }
+                                                }}
+                                            >
+                                                <span class="tier-lbl">Balanced</span>
+                                                <span class="tier-cost">${item.balancedPrice || item.pricingTiers?.balanced?.price || listing.price || "--"}</span>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="price-tier-chip"
+                                                title="Premium margin price"
+                                                on:click={() => {
+                                                    const p = item.premiumPrice || item.pricingTiers?.premium?.price;
+                                                    if (p) {
+                                                        handleInlineEdit(item, "price", parseFloat(p));
+                                                        handleInlineEdit(item, "confirmField", "price");
+                                                    }
+                                                }}
+                                            >
+                                                <span class="tier-lbl">Premium</span>
+                                                <span class="tier-cost">${item.premiumPrice || item.pricingTiers?.premium?.price || "--"}</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Card Footer Action Buttons -->
+                                <div class="card-footer">
+                                    <button
+                                        type="button"
+                                        class="card-action-btn-secondary"
+                                        on:click={() => openItemInspector(item)}
+                                    >
+                                        Edit Specifics ↗
+                                    </button>
+
+                                    {#if item.workflowStatus === "approved"}
+                                        <span class="approved-badge">
+                                            ✓ Approved
+                                        </span>
+                                    {:else if item.workflowStatus === "draft_submitted" || item.workflowStatus === "draft_result_available"}
+                                        <span class="draft-submitted-badge">
+                                            ✓ Draft Sent
+                                        </span>
+                                    {:else}
+                                        <button
+                                            type="button"
+                                            class="card-action-btn-approve"
+                                            on:click={() => approveSingleItem(item)}
+                                            disabled={actionLoading}
+                                        >
+                                            Approve ✓
+                                        </button>
+                                    {/if}
+                                </div>
+                            </div>
+                        {/each}
+                    </div>
+                {/if}
+            </div>
+        {:else}
+            <!-- Main Spreadsheet Table (11-Column CSV Verification View) -->
+            <div class="table-scroll-wrapper">
+                <table class="inventory-table">
                 <thead>
                     <tr>
                         <th class="w-12 text-center">
@@ -1742,9 +2113,11 @@
                 </tbody>
             </table>
         </div>
+        {/if}
 
         <!-- Slide-Over Item Inspector Panel -->
         {#if inspectingItem}
+            {@const inspReadiness = getItemReadiness(inspectingItem)}
             <aside class="inspector-drawer">
                 <div class="inspector-header">
                     <div>
@@ -1771,6 +2144,54 @@
                 </div>
 
                 <div class="inspector-body">
+                    <!-- eBay Listing Readiness Health Check Banner -->
+                    <div class="inspector-readiness-banner" class:is-ready={inspReadiness.ready}>
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center gap-2">
+                                <span class="text-sm font-bold {inspReadiness.ready ? 'text-emerald-900' : 'text-slate-800'}">
+                                    {inspReadiness.ready ? "✓ Ready for eBay Draft" : "eBay Listing Readiness"}
+                                </span>
+                                <span class="text-[11px] font-bold px-2 py-0.5 rounded-full {inspReadiness.ready ? 'bg-emerald-200 text-emerald-800' : 'bg-amber-100 text-amber-800'}">
+                                    {inspReadiness.percent}%
+                                </span>
+                            </div>
+                            {#if !inspReadiness.ready && inspectingItem.workflowStatus !== 'approved'}
+                                <span class="text-[10px] text-amber-700 font-medium">
+                                    {inspReadiness.missing.length} item(s) needed
+                                </span>
+                            {:else if inspectingItem.workflowStatus === 'approved'}
+                                <span class="text-[10px] bg-teal-100 text-teal-800 font-bold px-2 py-0.5 rounded">
+                                    Approved
+                                </span>
+                            {/if}
+                        </div>
+                        <div class="grid grid-cols-3 gap-1.5 text-[11px]">
+                            <div class="readiness-check-item" class:passed={inspectingItem.photos?.length > 0}>
+                                <span class="indicator">{inspectingItem.photos?.length > 0 ? "✓" : "○"}</span>
+                                <span>Photos ({inspectingItem.photoCount || inspectingItem.photos?.length || 0})</span>
+                            </div>
+                            <div class="readiness-check-item" class:passed={Boolean(inspectingItem.listing?.title)}>
+                                <span class="indicator">{inspectingItem.listing?.title ? "✓" : "○"}</span>
+                                <span>Title</span>
+                            </div>
+                            <div class="readiness-check-item" class:passed={Boolean(inspectingItem.listing?.price)}>
+                                <span class="indicator">{inspectingItem.listing?.price ? "✓" : "○"}</span>
+                                <span>Price</span>
+                            </div>
+                            <div class="readiness-check-item" class:passed={Boolean(inspectingItem.listing?.cat)}>
+                                <span class="indicator">{inspectingItem.listing?.cat ? "✓" : "○"}</span>
+                                <span>Category</span>
+                            </div>
+                            <div class="readiness-check-item" class:passed={Boolean(inspectingItem.listing?.cid || inspectingItem.listing?.condition)}>
+                                <span class="indicator">{inspectingItem.listing?.cid || inspectingItem.listing?.condition ? "✓" : "○"}</span>
+                                <span>Condition</span>
+                            </div>
+                            <div class="readiness-check-item" class:passed={!inspectingItem.rulesCheck?.missingRequiredAspects?.length}>
+                                <span class="indicator">{!inspectingItem.rulesCheck?.missingRequiredAspects?.length ? "✓" : "○"}</span>
+                                <span>Aspects</span>
+                            </div>
+                        </div>
+                    </div>
                     <!-- Photo Gallery for Item -->
                     <div class="inspector-section">
                         <h4 class="inspector-section-title">
@@ -2069,6 +2490,20 @@
                                                                 {/each}
                                                             </div>
                                                         {:else}
+                                                            {#if aspect.values && aspect.values.length > 0}
+                                                                <div class="flex flex-wrap gap-1 mb-1.5">
+                                                                    {#each aspect.values.slice(0, 5) as optVal}
+                                                                        <button
+                                                                            type="button"
+                                                                            class="aspect-val-pill text-[10px] py-0.5 px-2"
+                                                                            class:selected={aVal === optVal}
+                                                                            on:click={() => setAspectValue(inspectingItem, aspect.name, optVal)}
+                                                                        >
+                                                                            {optVal}
+                                                                        </button>
+                                                                    {/each}
+                                                                </div>
+                                                            {/if}
                                                             <input
                                                                 class="w-full text-xs p-1.5 border rounded bg-white"
                                                                 list={aspectListId(aspect.name)}
@@ -2127,6 +2562,20 @@
                                                                 {/each}
                                                             </div>
                                                         {:else}
+                                                            {#if aspect.values && aspect.values.length > 0}
+                                                                <div class="flex flex-wrap gap-1 mb-1.5">
+                                                                    {#each aspect.values.slice(0, 5) as optVal}
+                                                                        <button
+                                                                            type="button"
+                                                                            class="aspect-val-pill text-[10px] py-0.5 px-2"
+                                                                            class:selected={aVal === optVal}
+                                                                            on:click={() => setAspectValue(inspectingItem, aspect.name, optVal)}
+                                                                        >
+                                                                            {optVal}
+                                                                        </button>
+                                                                    {/each}
+                                                                </div>
+                                                            {/if}
                                                             <input
                                                                 class="w-full text-xs p-1.5 border rounded bg-white"
                                                                 list={aspectListId(aspect.name)}
@@ -2749,6 +3198,94 @@
     </div>
 {/if}
 
+{#if isDraftResultModalOpen}
+    <div class="modal-backdrop">
+        <button
+            type="button"
+            class="modal-backdrop-dismiss"
+            aria-label="Dismiss modal"
+            on:click={() => (isDraftResultModalOpen = false)}
+        ></button>
+        <div class="modal-card max-w-lg">
+            <div class="modal-header">
+                <div>
+                    <h3 class="text-base font-bold text-slate-900">
+                        eBay Draft Results
+                    </h3>
+                    <p class="text-xs text-slate-500">
+                        Seller Hub Draft Feed Submission Status
+                    </p>
+                </div>
+                <button
+                    class="close-btn"
+                    aria-label="Close modal"
+                    on:click={() => (isDraftResultModalOpen = false)}
+                >✕</button>
+            </div>
+            <div class="modal-body space-y-4">
+                <div class="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-center">
+                    <div class="text-3xl mb-1">🎉</div>
+                    <h4 class="text-base font-bold text-emerald-900">
+                        eBay Drafts Created Successfully!
+                    </h4>
+                    <p class="text-xs text-emerald-700 mt-1">
+                        Your approved listings have been sent directly to eBay Seller Hub as drafts.
+                    </p>
+                </div>
+
+                <div class="bg-slate-50 p-3.5 rounded-lg border border-slate-200 text-xs space-y-2.5">
+                    <div class="flex justify-between items-center pb-1.5 border-b border-slate-200/70">
+                        <span class="text-slate-500 font-medium">Batch:</span>
+                        <strong class="text-slate-800">{selectedBatch?.name || "Active Batch"}</strong>
+                    </div>
+                    <div class="flex justify-between items-center pb-1.5 border-b border-slate-200/70">
+                        <span class="text-slate-500 font-medium">Drafts Submitted:</span>
+                        <strong class="text-emerald-700 font-bold">{lastDraftResult?.submittedCount || submittedCount || approvedCount} item(s)</strong>
+                    </div>
+                    {#if lastDraftResult?.feedTaskId}
+                        <div class="flex justify-between items-center pb-1.5 border-b border-slate-200/70">
+                            <span class="text-slate-500 font-medium">eBay Feed Task ID:</span>
+                            <span class="font-mono text-slate-800 bg-white px-1.5 py-0.5 rounded border border-slate-200">{lastDraftResult.feedTaskId}</span>
+                        </div>
+                    {/if}
+                    <div class="flex justify-between items-center">
+                        <span class="text-slate-500 font-medium">Mode:</span>
+                        <span class="text-emerald-800 font-semibold bg-emerald-100/60 px-2 py-0.5 rounded">
+                            Seller Hub Draft (No live listings published)
+                        </span>
+                    </div>
+                </div>
+
+                <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900">
+                    <p class="font-bold mb-1">Where to find your drafts in eBay:</p>
+                    <p class="text-slate-700">
+                        Go to <strong>eBay Seller Hub → Listings → Drafts</strong>.
+                        Your items are pre-populated with titles, prices, categories, and item specifics ready for you to schedule or publish whenever you want.
+                    </p>
+                </div>
+            </div>
+            <div class="modal-footer flex items-center justify-between">
+                <button
+                    type="button"
+                    class="action-btn-secondary-export"
+                    title="Download the official Seller Hub Create Drafts CSV backup"
+                    on:click={handleDownloadDraftCsv}
+                    disabled={exportCsvLoading}
+                >
+                    {exportCsvLoading ? "Generating CSV..." : "Download Backup CSV"}
+                </button>
+                <button
+                    type="button"
+                    class="action-btn-primary px-4 py-2 text-xs"
+                    on:click={() => (isDraftResultModalOpen = false)}
+                >
+                    Done
+                </button>
+            </div>
+        </div>
+    </div>
+{/if}
+
 <style>
     .workspace-root {
         display: flex;
@@ -2869,6 +3406,453 @@
         border: 1px solid #cbd5e1;
         border-radius: 6px;
         background: #ffffff;
+    }
+
+    /* View Mode Segmented Toggle */
+    .view-mode-toggle {
+        display: inline-flex;
+        background: #f1f5f9;
+        padding: 2px;
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        gap: 2px;
+    }
+
+    .view-toggle-btn {
+        border: none;
+        background: transparent;
+        color: #64748b;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        transition: all 0.15s ease;
+        min-height: auto;
+    }
+
+    .view-toggle-btn:hover {
+        color: #0f172a;
+    }
+
+    .view-toggle-btn.active {
+        background: #ffffff;
+        color: #0f172a;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+    }
+
+    /* Cards Grid View (MetaMuse-style) */
+    .cards-grid-container {
+        flex: 1;
+        overflow-y: auto;
+        max-height: calc(100vh - 280px);
+        padding: 16px;
+        background: #f8fafc;
+    }
+
+    .cards-empty-state {
+        text-align: center;
+        padding: 60px 20px;
+        color: #64748b;
+    }
+
+    .cards-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+        gap: 16px;
+        align-items: start;
+    }
+
+    .listing-card {
+        background: #ffffff;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+        display: flex;
+        flex-direction: column;
+        transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+    }
+
+    .listing-card:hover {
+        border-color: #cbd5e1;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.07);
+        transform: translateY(-2px);
+    }
+
+    .listing-card.selected {
+        border-color: #0f172a;
+        box-shadow: 0 0 0 2px #0f172a;
+    }
+
+    .listing-card.inspecting {
+        border-color: #2563eb;
+        box-shadow: 0 0 0 2px #2563eb;
+    }
+
+    .listing-card.is-approved {
+        border-left: 4px solid #0d9488;
+    }
+
+    .card-header-container {
+        position: relative;
+        aspect-ratio: 4 / 3;
+        width: 100%;
+        background: #f1f5f9;
+        overflow: hidden;
+    }
+
+    .card-media {
+        display: block;
+        width: 100%;
+        height: 100%;
+        padding: 0;
+        margin: 0;
+        border: none;
+        background: transparent;
+        cursor: pointer;
+        min-height: auto;
+    }
+
+    .card-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        transition: transform 0.2s ease;
+    }
+
+    .card-media:hover .card-img {
+        transform: scale(1.03);
+    }
+
+    .card-img-placeholder {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 32px;
+        color: #94a3b8;
+    }
+
+    .card-overlay-top {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        right: 8px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        z-index: 2;
+    }
+
+    .card-checkbox-label {
+        background: rgba(255, 255, 255, 0.9);
+        backdrop-filter: blur(4px);
+        border-radius: 6px;
+        padding: 4px 6px;
+        display: flex;
+        align-items: center;
+        cursor: pointer;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+    }
+
+    .card-photo-count {
+        background: rgba(15, 23, 42, 0.75);
+        backdrop-filter: blur(4px);
+        color: #ffffff;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 3px 8px;
+        border-radius: 999px;
+    }
+
+    .card-readiness-badge {
+        position: absolute;
+        bottom: 8px;
+        left: 8px;
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(4px);
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-size: 11px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+        color: #334155;
+    }
+
+    .card-readiness-badge.ready {
+        color: #065f46;
+        background: rgba(236, 253, 245, 0.95);
+        border: 1px solid #a7f3d0;
+    }
+
+    .readiness-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        display: inline-block;
+    }
+
+    .card-content {
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        flex: 1;
+    }
+
+    .card-category-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+    }
+
+    .card-category-btn {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        text-align: left;
+        font-size: 11px;
+        font-weight: 600;
+        color: #1e293b;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        padding: 3px 8px;
+        max-width: 210px;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        white-space: nowrap;
+        cursor: pointer;
+        min-height: auto;
+    }
+
+    .card-category-btn:hover {
+        background: #f1f5f9;
+        border-color: #cbd5e1;
+    }
+
+    .cond-pill {
+        font-size: 10px;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+    }
+
+    .cond-new {
+        background: #dcfce7;
+        color: #166534;
+    }
+
+    .cond-preowned {
+        background: #f1f5f9;
+        color: #475569;
+    }
+
+    .card-title-input {
+        width: 100%;
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+        padding: 6px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #ffffff;
+        box-sizing: border-box;
+    }
+
+    .card-title-input:focus {
+        border-color: #2563eb;
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+    }
+
+    .card-cand-toggle-btn {
+        background: none;
+        border: none;
+        font-size: 11px;
+        font-weight: 600;
+        color: #2563eb;
+        cursor: pointer;
+        padding: 0;
+        min-height: auto;
+    }
+
+    .card-cand-toggle-btn:hover {
+        text-decoration: underline;
+    }
+
+    .card-specifics-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .spec-chip {
+        font-size: 10px;
+        background: #f8fafc;
+        color: #334155;
+        padding: 2px 6px;
+        border-radius: 4px;
+        border: 1px solid #e2e8f0;
+    }
+
+    .card-price-section {
+        background: #f8fafc;
+        border-radius: 8px;
+        padding: 8px;
+        border: 1px solid #f1f5f9;
+    }
+
+    .card-price-input {
+        width: 84px;
+        font-size: 14px;
+        font-weight: 800;
+        color: #065f46;
+        padding: 4px 6px 4px 16px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        text-align: right;
+        background: #ffffff;
+        box-sizing: border-box;
+    }
+
+    .card-price-tiers {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 4px;
+        margin-top: 6px;
+    }
+
+    .price-tier-chip {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 4px 2px;
+        border-radius: 6px;
+        border: 1px solid #e2e8f0;
+        background: #ffffff;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        min-height: auto;
+    }
+
+    .price-tier-chip:hover {
+        background: #f1f5f9;
+        border-color: #cbd5e1;
+    }
+
+    .price-tier-chip .tier-lbl {
+        font-size: 9px;
+        font-weight: 700;
+        color: #64748b;
+        text-transform: uppercase;
+    }
+
+    .price-tier-chip .tier-cost {
+        font-size: 11px;
+        font-weight: 700;
+        color: #0f172a;
+    }
+
+    .card-footer {
+        padding: 10px 12px;
+        border-top: 1px solid #f1f5f9;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        background: #ffffff;
+    }
+
+    .card-action-btn-secondary {
+        padding: 6px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #334155;
+        background: #f8fafc;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        cursor: pointer;
+        min-height: auto;
+    }
+
+    .card-action-btn-secondary:hover {
+        background: #f1f5f9;
+        border-color: #94a3b8;
+    }
+
+    .card-action-btn-approve {
+        padding: 6px 14px;
+        font-size: 12px;
+        font-weight: 700;
+        color: #ffffff;
+        background: #0f766e;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.15s ease;
+        min-height: auto;
+    }
+
+    .card-action-btn-approve:hover {
+        background: #0d9488;
+    }
+
+    .approved-badge {
+        font-size: 11px;
+        font-weight: 700;
+        color: #0d9488;
+        background: #ccfbf1;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid #99f6e4;
+    }
+
+    .draft-submitted-badge {
+        font-size: 11px;
+        font-weight: 700;
+        color: #0891b2;
+        background: #cffafe;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid #a5f3fc;
+    }
+
+    /* Inspector Readiness Health Check */
+    .inspector-readiness-banner {
+        margin-bottom: 14px;
+        padding: 12px;
+        border-radius: 8px;
+        background: #fffbeb;
+        border: 1px solid #fef3c7;
+    }
+
+    .inspector-readiness-banner.is-ready {
+        background: #ecfdf5;
+        border-color: #a7f3d0;
+    }
+
+    .readiness-check-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        color: #94a3b8;
+        font-weight: 600;
+    }
+
+    .readiness-check-item.passed {
+        color: #065f46;
+        font-weight: 700;
     }
 
     .spreadsheet-container {
