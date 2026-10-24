@@ -383,6 +383,20 @@
         setAspectValue(item, aspectName, list);
     }
 
+    function aspectListId(aspectName) {
+        return `ebay-aspect-${String(aspectName || "field")
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")}`;
+    }
+
+    function setCondition(item, value) {
+        const normalized = value === "1000" ? "1000" : "3000";
+        handleInlineEdit(item, "cid", normalized);
+        handleInlineEdit(item, "cid_condition", normalized);
+        handleInlineEdit(item, "condition", normalized === "1000" ? "New" : "Pre-owned");
+        handleInlineEdit(item, "confirmField", "condition");
+    }
+
     function getAspectProvenance(item, aspect) {
         const val = getAspectValue(item, aspect.name);
         const prov = item.provenance?.[aspect.name] || item.provenance?.[aspect.name.toLowerCase()] || {};
@@ -659,6 +673,7 @@
     function openItemInspector(item) {
         inspectingItemId = item.id;
         inspectingItem = item;
+        categoryQuery = item.listing?.categoryQuery || item.listing?.categoryName || "";
         researchClues = {
             ...researchClues,
             ...(item.listing?.researchClues || {}),
@@ -1548,18 +1563,23 @@
 
                                 <!-- Category -->
                                 <td>
-                                    <input
-                                        type="text"
-                                        class="table-input"
-                                        value={listing.cat || ""}
-                                        placeholder="Category..."
-                                        on:input={(e) =>
-                                            handleInlineEdit(
-                                                item,
-                                                "cat",
-                                                e.target.value,
-                                            )}
-                                    />
+                                    <div class="flex flex-col gap-1">
+                                        <input
+                                            type="text"
+                                            class="table-input"
+                                            value={listing.categoryName || listing.cat || ""}
+                                            placeholder="Choose eBay category"
+                                            readonly
+                                            on:click={() => openItemInspector(item)}
+                                        />
+                                        <button
+                                            type="button"
+                                            class="text-[10px] text-blue-700 font-semibold text-left hover:underline"
+                                            on:click={() => openItemInspector(item)}
+                                        >
+                                            {listing.cat ? "Edit eBay specifics" : "Search eBay category"}
+                                        </button>
+                                    </div>
                                 </td>
 
                                 <!-- Brand -->
@@ -1937,6 +1957,22 @@
                         </div>
                     </div>
 
+                    <!-- Seller-confirmed condition -->
+                    <div class="inspector-section">
+                        <div class="flex items-center justify-between mb-1">
+                            <h4 class="inspector-section-title mb-0">Condition</h4>
+                            <span class="text-[11px] text-slate-500">eBay listing condition</span>
+                        </div>
+                        <select
+                            class="w-full text-sm p-2 border rounded-md bg-white text-slate-800"
+                            value={inspectingItem.listing?.cid || inspectingItem.listing?.cid_condition || "3000"}
+                            on:change={(e) => setCondition(inspectingItem, e.target.value)}
+                        >
+                            <option value="1000">New</option>
+                            <option value="3000">Pre-owned</option>
+                        </select>
+                        <p class="text-[11px] text-slate-500 mt-1">Choose the value that matches the item before approval.</p>
+                    </div>
                     <!-- eBay Category & Live Aspects (Critical Requirement) -->
                     <div class="inspector-section">
                         <div class="flex items-center justify-between mb-1">
@@ -2033,16 +2069,18 @@
                                                                 {/each}
                                                             </div>
                                                         {:else}
-                                                            <select
+                                                            <input
                                                                 class="w-full text-xs p-1.5 border rounded bg-white"
+                                                                list={aspectListId(aspect.name)}
                                                                 value={aVal}
-                                                                on:change={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
-                                                            >
-                                                                <option value="">-- Select {aspect.name} --</option>
+                                                                placeholder={`Search or select ${aspect.name}`}
+                                                                on:input={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                            />
+                                                            <datalist id={aspectListId(aspect.name)}>
                                                                 {#each aspect.values as optVal}
                                                                     <option value={optVal}>{optVal}</option>
                                                                 {/each}
-                                                            </select>
+                                                            </datalist>
                                                         {/if}
                                                     {:else}
                                                         <input
@@ -2089,16 +2127,18 @@
                                                                 {/each}
                                                             </div>
                                                         {:else}
-                                                            <select
+                                                            <input
                                                                 class="w-full text-xs p-1.5 border rounded bg-white"
+                                                                list={aspectListId(aspect.name)}
                                                                 value={aVal}
-                                                                on:change={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
-                                                            >
-                                                                <option value="">-- Select {aspect.name} --</option>
+                                                                placeholder={`Search or select ${aspect.name}`}
+                                                                on:input={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                            />
+                                                            <datalist id={aspectListId(aspect.name)}>
                                                                 {#each aspect.values as optVal}
                                                                     <option value={optVal}>{optVal}</option>
                                                                 {/each}
-                                                            </select>
+                                                            </datalist>
                                                         {/if}
                                                     {:else}
                                                         <input

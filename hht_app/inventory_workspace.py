@@ -1124,9 +1124,9 @@ def enrich_item_from_research_clues(
     listing["researchClues"] = clean
     field_map = {
         "observedTitle": "title", "brand": "brand", "model": "model",
-        "itemType": "type", "category": "cat", "size": "size",
-        "color": "color", "material": "mat", "pattern": "pat",
-        "theme": "theme", "condition": "cnote",
+        "itemType": "type", "size": "size", "color": "color",
+        "material": "mat", "pattern": "pat", "theme": "theme",
+        "condition": "cnote",
     }
     for clue_key, listing_key in field_map.items():
         value = clean.get(clue_key)
@@ -1138,6 +1138,26 @@ def enrich_item_from_research_clues(
                 "evidence": "Seller-provided research clue; verify against the item.",
                 "sellerConfirmed": False,
             }
+    # A pasted category name is a search clue, not an eBay category ID. Keep
+    # it for the editor and require a real taxonomy selection before approval.
+    if clean.get("category"):
+        listing["categoryQuery"] = clean["category"]
+    specifics = dict(listing.get("itemSpecifics") or {})
+    for clue_key, aspect_name in {
+        "brand": "Brand", "size": "Size", "color": "Color",
+        "itemType": "Type", "model": "Model", "material": "Material",
+        "pattern": "Pattern", "theme": "Theme",
+    }.items():
+        if clean.get(clue_key):
+            specifics[aspect_name] = clean[clue_key]
+            provenance[aspect_name] = {
+                "source": "seller_input",
+                "confidence": "high",
+                "evidence": "Seller-provided research clue; choose the matching eBay option and verify it.",
+                "sellerConfirmed": False,
+            }
+    if specifics:
+        listing["itemSpecifics"] = specifics
     comparable = clean.get("comparablePrice", "")
     price_match = re.search(r"\d+(?:[.,]\d{1,2})?", comparable)
     comparable_price = float(price_match.group(0).replace(",", "")) if price_match else None
