@@ -792,7 +792,7 @@ def import_listings() -> dict[str, Any]:
     return {"imported": imported, "skippedInventoryOnly": skipped_inventory_only, "total": count_listings()}
 
 
-def import_active_listings() -> dict[str, Any]:
+def import_active_listings(seller_id: str | None = None) -> dict[str, Any]:
     """Import all active seller listings separately from Inventory API records."""
     init_db()
     page = 1
@@ -814,7 +814,7 @@ def import_active_listings() -> dict[str, Any]:
                 normalized = _merge_active_listing(existing, listing, sku)
                 ownership = classify_listing_ownership(normalized)
                 normalized["ownershipClassification"] = ownership
-                db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now))
+                db.execute("INSERT INTO listings(listing_id,offer_id,sku,marketplace,data_json,source_updated_at,imported_at,seller_id) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(sku,marketplace) DO UPDATE SET listing_id=excluded.listing_id, data_json=excluded.data_json, source_updated_at=excluded.source_updated_at, imported_at=excluded.imported_at, seller_id=excluded.seller_id", (str(listing.get("listingId", "")), "", sku, _marketplace(), _json(normalized), "", now, seller_id))
                 # eBay may omit WatchCount. The production listings column is
                 # non-null, so store zero while preserving the raw omission in
                 # data_json for later review.
@@ -1085,8 +1085,8 @@ def approve_rotation_actions(
     raise ValueError("Rotation approvals are paused until rotation recommendations use the existing actions approval and rollback model.")
 
 
-def start_active_import_job() -> dict[str, Any]:
-    result = _start_background_job("active_import", {}, run_in_web_thread=False)
+def start_active_import_job(seller_id: str | None = None) -> dict[str, Any]:
+    result = _start_background_job("active_import", {"sellerId": seller_id or ""}, run_in_web_thread=False)
     # Active import is read-only. Execute it in the request by default so a
     # missing/stalled worker cannot leave the seller at queued 0%.
     if os.environ.get("COMMERCE_IMPORT_DIRECT_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}:
@@ -1363,7 +1363,7 @@ def run_job(job_id: str) -> dict[str, Any] | None:
         payload = _decode(row["result_json"], {})
     try:
         if kind == "active_import":
-            result = import_active_listings()
+            result = import_active_listings(str(payload.get("sellerId") or "") or None)
         elif kind == "performance_sync":
             result = sync_performance(payload.get("days", 30), payload.get("listingIds") or None)
         elif kind == "fulfillment_sync":

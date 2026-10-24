@@ -630,7 +630,7 @@ def commerce_import():
 @app.route("/api/commerce/import-active", methods=["POST"])
 def commerce_import_active():
     try:
-        return jsonify({"result": commerce_agent.import_active_listings()})
+        return jsonify({"result": commerce_agent.import_active_listings(getattr(g, "seller_id", None))})
     except Exception:
         app.logger.exception("Commerce Agent active listing import failed")
         return jsonify({"error": "Active listing import failed. Check the Heroku logs for the diagnostic."}), 502
@@ -639,7 +639,7 @@ def commerce_import_active():
 @app.route("/api/commerce/import-active/start", methods=["POST"])
 def commerce_import_active_start():
     try:
-        return jsonify({"result": commerce_agent.start_active_import_job()})
+        return jsonify({"result": commerce_agent.start_active_import_job(getattr(g, "seller_id", None))})
     except Exception:
         app.logger.exception("Commerce Agent active listing job could not start")
         return jsonify({"error": "Active listing import could not start."}), 503
