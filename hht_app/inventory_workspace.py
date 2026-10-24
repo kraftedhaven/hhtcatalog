@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import urllib.request
 import uuid
@@ -1250,6 +1251,9 @@ def start_workspace_analysis(
                    WHERE id = ? AND seller_id = ?""",
                 (job["jobId"], _now_iso(), item["id"], seller_id),
             )
+        if os.environ.get("ANALYSIS_DIRECT_MODE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            from .commerce_agent import run_job
+            run_job(str(job["jobId"]))
 
     return {"queuedCount": len(job_ids), "jobIds": job_ids, "batchId": batch_id}
 
