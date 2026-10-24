@@ -1261,10 +1261,14 @@ def start_listing_analysis_job(
         })
     if total_bytes > 12 * 1024 * 1024:
         raise ValueError("Analysis photos exceed the 12 MB per-item limit.")
+    # Workspace uploads must not depend exclusively on the separate worker
+    # dyno. The job claim is compare-and-set, so the worker and web fallback
+    # cannot process the same job twice; whichever claims it first owns it.
+    direct_mode = os.environ.get("ANALYSIS_DIRECT_MODE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     return _start_background_job(
         "listing_analysis",
         {"images": prepared, "sellerDefaults": seller_defaults if isinstance(seller_defaults, dict) else {}, "cacheNamespace": seller_id},
-        run_in_web_thread=False,
+        run_in_web_thread=direct_mode,
         seller_id=seller_id,
     )
 
