@@ -139,6 +139,8 @@ class MergePipelineTests(unittest.TestCase):
 
         with mock.patch.object(app, "authenticate_request", side_effect=authenticate), mock.patch.object(
             app.commerce_agent, "ensure_seller_identity", return_value={"id": "seller-id"}
+        ), mock.patch.object(
+            app.inventory_workspace, "get_or_create_compat_batch", return_value={"id": "compat-batch"}
         ), mock.patch.object(app.commerce_agent, "start_listing_analysis_job", return_value={
             "jobId": "job-1", "status": "queued", "kind": "listing_analysis",
         }) as start:
@@ -1671,7 +1673,7 @@ class MergePipelineTests(unittest.TestCase):
     def test_export_draft_csv_endpoint_returns_11_column_template(self):
         response = self.client.post(
             "/export/draft-csv",
-            json={"items": [{"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket"}]},
+            json={"items": [{"title": "Levi's Jacket", "price": 24.99, "cat": "57988", "brand": "Levi's", "type": "Jacket", "pic": "https://example.com/photo.jpg"}]},
         )
         self.assertEqual(response.status_code, 200)
         rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))

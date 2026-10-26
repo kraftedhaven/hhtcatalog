@@ -1263,7 +1263,6 @@ def start_listing_analysis_job(
         raise ValueError("Analysis photos exceed the 12 MB per-item limit.")
     defaults = seller_defaults if isinstance(seller_defaults, dict) else {}
     workspace_item_id = str(defaults.get("workspaceItemId") or "").strip()
-    direct_mode = os.environ.get("ANALYSIS_DIRECT_MODE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     payload = {
         "images": prepared,
         "sellerDefaults": defaults,
@@ -1274,7 +1273,12 @@ def start_listing_analysis_job(
     return _start_background_job(
         "listing_analysis",
         payload,
-        run_in_web_thread=direct_mode,
+        # Callers that need an inline fallback invoke run_job explicitly after
+        # the persisted queue record is created. Starting a second detached
+        # thread here races that fallback and can leave callers observing the
+        # item before prepopulation has committed. worker.1 remains the normal
+        # asynchronous consumer when no inline fallback is requested.
+        run_in_web_thread=False,
         seller_id=seller_id,
     )
 
