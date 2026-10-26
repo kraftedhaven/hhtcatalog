@@ -1181,6 +1181,22 @@ def prepopulate_item_from_analysis(
                 "reason": "Upper market tier for patience or pristine condition.",
             },
         }
+    else:
+        # Vision providers may return a usable estimated price even when no
+        # comparable-sales dataset is available. Preserve that estimate and
+        # expose the same three seller-review tiers instead of dropping it.
+        raw_analyzed_price = ai_listing.get("price")
+        try:
+            analyzed_price = float(str(raw_analyzed_price).replace("$", "").replace(",", "").strip())
+        except (TypeError, ValueError):
+            analyzed_price = 0.0
+        if analyzed_price > 0:
+            base_price = analyzed_price
+            pricing_options = {
+                "quick_sale": {"price": round(base_price * 0.85, 2), "label": "Quick sale", "confidence": "medium", "reason": "Below the AI estimate for faster sell-through."},
+                "balanced": {"price": round(base_price, 2), "label": "Balanced", "confidence": "medium", "reason": "Based on the AI visual estimate; verify before approval."},
+                "premium": {"price": round(base_price * 1.15, 2), "label": "Premium", "confidence": "low", "reason": "Higher asking price; expect a longer sales cycle."},
+            }
 
     if not (preserve_seller_edits and "price" in seller_edited_keys):
         if base_price:
