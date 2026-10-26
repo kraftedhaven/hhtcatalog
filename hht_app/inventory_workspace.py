@@ -128,6 +128,17 @@ def list_batches(seller_id: str) -> list[dict[str, Any]]:
         ]
 
 
+def get_or_create_compat_batch(seller_id: str) -> dict[str, Any]:
+    """Find the most recent open batch for the seller, or create one for legacy compatibility."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    batches = list_batches(seller_id)
+    open_batches = [b for b in batches if b.get("status") == "open"]
+    if open_batches:
+        return open_batches[0]
+    return create_batch(seller_id, name="Upload Batch", grouping_mode="auto")
+
+
 def get_batch(batch_id: str, seller_id: str) -> dict[str, Any]:
     if not seller_id:
         raise ValueError("Seller ownership is required.")
@@ -569,13 +580,113 @@ def apply_photo_grouping(
 
 
 # ---------------------------------------------------------------------------
-# Listing & Inspecting Items
+# Listing & Inspecting Items & Job Reconciliation
 # ---------------------------------------------------------------------------
+
+def reconcile_stale_item_analyses(seller_id: str, max_age_seconds: int = 180) -> int:
+    """Reconcile items stuck in analysis_queued or analysis_running.
+
+    1. If the job completed, apply prepopulate_item_from_analysis to move it to needs_review.
+    2. If the job failed, move item to needs_review with sanitized diagnostic error.
+    3. If elapsed time >= max_age_seconds, time out the job and move item to needs_review with timeout message.
+    """
+    if not seller_id:
+        return 0
+    init_db()
+    reconciled = 0
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    with connect() as db:
+        stuck_items = db.execute(
+            """SELECT id, analysis_job_id, workflow_status, updated_at, listing_json
+               FROM inventory_items
+               WHERE seller_id = ? AND workflow_status IN ('analysis_queued', 'analysis_running')""",
+            (seller_id,),
+        ).fetchall()
+
+    for itm in stuck_items:
+        item_id = str(itm["id"])
+        job_id = str(itm["analysis_job_id"] or "")
+        updated_at_str = str(itm["updated_at"] or "")
+        age_seconds = 0.0
+        if updated_at_str:
+            try:
+                dt = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+                age_seconds = (now - dt).total_seconds()
+            except Exception:
+                age_seconds = 0.0
+
+        job_row = None
+        if job_id:
+            with connect() as db:
+                job_row = db.execute(
+                    "SELECT id, status, result_json, error FROM commerce_jobs WHERE id = ? AND seller_id = ?",
+                    (job_id, seller_id),
+                ).fetchone()
+
+        if job_row:
+            status = str(job_row["status"])
+            if status == "completed":
+                raw_res = _decode(job_row["result_json"], {})
+                try:
+                    prepopulate_item_from_analysis(item_id, seller_id, raw_res)
+                    reconciled += 1
+                    continue
+                except Exception as exc:
+                    logger.warning("Reconciliation prepopulate failed for %s: %s", item_id, exc)
+            elif status == "failed":
+                listing = _decode(itm["listing_json"], {})
+                listing["analysisStatus"] = "failed"
+                listing["analysisError"] = str(job_row["error"] or "Analysis failed. Click Retry to run analysis again.")
+                with connect() as db:
+                    db.execute(
+                        """UPDATE inventory_items
+                           SET listing_json = ?, workflow_status = 'needs_review', updated_at = ?
+                           WHERE id = ? AND seller_id = ?""",
+                        (_json(listing), now_iso, item_id, seller_id),
+                    )
+                reconciled += 1
+                continue
+            elif age_seconds >= max_age_seconds:
+                with connect() as db:
+                    db.execute(
+                        "UPDATE commerce_jobs SET status = 'failed', error = 'Analysis timed out.', updated_at = ? WHERE id = ?",
+                        (now_iso, job_id),
+                    )
+                    listing = _decode(itm["listing_json"], {})
+                    listing["analysisStatus"] = "timeout"
+                    listing["analysisError"] = "Analysis timed out after 3 minutes without completing. Click Retry to run analysis again."
+                    db.execute(
+                        """UPDATE inventory_items
+                           SET listing_json = ?, workflow_status = 'needs_review', updated_at = ?
+                           WHERE id = ? AND seller_id = ?""",
+                        (_json(listing), now_iso, item_id, seller_id),
+                    )
+                reconciled += 1
+                continue
+        else:
+            if age_seconds >= max_age_seconds or not job_id:
+                listing = _decode(itm["listing_json"], {})
+                listing["analysisStatus"] = "failed"
+                listing["analysisError"] = "Analysis job not found or timed out. Click Retry to run analysis again."
+                with connect() as db:
+                    db.execute(
+                        """UPDATE inventory_items
+                           SET listing_json = ?, workflow_status = 'needs_review', updated_at = ?
+                           WHERE id = ? AND seller_id = ?""",
+                        (_json(listing), now_iso, item_id, seller_id),
+                    )
+                reconciled += 1
+
+    return reconciled
+
 
 def list_batch_items(batch_id: str, seller_id: str) -> list[dict[str, Any]]:
     if not seller_id:
         raise ValueError("Seller ownership is required.")
     init_db()
+    reconcile_stale_item_analyses(seller_id)
     with connect() as db:
         rows = db.execute(
             """SELECT i.*
@@ -651,6 +762,15 @@ def get_item(item_id: str, seller_id: str) -> dict[str, Any]:
         ).fetchone()
         if not row:
             raise KeyError(f"Item {item_id} not found.")
+
+        if str(row["workflow_status"] or "") in ("analysis_queued", "analysis_running"):
+            reconcile_stale_item_analyses(seller_id)
+            row = db.execute(
+                "SELECT * FROM inventory_items WHERE id = ? AND seller_id = ?",
+                (item_id, seller_id),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"Item {item_id} not found.")
 
         photo_rows = db.execute(
             "SELECT * FROM inventory_item_photos WHERE item_id = ? ORDER BY position ASC",
@@ -1214,6 +1334,18 @@ def start_workspace_analysis(
 
     job_ids: list[str] = []
     for item in items:
+        # Guarantee: only one persisted listing_analysis job per Workspace item.
+        # If an active (queued/running) job already exists, reuse it without duplication.
+        if item.get("analysisJobId"):
+            with connect() as db:
+                existing_job = db.execute(
+                    "SELECT id, status FROM commerce_jobs WHERE id = ? AND seller_id = ? AND kind = 'listing_analysis'",
+                    (item["analysisJobId"], seller_id),
+                ).fetchone()
+                if existing_job and existing_job["status"] in ("queued", "running"):
+                    job_ids.append(str(existing_job["id"]))
+                    continue
+
         images: list[dict[str, Any]] = []
         for photo in (item.get("photos") or [])[:5]:
             url = str(photo.get("storageUrl") or photo.get("previewUrl") or "").strip()
@@ -1235,6 +1367,19 @@ def start_workspace_analysis(
                 logger.warning("Workspace photo download failed for item %s: %s", item["id"], type(exc).__name__)
         if not images:
             raise ValueError(f"No usable hosted photos are available for item {item['id'][:8]}.")
+
+        with connect() as db:
+            # Delete any prior listing_analysis jobs for this item to ensure strictly 1 persisted job
+            if item.get("analysisJobId"):
+                db.execute(
+                    "DELETE FROM commerce_jobs WHERE id = ? AND seller_id = ? AND kind = 'listing_analysis'",
+                    (item["analysisJobId"], seller_id),
+                )
+            db.execute(
+                "DELETE FROM commerce_jobs WHERE kind = 'listing_analysis' AND seller_id = ? AND result_json LIKE ?",
+                (seller_id, f'%"{item["id"]}"%'),
+            )
+
         job = start_listing_analysis_job(
             images,
             seller_id,

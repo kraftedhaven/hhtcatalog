@@ -151,11 +151,64 @@ def analysis_start():
         return jsonify({"error": "No image uploaded. Use multipart form field 'file' with one to five images."}), 400
     try:
         images = [_uploaded_image(file) for file in files[:5]]
+        seller_id = str(g.seller_id)
+        seller_defaults = _seller_defaults_from_form()
+        batch = inventory_workspace.get_or_create_compat_batch(seller_id)
+        batch_id = str(batch["id"])
+        target_item = None
+
+        photos_to_register = []
+        for file in files[:5]:
+            filename = file.filename or "photo.jpg"
+            file.seek(0)
+            data = file.read()
+            mime_type = file.mimetype or "image/jpeg"
+            try:
+                asset = store_photo(
+                    seller_id=seller_id,
+                    filename=filename,
+                    mime_type=mime_type,
+                    data=data,
+                    listing_key=f"compat_{batch_id[:8]}",
+                )
+                hosted_url = str(asset.get("ebayUrl") or "").strip()
+                if hosted_url:
+                    photos_to_register.append({
+                        "photoAssetId": asset.get("assetId"),
+                        "filename": filename,
+                        "previewUrl": hosted_url,
+                        "storageUrl": hosted_url,
+                    })
+            except Exception:
+                pass
+
+        if photos_to_register:
+            registered = inventory_workspace.register_batch_photos(batch_id, seller_id, photos_to_register)
+            new_items = inventory_workspace.list_batch_items(batch_id, seller_id)
+            reg_ids = {p["id"] for p in registered}
+            matching = [it for it in new_items if any(p["id"] in reg_ids for p in (it.get("photos") or []))]
+            if matching:
+                target_item = matching[0]
+            elif new_items:
+                target_item = new_items[-1]
+
+        if target_item:
+            seller_defaults["workspaceItemId"] = target_item["id"]
+
         result = commerce_agent.start_listing_analysis_job(
             [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename} for image in images],
-            str(g.seller_id),
-            _seller_defaults_from_form(),
+            seller_id,
+            seller_defaults,
         )
+        if target_item and result.get("jobId"):
+            with commerce_agent.connect() as db:
+                db.execute(
+                    "UPDATE inventory_items SET workflow_status='analysis_queued', analysis_job_id=?, updated_at=? WHERE id=? AND seller_id=?",
+                    (result["jobId"], inventory_workspace._now_iso(), target_item["id"], seller_id),
+                )
+            result["workspaceItemId"] = target_item["id"]
+            result["batchId"] = batch_id
+
         if DIRECT_ANALYSIS_ENABLED and result.get("jobId"):
             # Emergency read-only path for a deployment whose detached worker
             # threads are not progressing. run_job() uses the same atomic
@@ -215,10 +268,60 @@ def nvidia_analyze_start():
         return jsonify({"error": "No image uploaded. Use multipart form field 'file' with one to three images."}), 400
     try:
         images = [_uploaded_image(file) for file in files[:3]]
+        seller_id = str(g.seller_id)
+        seller_defaults = _seller_defaults_from_form()
+        batch = inventory_workspace.get_or_create_compat_batch(seller_id)
+        batch_id = str(batch["id"])
+        target_item = None
+        photos_to_register = []
+        for file in files[:3]:
+            filename = file.filename or "photo.jpg"
+            file.seek(0)
+            data = file.read()
+            mime_type = file.mimetype or "image/jpeg"
+            try:
+                asset = store_photo(
+                    seller_id=seller_id,
+                    filename=filename,
+                    mime_type=mime_type,
+                    data=data,
+                    listing_key=f"compat_{batch_id[:8]}",
+                )
+                hosted_url = str(asset.get("ebayUrl") or "").strip()
+                if hosted_url:
+                    photos_to_register.append({
+                        "photoAssetId": asset.get("assetId"),
+                        "filename": filename,
+                        "previewUrl": hosted_url,
+                        "storageUrl": hosted_url,
+                    })
+            except Exception:
+                pass
+        if photos_to_register:
+            registered = inventory_workspace.register_batch_photos(batch_id, seller_id, photos_to_register)
+            new_items = inventory_workspace.list_batch_items(batch_id, seller_id)
+            reg_ids = {p["id"] for p in registered}
+            matching = [it for it in new_items if any(p["id"] in reg_ids for p in (it.get("photos") or []))]
+            if matching:
+                target_item = matching[0]
+            elif new_items:
+                target_item = new_items[-1]
+
+        if target_item:
+            seller_defaults["workspaceItemId"] = target_item["id"]
+
         result = commerce_agent.start_nvidia_vision_job(
             [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename} for image in images],
-            _seller_defaults_from_form(),
+            seller_defaults,
         )
+        if target_item and result.get("jobId"):
+            with commerce_agent.connect() as db:
+                db.execute(
+                    "UPDATE inventory_items SET workflow_status='analysis_queued', analysis_job_id=?, updated_at=? WHERE id=? AND seller_id=?",
+                    (result["jobId"], inventory_workspace._now_iso(), target_item["id"], seller_id),
+                )
+            result["workspaceItemId"] = target_item["id"]
+            result["batchId"] = batch_id
         result["provider"] = "nvidia_worker"
         result["nextStep"] = "The NVIDIA worker is analyzing the photos. Poll the returned job ID for the reviewed result."
         return jsonify({"result": result}), 202
@@ -236,21 +339,59 @@ def bulk_analyze():
         return jsonify({"error": "No image uploaded. Use multipart form field 'file' or 'files'."}), 400
     route = {"route": "groq_first", "audit": "nvidia_second_pass", "workload": "per_item", "itemCount": len(files)}
     items = []
+    seller_id = str(g.seller_id)
+    batch = inventory_workspace.get_or_create_compat_batch(seller_id)
+    batch_id = str(batch["id"])
+
     for file in files:
         try:
             image = _uploaded_image(file)
+            defaults = _seller_defaults_from_form()
+            # Register in batch
+            try:
+                file.seek(0)
+                data = file.read()
+                asset = store_photo(
+                    seller_id=seller_id,
+                    filename=file.filename or "photo.jpg",
+                    mime_type=file.mimetype or "image/jpeg",
+                    data=data,
+                    listing_key=f"compat_{batch_id[:8]}",
+                )
+                hosted = str(asset.get("ebayUrl") or "").strip()
+                if hosted:
+                    registered = inventory_workspace.register_batch_photos(batch_id, seller_id, [{
+                        "photoAssetId": asset.get("assetId"),
+                        "filename": file.filename or "photo.jpg",
+                        "previewUrl": hosted,
+                        "storageUrl": hosted,
+                    }])
+                    new_items = inventory_workspace.list_batch_items(batch_id, seller_id)
+                    reg_ids = {p["id"] for p in registered}
+                    matching = [it for it in new_items if any(p["id"] in reg_ids for p in (it.get("photos") or []))]
+                    if matching:
+                        defaults["workspaceItemId"] = matching[0]["id"]
+            except Exception:
+                pass
+
             job = commerce_agent.start_listing_analysis_job(
                 [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename}],
-                str(g.seller_id),
-                _seller_defaults_from_form(),
+                seller_id,
+                defaults,
             )
+            if defaults.get("workspaceItemId") and job.get("jobId"):
+                with commerce_agent.connect() as db:
+                    db.execute(
+                        "UPDATE inventory_items SET workflow_status='analysis_queued', analysis_job_id=?, updated_at=? WHERE id=? AND seller_id=?",
+                        (job["jobId"], inventory_workspace._now_iso(), defaults["workspaceItemId"], seller_id),
+                    )
             items.append({"filename": file.filename, **job})
         except ValueError as exc:
             items.append({"filename": file.filename, "status": "error", "error": str(exc)})
         except Exception:
             app.logger.exception("Bulk listing analysis job could not start for %r", file.filename)
             items.append({"filename": file.filename, "status": "error", "error": "Analysis could not be queued."})
-    return jsonify({"count": len(items), "route": route, "items": items}), 202
+    return jsonify({"count": len(items), "route": route, "items": items, "batchId": batch_id}), 202
 
 
 @app.route("/api/photo-quality", methods=["POST"])
