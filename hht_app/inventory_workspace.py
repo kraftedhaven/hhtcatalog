@@ -1147,6 +1147,17 @@ def prepopulate_item_from_analysis(
     base_price = None
     if pricing_rec.get("status") != "error" and pricing_rec.get("recommendedPrice"):
         base_price = float(pricing_rec["recommendedPrice"])
+    else:
+        candidate_price = ai_listing.get("price") or listing.get("price")
+        if candidate_price:
+            try:
+                candidate_float = float(str(candidate_price).replace("$", "").strip())
+                if candidate_float > 0:
+                    base_price = round(candidate_float, 2)
+            except (ValueError, TypeError):
+                pass
+
+    if base_price:
         low_p = float(pricing_rec.get("lowSoldPrice") or round(base_price * 0.85, 2))
         high_p = float(pricing_rec.get("highSoldPrice") or round(base_price * 1.15, 2))
 
@@ -1387,6 +1398,7 @@ def start_workspace_analysis(
                 "workspaceItemId": item["id"],
                 "analysisHints": item.get("listing", {}).get("researchClues", {}),
             },
+            run_in_web_thread=False,
         )
         job_ids.append(str(job["jobId"]))
         with connect() as db:

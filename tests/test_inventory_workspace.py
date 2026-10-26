@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+import uuid
 from unittest import mock
 
 import app as hht_app
@@ -582,6 +583,7 @@ class InventoryWorkspaceTests(unittest.TestCase):
 
         with mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()), \
              mock.patch("hht_app.providers.analyze_images", return_value=mock_analysis_result), \
+             mock.patch("hht_app.providers.audit_listing_with_nvidia", return_value={"providerSeconds": 0.05}), \
              mock.patch.dict(os.environ, {"ANALYSIS_DIRECT_MODE_ENABLED": "true"}):
             res = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item_id])
 
@@ -629,7 +631,7 @@ class InventoryWorkspaceTests(unittest.TestCase):
         item_id = items[0]["id"]
 
         old_time = "2026-10-26T18:00:00+00:00"
-        job_id = "job-stuck-999"
+        job_id = f"job-stuck-{uuid.uuid4()}"
         with commerce_agent.connect() as db:
             db.execute(
                 "INSERT INTO commerce_jobs(id, kind, status, progress, result_json, error, created_at, updated_at, seller_id) VALUES (?, 'listing_analysis', 'running', 20, '{}', '', ?, ?, ?)",
@@ -670,8 +672,8 @@ class InventoryWorkspaceTests(unittest.TestCase):
 
             with commerce_agent.connect() as db:
                 jobs_count = db.execute(
-                    "SELECT COUNT(*) AS cnt FROM commerce_jobs WHERE kind = 'listing_analysis' AND seller_id = ?",
-                    (self.seller_id,),
+                    "SELECT COUNT(*) AS cnt FROM commerce_jobs WHERE kind = 'listing_analysis' AND seller_id = ? AND result_json LIKE ?",
+                    (self.seller_id, f'%"{item_id}"%'),
                 ).fetchone()["cnt"]
             self.assertEqual(jobs_count, 1)
 
@@ -680,8 +682,8 @@ class InventoryWorkspaceTests(unittest.TestCase):
 
             with commerce_agent.connect() as db:
                 jobs_count_after = db.execute(
-                    "SELECT COUNT(*) AS cnt FROM commerce_jobs WHERE kind = 'listing_analysis' AND seller_id = ?",
-                    (self.seller_id,),
+                    "SELECT COUNT(*) AS cnt FROM commerce_jobs WHERE kind = 'listing_analysis' AND seller_id = ? AND result_json LIKE ?",
+                    (self.seller_id, f'%"{item_id}"%'),
                 ).fetchone()["cnt"]
             self.assertEqual(jobs_count_after, 1)
 

@@ -1241,7 +1241,10 @@ def start_nvidia_vision_job(images: list[dict[str, Any]], seller_defaults: dict[
 
 
 def start_listing_analysis_job(
-    images: list[dict[str, Any]], seller_id: str, seller_defaults: dict[str, Any] | None = None
+    images: list[dict[str, Any]],
+    seller_id: str,
+    seller_defaults: dict[str, Any] | None = None,
+    run_in_web_thread: bool | None = None,
 ) -> dict[str, Any]:
     if not seller_id:
         raise ValueError("Seller ownership is required for listing analysis.")
@@ -1271,10 +1274,12 @@ def start_listing_analysis_job(
     }
     if workspace_item_id:
         payload["workspaceItemId"] = workspace_item_id
+    if run_in_web_thread is None:
+        run_in_web_thread = direct_mode
     return _start_background_job(
         "listing_analysis",
         payload,
-        run_in_web_thread=direct_mode,
+        run_in_web_thread=run_in_web_thread,
         seller_id=seller_id,
     )
 
