@@ -1838,7 +1838,6 @@
             <InventoryWorkspace
                 onSwitchToListingOptimization={() => (tab = "commerce")}
                 onOpenFullReview={openWorkspaceItemInReview}
-                onOpenAnalysisMonitor={() => (tab = "analyze")}
             />
         {/if}
 
@@ -2150,17 +2149,16 @@
                                 ? "Re-analyzing..."
                                 : "Re-analyze with my corrections"}</button
                         >
-                        <button type="button" on:click={() => (tab = "analyze")}
-                            >Edit analysis clues</button
+                        <button type="button" on:click={() => (tab = "workspace")}
+                            >Back to New Listings</button
                         >
                         <button type="button" on:click={useCurrentItemAsHints}
                             >Use current fields as clues</button
                         >
                     </div>
                     <p class="help">
-                        Add or correct a brand, model, category, or search term
-                        on the Analyze tab, then rerun. Your current result
-                        stays in place if the rerun fails.
+                        Correct attributes here or in New Listings, then re-analyze.
+                        Your current result stays in place if the rerun fails.
                     </p>
                     {#if item.analysisHintFields?.length}<p class="help">
                             Seller clues used for this result: {item.analysisHintFields.join(

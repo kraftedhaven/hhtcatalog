@@ -1078,7 +1078,7 @@
     }
 
     // Helper to get status badge classes matching Content 16 requirements
-    function getStatusBadge(status) {
+    function getStatusBadge(status, item = null) {
         switch (status) {
             case "photo_staged":
                 return {
@@ -1106,6 +1106,18 @@
                     bg: "bg-emerald-50 text-emerald-700 border-emerald-200",
                 };
             case "needs_review":
+                if (item?.listing?.analysisStatus === "failed") {
+                    return {
+                        text: "Analysis failed",
+                        bg: "bg-rose-50 text-rose-700 border-rose-200",
+                    };
+                }
+                if (item?.listing?.analysisStatus === "timeout") {
+                    return {
+                        text: "Analysis timed out",
+                        bg: "bg-amber-100 text-amber-800 border-amber-300",
+                    };
+                }
                 return {
                     text: "Needs review",
                     bg: "bg-amber-50 text-amber-700 border-amber-200",
@@ -1460,7 +1472,7 @@
                             {@const readiness = getItemReadiness(item)}
                             {@const isSelected = selectedItemIds.has(item.id)}
                             {@const isInspecting = inspectingItemId === item.id}
-                            {@const statusInfo = getStatusBadge(item.workflowStatus)}
+                            {@const statusInfo = getStatusBadge(item.workflowStatus, item)}
 
                             <div
                                 class="listing-card"
@@ -1507,7 +1519,10 @@
 
                                     <!-- Readiness Pill -->
                                     <div class="card-readiness-badge" class:ready={readiness.ready}>
-                                        {#if readiness.ready}
+                                        {#if item?.listing?.analysisStatus === "failed" || item?.listing?.analysisStatus === "timeout"}
+                                            <span class="readiness-dot bg-rose-500"></span>
+                                            <span class="text-rose-700 font-semibold">{statusInfo.text}</span>
+                                        {:else if readiness.ready}
                                             <span class="readiness-dot bg-emerald-500"></span>
                                             <span>Ready for eBay Draft</span>
                                         {:else if readiness.missing.length > 0}
@@ -1702,6 +1717,16 @@
                                         <span class="draft-submitted-badge">
                                             ✓ Draft Sent
                                         </span>
+                                    {:else if item.listing?.analysisStatus === "failed" || item.listing?.analysisStatus === "timeout" || (item.workflowStatus === "needs_review" && item.listing?.analysisError)}
+                                        <button
+                                            type="button"
+                                            class="card-action-btn-retry"
+                                            on:click={() => analyzeWorkspaceItem(item.id)}
+                                            disabled={actionLoading}
+                                            title={item.listing?.analysisError || "Retry analysis"}
+                                        >
+                                            ↻ Retry Analysis
+                                        </button>
                                     {:else}
                                         <button
                                             type="button"
@@ -1803,6 +1828,7 @@
                             {@const prov = item.provenance || {}}
                             {@const statusInfo = getStatusBadge(
                                 item.workflowStatus,
+                                item,
                             )}
                             {@const isMissingSize =
                                 !listing.size || listing.size === "Not visible"}
@@ -2086,7 +2112,21 @@
 
                                 <!-- Status Badge matching media_1792112229.png -->
                                 <td>
-                                    {#if isMissingSize && item.workflowStatus === "needs_review"}
+                                    {#if item.listing?.analysisStatus === "failed" || item.listing?.analysisStatus === "timeout" || (item.workflowStatus === "needs_review" && item.listing?.analysisError)}
+                                        <div class="flex items-center gap-1.5 flex-wrap">
+                                            <span class="status-pill {statusInfo.bg}" title={item.listing?.analysisError || ""}>
+                                                {statusInfo.text}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                class="text-[11px] font-semibold text-rose-600 hover:text-rose-800 underline"
+                                                on:click|stopPropagation={() => analyzeWorkspaceItem(item.id)}
+                                                disabled={actionLoading}
+                                            >
+                                                Retry
+                                            </button>
+                                        </div>
+                                    {:else if isMissingSize && item.workflowStatus === "needs_review"}
                                         <span
                                             class="status-pill bg-amber-50 text-amber-700 border-amber-200"
                                         >
@@ -2219,13 +2259,35 @@
                     </div>
 
                     <div class="inspector-section">
+                        {#if inspectingItem.listing?.analysisStatus === "failed" || inspectingItem.listing?.analysisStatus === "timeout" || (inspectingItem.workflowStatus === "needs_review" && inspectingItem.listing?.analysisError)}
+                            <div class="mb-3 p-3 rounded-lg border border-rose-200 bg-rose-50 text-rose-800 text-xs">
+                                <div class="font-bold text-rose-900 mb-1 flex items-center gap-1.5">
+                                    <span>⚠️ Analysis {inspectingItem.listing?.analysisStatus === "timeout" ? "Timed Out" : "Failed"}</span>
+                                </div>
+                                <p class="mb-2 leading-relaxed">
+                                    {inspectingItem.listing?.analysisError || "Analysis could not complete. Please retry shortly."}
+                                </p>
+                                <button
+                                    type="button"
+                                    class="px-3 py-1.5 text-xs font-bold rounded bg-rose-600 text-white hover:bg-rose-700 transition"
+                                    on:click={() => analyzeWorkspaceItem(inspectingItem.id)}
+                                    disabled={actionLoading || !inspectingItem.photos?.length}
+                                >
+                                    ↻ Retry Analysis
+                                </button>
+                            </div>
+                        {/if}
                         <button
                             type="button"
                             class="action-btn-primary w-full"
                             on:click={() => analyzeWorkspaceItem(inspectingItem.id)}
                             disabled={actionLoading || !inspectingItem.photos?.length}
                         >
-                            {actionLoading ? "Queueing photo analysis..." : "Analyze photos & estimate price"}
+                            {actionLoading
+                                ? "Queueing photo analysis..."
+                                : (inspectingItem.listing?.analysisStatus === "failed" || inspectingItem.listing?.analysisStatus === "timeout"
+                                    ? "Retry photo analysis & price"
+                                    : "Analyze photos & estimate price")}
                         </button>
                         <p class="text-xs text-slate-500 mt-2">
                             Runs the existing vision worker from Workspace. No Analyze-tab upload is required.
@@ -3806,6 +3868,23 @@
 
     .card-action-btn-approve:hover {
         background: #0d9488;
+    }
+
+    .card-action-btn-retry {
+        padding: 6px 14px;
+        font-size: 12px;
+        font-weight: 700;
+        color: #ffffff;
+        background: #e11d48;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.15s ease;
+        min-height: auto;
+    }
+
+    .card-action-btn-retry:hover {
+        background: #be123c;
     }
 
     .approved-badge {

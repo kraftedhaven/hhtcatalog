@@ -552,6 +552,139 @@ class InventoryWorkspaceTests(unittest.TestCase):
             inventory_workspace.delete_batch(batch["id"], self.seller_id)
         self.assertIn("cannot be deleted after an eBay draft submission", str(ctx.exception))
 
+    def test_regression_successful_workspace_analysis(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Regression Success", grouping_mode="1")
+        photos = [{"filename": "shirt.jpg", "previewUrl": "https://example.com/shirt.jpg", "storageUrl": "https://example.com/shirt.jpg"}]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos)
+        items = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        item_id = items[0]["id"]
+
+        class MockResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+            def read(self, _limit=None):
+                return b"fake-jpeg-bytes"
+
+        mock_analysis_result = {
+            "title": "Vintage Ralph Lauren Polo Shirt Medium",
+            "brand": "Ralph Lauren",
+            "model": "Polo",
+            "size": "M",
+            "cat": "Men's Shirts",
+            "cid": "57990",
+            "price": "38.00",
+            "color": "Navy Blue",
+            "cnote": "Pre-owned in excellent condition.",
+            "provenance": {"brand": "Photo tag", "size": "Photo tag"},
+        }
+
+        with mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()), \
+             mock.patch("hht_app.providers.analyze_images", return_value=mock_analysis_result), \
+             mock.patch.dict(os.environ, {"ANALYSIS_DIRECT_MODE_ENABLED": "true"}):
+            res = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item_id])
+
+        self.assertEqual(res["queuedCount"], 1)
+        reloaded = inventory_workspace.get_item(item_id, self.seller_id)
+        self.assertEqual(reloaded["workflowStatus"], "needs_review")
+        self.assertTrue(bool(reloaded["listing"].get("title")))
+        self.assertGreaterEqual(len(reloaded["titleCandidates"]), 2)
+        self.assertIn("balanced", reloaded["pricingOptions"])
+        self.assertIn("quick_sale", reloaded["pricingOptions"])
+        self.assertEqual(reloaded["listing"]["brand"], "Ralph Lauren")
+
+    def test_regression_provider_failure(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Regression Failure", grouping_mode="1")
+        photos = [{"filename": "shoes.jpg", "previewUrl": "https://example.com/shoes.jpg", "storageUrl": "https://example.com/shoes.jpg"}]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos)
+        items = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        item_id = items[0]["id"]
+
+        class MockResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+            def read(self, _limit=None):
+                return b"fake-jpeg-bytes"
+
+        from hht_app.providers import ProviderError
+        with mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()), \
+             mock.patch("hht_app.providers.analyze_images", side_effect=ProviderError("Groq 404 and NVIDIA timed out.", failures=[{"provider": "groq", "status": 404}])), \
+             mock.patch.dict(os.environ, {"ANALYSIS_DIRECT_MODE_ENABLED": "true"}):
+            inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item_id])
+
+        reloaded = inventory_workspace.get_item(item_id, self.seller_id)
+        self.assertEqual(reloaded["workflowStatus"], "needs_review")
+        self.assertEqual(reloaded["listing"].get("analysisStatus"), "failed")
+        self.assertTrue(bool(reloaded["listing"].get("analysisError")))
+        self.assertIn("Groq 404 and NVIDIA timed out", reloaded["listing"]["analysisError"])
+
+    def test_regression_stale_running_job_recovery(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Regression Stale", grouping_mode="1")
+        photos = [{"filename": "hat.jpg", "previewUrl": "https://example.com/hat.jpg", "storageUrl": "https://example.com/hat.jpg"}]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos)
+        items = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        item_id = items[0]["id"]
+
+        old_time = "2026-10-26T18:00:00+00:00"
+        job_id = "job-stuck-999"
+        with commerce_agent.connect() as db:
+            db.execute(
+                "INSERT INTO commerce_jobs(id, kind, status, progress, result_json, error, created_at, updated_at, seller_id) VALUES (?, 'listing_analysis', 'running', 20, '{}', '', ?, ?, ?)",
+                (job_id, old_time, old_time, self.seller_id),
+            )
+            db.execute(
+                "UPDATE inventory_items SET workflow_status = 'analysis_running', analysis_job_id = ?, updated_at = ? WHERE id = ? AND seller_id = ?",
+                (job_id, old_time, item_id, self.seller_id),
+            )
+
+        reconciled = inventory_workspace.reconcile_stale_item_analyses(self.seller_id, max_age_seconds=180)
+        self.assertEqual(reconciled, 1)
+
+        reloaded = inventory_workspace.get_item(item_id, self.seller_id)
+        self.assertEqual(reloaded["workflowStatus"], "needs_review")
+        self.assertEqual(reloaded["listing"].get("analysisStatus"), "timeout")
+        self.assertIn("timed out", reloaded["listing"].get("analysisError", "").lower())
+
+    def test_regression_no_duplicate_analysis_job(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Regression No Dups", grouping_mode="1")
+        photos = [{"filename": "ring.jpg", "previewUrl": "https://example.com/ring.jpg", "storageUrl": "https://example.com/ring.jpg"}]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos)
+        items = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        item_id = items[0]["id"]
+
+        class MockResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+            def read(self, _limit=None):
+                return b"fake-jpeg-bytes"
+
+        with mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()), \
+             mock.patch.dict(os.environ, {"ANALYSIS_DIRECT_MODE_ENABLED": "false"}):
+            res1 = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item_id])
+            job_id_1 = res1["jobIds"][0]
+
+            with commerce_agent.connect() as db:
+                jobs_count = db.execute(
+                    "SELECT COUNT(*) AS cnt FROM commerce_jobs WHERE kind = 'listing_analysis' AND seller_id = ?",
+                    (self.seller_id,),
+                ).fetchone()["cnt"]
+            self.assertEqual(jobs_count, 1)
+
+            res2 = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item_id])
+            self.assertEqual(res2["jobIds"], [job_id_1])
+
+            with commerce_agent.connect() as db:
+                jobs_count_after = db.execute(
+                    "SELECT COUNT(*) AS cnt FROM commerce_jobs WHERE kind = 'listing_analysis' AND seller_id = ?",
+                    (self.seller_id,),
+                ).fetchone()["cnt"]
+            self.assertEqual(jobs_count_after, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
