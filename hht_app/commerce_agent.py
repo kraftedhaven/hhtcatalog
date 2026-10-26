@@ -1558,6 +1558,27 @@ def run_job(job_id: str) -> dict[str, Any] | None:
                     message = str(exc.safe_message or exc)[:240]
             except Exception:
                 pass
+        # A failed Workspace job must not leave its item in the ambiguous
+        # analysis_queued/analysis_running state forever. Preserve the item
+        # and move it to Needs Review with a credential-safe retry diagnostic.
+        if kind == "listing_analysis" and isinstance(payload, dict) and payload.get("workspaceItemId"):
+            try:
+                workspace_item_id = str(payload.get("workspaceItemId"))
+                with connect() as db:
+                    item_row = db.execute(
+                        "SELECT listing_json FROM inventory_items WHERE id=? AND seller_id=?",
+                        (workspace_item_id, str(row["seller_id"] or "")),
+                    ).fetchone()
+                    if item_row:
+                        listing = json.loads(item_row["listing_json"] or "{}")
+                        listing["analysisStatus"] = "failed"
+                        listing["analysisError"] = message
+                        db.execute(
+                            "UPDATE inventory_items SET listing_json=?, workflow_status='needs_review', updated_at=? WHERE id=? AND seller_id=?",
+                            (json.dumps(listing, ensure_ascii=False), utc_now(), workspace_item_id, str(row["seller_id"] or "")),
+                        )
+            except Exception:
+                logger.exception("Workspace item failure state update failed")
         _update_job(job_id, "failed", 100, details, message)
         return active_import_job(job_id)
 
