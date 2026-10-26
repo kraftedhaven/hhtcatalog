@@ -1261,13 +1261,19 @@ def start_listing_analysis_job(
         })
     if total_bytes > 12 * 1024 * 1024:
         raise ValueError("Analysis photos exceed the 12 MB per-item limit.")
-    # Workspace uploads must not depend exclusively on the separate worker
-    # dyno. The job claim is compare-and-set, so the worker and web fallback
-    # cannot process the same job twice; whichever claims it first owns it.
+    defaults = seller_defaults if isinstance(seller_defaults, dict) else {}
+    workspace_item_id = str(defaults.get("workspaceItemId") or "").strip()
     direct_mode = os.environ.get("ANALYSIS_DIRECT_MODE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    payload = {
+        "images": prepared,
+        "sellerDefaults": defaults,
+        "cacheNamespace": seller_id,
+    }
+    if workspace_item_id:
+        payload["workspaceItemId"] = workspace_item_id
     return _start_background_job(
         "listing_analysis",
-        {"images": prepared, "sellerDefaults": seller_defaults if isinstance(seller_defaults, dict) else {}, "cacheNamespace": seller_id},
+        payload,
         run_in_web_thread=direct_mode,
         seller_id=seller_id,
     )
@@ -1526,7 +1532,11 @@ def run_job(job_id: str) -> dict[str, Any] | None:
             result = {"route": payload.get("route", {}), "groups": results, "processedPhotos": len(decoded), "readOnly": True}
         else:
             raise ValueError("Unsupported Commerce Agent job kind.")
-        workspace_item_id = str(payload.get("workspaceItemId") or "") if isinstance(payload, dict) else ""
+        workspace_item_id = str(
+            (payload.get("workspaceItemId") if isinstance(payload, dict) else "")
+            or ((payload.get("sellerDefaults") or {}).get("workspaceItemId") if isinstance(payload, dict) else "")
+            or ""
+        ).strip()
         if kind == "listing_analysis" and workspace_item_id and isinstance(result, dict):
             try:
                 from .inventory_workspace import prepopulate_item_from_analysis
@@ -1561,9 +1571,13 @@ def run_job(job_id: str) -> dict[str, Any] | None:
         # A failed Workspace job must not leave its item in the ambiguous
         # analysis_queued/analysis_running state forever. Preserve the item
         # and move it to Needs Review with a credential-safe retry diagnostic.
-        if kind == "listing_analysis" and isinstance(payload, dict) and payload.get("workspaceItemId"):
+        workspace_item_id = str(
+            (payload.get("workspaceItemId") if isinstance(payload, dict) else "")
+            or ((payload.get("sellerDefaults") or {}).get("workspaceItemId") if isinstance(payload, dict) else "")
+            or ""
+        ).strip()
+        if kind == "listing_analysis" and workspace_item_id:
             try:
-                workspace_item_id = str(payload.get("workspaceItemId"))
                 with connect() as db:
                     item_row = db.execute(
                         "SELECT listing_json FROM inventory_items WHERE id=? AND seller_id=?",
