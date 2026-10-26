@@ -1779,9 +1779,8 @@
             itemType: item.type === "Not visible" ? "" : item.type || "",
             category: item.cat || "",
         };
-        tab = "analyze";
         status =
-            "Current listing fields copied as analysis clues. Add search terms, then re-analyze.";
+            "Current listing fields copied as analysis clues for rerun.";
     }
 </script>
 
