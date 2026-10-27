@@ -153,47 +153,50 @@ def analysis_start():
         images = [_uploaded_image(file) for file in files[:5]]
         seller_id = str(g.seller_id)
         seller_defaults = _seller_defaults_from_form()
-        batch = inventory_workspace.get_or_create_compat_batch(seller_id)
-        batch_id = str(batch["id"])
+        batch_id = None
         target_item = None
+        try:
+            batch = inventory_workspace.get_or_create_compat_batch(seller_id)
+            batch_id = str(batch["id"])
+            photos_to_register = []
+            for file in files[:5]:
+                filename = file.filename or "photo.jpg"
+                file.seek(0)
+                data = file.read()
+                mime_type = file.mimetype or "image/jpeg"
+                try:
+                    asset = store_photo(
+                        seller_id=seller_id,
+                        filename=filename,
+                        mime_type=mime_type,
+                        data=data,
+                        listing_key=f"compat_{batch_id[:8]}",
+                    )
+                    hosted_url = str(asset.get("ebayUrl") or "").strip()
+                    if hosted_url:
+                        photos_to_register.append({
+                            "photoAssetId": asset.get("assetId"),
+                            "filename": filename,
+                            "previewUrl": hosted_url,
+                            "storageUrl": hosted_url,
+                        })
+                except Exception:
+                    pass
 
-        photos_to_register = []
-        for file in files[:5]:
-            filename = file.filename or "photo.jpg"
-            file.seek(0)
-            data = file.read()
-            mime_type = file.mimetype or "image/jpeg"
-            try:
-                asset = store_photo(
-                    seller_id=seller_id,
-                    filename=filename,
-                    mime_type=mime_type,
-                    data=data,
-                    listing_key=f"compat_{batch_id[:8]}",
-                )
-                hosted_url = str(asset.get("ebayUrl") or "").strip()
-                if hosted_url:
-                    photos_to_register.append({
-                        "photoAssetId": asset.get("assetId"),
-                        "filename": filename,
-                        "previewUrl": hosted_url,
-                        "storageUrl": hosted_url,
-                    })
-            except Exception:
-                pass
+            if photos_to_register:
+                registered = inventory_workspace.register_batch_photos(batch_id, seller_id, photos_to_register)
+                new_items = inventory_workspace.list_batch_items(batch_id, seller_id)
+                reg_ids = {p["id"] for p in registered}
+                matching = [it for it in new_items if any(p["id"] in reg_ids for p in (it.get("photos") or []))]
+                if matching:
+                    target_item = matching[0]
+                elif new_items:
+                    target_item = new_items[-1]
 
-        if photos_to_register:
-            registered = inventory_workspace.register_batch_photos(batch_id, seller_id, photos_to_register)
-            new_items = inventory_workspace.list_batch_items(batch_id, seller_id)
-            reg_ids = {p["id"] for p in registered}
-            matching = [it for it in new_items if any(p["id"] in reg_ids for p in (it.get("photos") or []))]
-            if matching:
-                target_item = matching[0]
-            elif new_items:
-                target_item = new_items[-1]
-
-        if target_item:
-            seller_defaults["workspaceItemId"] = target_item["id"]
+            if target_item:
+                seller_defaults["workspaceItemId"] = target_item["id"]
+        except Exception as exc:
+            logger.warning("Could not sync compatibility batch for legacy analysis: %s", exc)
 
         result = commerce_agent.start_listing_analysis_job(
             [{"data": image.data, "mimeType": image.mime_type, "filename": image.filename} for image in images],
@@ -477,17 +480,20 @@ def export_draft_csv():
     if not isinstance(items, list):
         return jsonify({"error": "Request body must include an items array."}), 400
     try:
-        cat_map = {}
-        for itm in items:
-            c = str(itm.get("cat") or itm.get("listing", {}).get("cat") or "").strip()
-            if c and c not in cat_map:
-                try:
-                    meta = category_aspects(c, timeout=2.0)
-                    if meta.get("status") == "ok":
-                        cat_map[c] = meta
-                except Exception:
-                    pass
-        csv_text = export_seller_hub_draft_csv(items, template_text=template_text, category_metadata_map=cat_map)
+        if template_text:
+            cat_map = {}
+            for itm in items:
+                c = str(itm.get("cat") or itm.get("listing", {}).get("cat") or "").strip()
+                if c and c not in cat_map:
+                    try:
+                        meta = category_aspects(c, timeout=2.0)
+                        if meta.get("status") == "ok":
+                            cat_map[c] = meta
+                    except Exception:
+                        pass
+            csv_text = export_seller_hub_draft_csv(items, template_text=template_text, category_metadata_map=cat_map)
+        else:
+            csv_text = export_ebay_draft_csv(items)
     except DraftExportValidationError as exc:
         return jsonify({"error": str(exc), "validationErrors": exc.errors}), 400
     except EbayFeedError as exc:

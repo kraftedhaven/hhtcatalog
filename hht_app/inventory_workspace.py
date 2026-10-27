@@ -89,6 +89,11 @@ def create_batch(seller_id: str, name: str = "", grouping_mode: str = "auto") ->
     now = _now_iso()
 
     with connect() as db:
+        if not db.postgres:
+            db.execute(
+                "INSERT OR IGNORE INTO sellers(id, auth_user_id, status, created_at) VALUES (?, ?, 'active', ?)",
+                (seller_id, f"auth-{seller_id}", now),
+            )
         db.execute(
             """INSERT INTO inventory_batches(id, seller_id, name, status, photo_grouping_mode, created_at, updated_at)
                VALUES(?, ?, ?, 'open', ?, ?, ?)""",
