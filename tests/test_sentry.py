@@ -36,6 +36,9 @@ class SentryPrivacyScrubberTests(unittest.TestCase):
                 self.assertEqual(kwargs["environment"], "production")
                 self.assertEqual(kwargs["release"], "v432")
                 self.assertFalse(kwargs["send_default_pii"])
+                self.assertEqual(kwargs["traces_sample_rate"], 0.10)
+                self.assertEqual(kwargs["profile_session_sample_rate"], 0.10)
+                self.assertEqual(kwargs["profile_lifecycle"], "trace")
 
     def test_sanitize_database_urls(self):
         url = "postgresql://postgres:mySuperSecret123@ep-cool-db.us-east-2.aws.neon.tech/hht_catalog?sslmode=require"

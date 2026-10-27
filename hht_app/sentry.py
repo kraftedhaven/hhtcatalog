@@ -213,7 +213,9 @@ def init_sentry(app=None) -> bool:
 
         environment = os.environ.get("SENTRY_ENVIRONMENT", "production").strip() or "production"
         release = os.environ.get("SENTRY_RELEASE", "").strip() or None
-        traces_sample_rate = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
+        traces_sample_rate = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.10"))
+        profile_session_sample_rate = float(os.environ.get("SENTRY_PROFILE_SESSION_SAMPLE_RATE", "0.10"))
+        profile_lifecycle = os.environ.get("SENTRY_PROFILE_LIFECYCLE", "trace").strip() or "trace"
 
         sentry_sdk.init(
             dsn=dsn,
@@ -224,6 +226,8 @@ def init_sentry(app=None) -> bool:
             before_send=scrub_event,
             before_breadcrumb=scrub_breadcrumb,
             traces_sample_rate=traces_sample_rate,
+            profile_session_sample_rate=profile_session_sample_rate,
+            profile_lifecycle=profile_lifecycle,
         )
         return True
     except Exception as exc:
