@@ -23,8 +23,8 @@
     import {
         formatBytes,
         prepareUploadBatch,
-        partitionUploadChunks,
     } from "$lib/image-compressor";
+    import { uploadBatchChunks } from "$lib/workspace-uploader";
 
     export let onSwitchToListingOptimization = () => {};
     export let onOpenFullReview = () => {};
@@ -950,55 +950,47 @@
         const existingItemIds = new Set(items.map((item) => item.id));
 
         try {
-            // Partition into bounded chunks matching grouping mode to ensure request body stays under limit
-            const chunks = partitionUploadChunks(
-                uploadFiles,
-                uploadGroupingMode,
-            );
-            for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
-                const chunk = chunks[cIdx];
-                uploadPhase = "compressing";
-                uploadPhaseMessage =
-                    chunks.length > 1
-                        ? `Compressing batch ${cIdx + 1} of ${chunks.length}...`
-                        : `Compressing ${chunk.length} photo(s)...`;
-
-                // Compress in browser before sending FormData
-                const prepared = await prepareUploadBatch(chunk, {
-                    onProgress: (p) => {
-                        uploadPhaseMessage = `Compressing ${p.fileName} (${p.current} of ${p.total})...`;
-                    },
-                });
-
-                // Update preview cards with exact compressed sizes
-                for (const item of prepared.items) {
-                    const prev = uploadPreviews.find(
-                        (p) => p.name === item.name,
-                    );
-                    if (prev) {
-                        prev.uploadSize = item.compressedSize;
-                        prev.formattedUploadSize = formatBytes(
-                            item.compressedSize,
-                        );
+            const uploadResult = await uploadBatchChunks({
+                batchId: selectedBatchId,
+                files: uploadFiles,
+                groupingMode: uploadGroupingMode,
+                prepareBatch: async (chunk, { chunkIndex, chunkCount, onProgress }) => {
+                    uploadPhase = "compressing";
+                    uploadPhaseMessage =
+                        chunkCount > 1
+                            ? `Compressing batch ${chunkIndex + 1} of ${chunkCount}...`
+                            : `Compressing ${chunk.length} photo(s)...`;
+                    return prepareUploadBatch(chunk, {
+                        onProgress: (p) => {
+                            onProgress?.(p);
+                            uploadPhaseMessage = `Compressing ${p.fileName} (${p.current} of ${p.total})...`;
+                        },
+                    });
+                },
+                onPrepared: async (prepared) => {
+                    for (const item of prepared.items) {
+                        const prev = uploadPreviews.find((p) => p.name === item.name);
+                        if (prev) {
+                            prev.uploadSize = item.compressedSize;
+                            prev.formattedUploadSize = formatBytes(item.compressedSize);
+                        }
                     }
-                }
-                uploadPreviews = [...uploadPreviews];
+                    uploadPreviews = [...uploadPreviews];
+                },
+                uploadChunk: async (preparedFiles, chunkIndex, chunkCount, prepared) => {
+                    uploadPhase = "uploading";
+                    uploadPhaseMessage =
+                        chunkCount > 1
+                            ? `Uploading batch ${chunkIndex + 1} of ${chunkCount} (${formatBytes(prepared.totalCompressedSize)})...`
+                            : `Uploading ${preparedFiles.length} photo(s) (${formatBytes(prepared.totalCompressedSize)})...`;
+                    await inventoryUploadBatchPhotos(selectedBatchId, preparedFiles);
+                },
+                listBatchItems: inventoryListBatchItems,
+            });
 
-                // Upload chunk
-                uploadPhase = "uploading";
-                uploadPhaseMessage =
-                    chunks.length > 1
-                        ? `Uploading batch ${cIdx + 1} of ${chunks.length} (${formatBytes(prepared.totalCompressedSize)})...`
-                        : `Uploading ${chunk.length} photo(s) (${formatBytes(prepared.totalCompressedSize)})...`;
-
-                await inventoryUploadBatchPhotos(
-                    selectedBatchId,
-                    prepared.files,
-                );
-            }
-
-            // Refresh items (backend handles initial grouping or safely appends new item groups without touching existing items)
-            items = await inventoryListBatchItems(selectedBatchId);
+            // The utility refreshes even after a failed chunk; on success these
+            // are the grouped items created by the complete upload.
+            items = uploadResult.items;
             const newItemIds = items
                 .filter((item) => !existingItemIds.has(item.id))
                 .map((item) => item.id);
@@ -1011,7 +1003,23 @@
                 ? `Uploaded and grouped ${uploadFiles.length} photo(s). AI title and price analysis is now running.`
                 : `Successfully uploaded ${uploadFiles.length} photo(s) (under 10MB limit) and updated item groups.`;
         } catch (err) {
-            uploadError = err.message || "Failed to upload and group photos.";
+            // Recover already-created items so a later chunk failure never
+            // makes earlier successful uploads appear lost.
+            try {
+                items = await inventoryListBatchItems(selectedBatchId);
+            } catch {
+                // Preserve the original upload error if the recovery refresh
+                // itself is unavailable.
+            }
+            const recovery = err.uploadRecovery;
+            if (recovery?.remainingFiles?.length) {
+                const remaining = new Set(recovery.remainingFiles);
+                uploadFiles = recovery.remainingFiles;
+                uploadPreviews = uploadPreviews.filter((preview) => remaining.has(preview.file));
+            }
+            uploadError = recovery
+                ? `${err.message || "Upload interrupted."} ${recovery.completedChunkIndexes.length} of ${recovery.totalChunks} photo batches were saved. The saved items remain visible; retry the remaining photos.`
+                : err.message || "Failed to upload and group photos.";
         } finally {
             isUploading = false;
             uploadPhase = "idle";
