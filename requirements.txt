@@ -7,3 +7,4 @@ pillow-heif
 psycopg[binary]
 PyJWT[crypto]>=2.10,<3
 boto3
+sentry-sdk[flask]

@@ -19,6 +19,7 @@ from hht_app.schema import HEADERS, export_ebay_csv, export_ebay_draft_csv, norm
 from hht_app.seller_hub_draft_template import DraftExportValidationError, export_seller_hub_draft_csv
 from hht_app.photo_quality import assess_image
 from hht_app.photo_storage import PhotoStorageError, storage_status, store_photo
+from hht_app.sentry import init_sentry
 from hht_app.supabase_auth import authenticate_request
 
 
@@ -38,6 +39,7 @@ mimetypes.add_type("image/heic", ".heic")
 mimetypes.add_type("image/heif", ".heif")
 
 app = Flask(__name__, static_folder="frontend/dist", static_url_path="")
+init_sentry(app)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 CORS(
     app,
@@ -109,6 +111,7 @@ def health():
         "csv_columns": len(HEADERS),
         "seller_hub_feed_type": seller_hub_feed_type(),
         "photo_storage": storage_status(),
+        "sentry_configured": bool(os.environ.get("SENTRY_DSN")),
     })
 
 
