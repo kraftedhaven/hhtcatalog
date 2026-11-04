@@ -586,6 +586,7 @@ class InventoryWorkspaceTests(unittest.TestCase):
              mock.patch("hht_app.providers.audit_listing_with_nvidia", return_value={"providerSeconds": 0.05}), \
              mock.patch.dict(os.environ, {"ANALYSIS_DIRECT_MODE_ENABLED": "true"}):
             res = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item_id])
+            inventory_workspace.wait_for_workspace_jobs(res["jobIds"])
 
         self.assertEqual(res["queuedCount"], 1)
         reloaded = inventory_workspace.get_item(item_id, self.seller_id)
@@ -615,7 +616,8 @@ class InventoryWorkspaceTests(unittest.TestCase):
         with mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()), \
              mock.patch("hht_app.providers.analyze_images", side_effect=ProviderError("Groq 404 and NVIDIA timed out.", failures=[{"provider": "groq", "status": 404}])), \
              mock.patch.dict(os.environ, {"ANALYSIS_DIRECT_MODE_ENABLED": "true"}):
-            inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item_id])
+            res = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item_id])
+            inventory_workspace.wait_for_workspace_jobs(res["jobIds"])
 
         reloaded = inventory_workspace.get_item(item_id, self.seller_id)
         self.assertEqual(reloaded["workflowStatus"], "needs_review")
@@ -686,6 +688,152 @@ class InventoryWorkspaceTests(unittest.TestCase):
                     (self.seller_id, f'%"{item_id}"%'),
                 ).fetchone()["cnt"]
             self.assertEqual(jobs_count_after, 1)
+
+    def test_hotspot_2_workspace_analysis_async_timeout_mitigation(self):
+        """Regression test for CodeScene Hotspot 2:
+
+        1. A multi-photo, multi-item analysis request returns in under 1 second.
+        2. The response contains persisted job IDs.
+        3. Each item has exactly one listing_analysis job.
+        4. Items transition asynchronously through analysis_queued/analysis_running to needs_review.
+        5. Provider failure becomes needs_review instead of Analyzing.
+        6. Duplicate triggers do not create duplicate jobs.
+        7. Existing seller edits remain preserved.
+        8. The Flask batch analyze endpoint returns HTTP 202.
+        """
+        import time
+        from hht_app.providers import ProviderError
+
+        batch = inventory_workspace.create_batch(self.seller_id, name="Hotspot 2 Test", grouping_mode="2")
+        # 4 photos total -> 2 items (2 photos each)
+        photos = [
+            {"filename": f"p{i}.jpg", "previewUrl": f"https://example.com/p{i}.jpg", "storageUrl": f"https://example.com/p{i}.jpg"}
+            for i in range(4)
+        ]
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, photos)
+        items = inventory_workspace.list_batch_items(batch["id"], self.seller_id)
+        self.assertEqual(len(items), 2)
+        item1_id = items[0]["id"]
+        item2_id = items[1]["id"]
+
+        # Preserve a confirmed seller edit on item 1
+        inventory_workspace.patch_item(item1_id, self.seller_id, {
+            "brand": "Custom Preserved Brand",
+            "confirmField": "brand",
+        })
+
+        class MockResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+            def read(self, _limit=None):
+                return b"test-jpeg-data"
+
+        def slow_analyze_images(images, context=None):
+            # Simulate real LLM/vision inference taking 0.15s
+            time.sleep(0.15)
+            return {
+                "title": "Analyzed Vintage Jacket",
+                "price": "45.00",
+                "cat": "57988",
+                "cid": "57988",
+                "brand": "Model Brand",
+                "size": "L",
+                "cnote": "Good pre-owned condition",
+            }
+
+        with mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()), \
+             mock.patch("hht_app.providers.analyze_images", side_effect=slow_analyze_images), \
+             mock.patch("hht_app.providers.audit_listing_with_nvidia", return_value={"providerSeconds": 0.02}), \
+             mock.patch.dict(os.environ, {"ANALYSIS_DIRECT_MODE_ENABLED": "true"}):
+
+            # 1. Measure API latency: must return in under 1 second despite slow_analyze_images taking 0.15s per item
+            start_t = time.perf_counter()
+            res = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item1_id, item2_id])
+            elapsed = time.perf_counter() - start_t
+
+            self.assertLess(elapsed, 1.0, f"Analysis request took {elapsed:.3f}s, exceeding 1 second limit")
+            self.assertEqual(res["queuedCount"], 2)
+            self.assertEqual(len(res["jobIds"]), 2)
+
+            # 2. Persisted job IDs exist in commerce_jobs
+            with commerce_agent.connect() as db:
+                for jid in res["jobIds"]:
+                    job_row = db.execute("SELECT * FROM commerce_jobs WHERE id = ?", (jid,)).fetchone()
+                    self.assertIsNotNone(job_row)
+                    self.assertEqual(job_row["kind"], "listing_analysis")
+                    self.assertEqual(str(job_row["seller_id"]), self.seller_id)
+
+                # 3. Each item has exactly one listing_analysis job
+                for item_id in (item1_id, item2_id):
+                    job_count = db.execute(
+                        "SELECT COUNT(*) AS cnt FROM commerce_jobs WHERE kind = 'listing_analysis' AND seller_id = ? AND result_json LIKE ?",
+                        (self.seller_id, f'%"{item_id}"%'),
+                    ).fetchone()["cnt"]
+                    self.assertEqual(job_count, 1)
+
+            # 4. Immediate state: items are in analysis_queued or analysis_running (not stuck)
+            immediate_item1 = inventory_workspace.get_item(item1_id, self.seller_id)
+            self.assertIn(immediate_item1["workflowStatus"], ("analysis_queued", "analysis_running"))
+
+            # 5. Wait for asynchronous background completion
+            inventory_workspace.wait_for_workspace_jobs(res["jobIds"], timeout=5.0)
+
+            # Verify transition to needs_review
+            item1_done = inventory_workspace.get_item(item1_id, self.seller_id)
+            item2_done = inventory_workspace.get_item(item2_id, self.seller_id)
+            self.assertEqual(item1_done["workflowStatus"], "needs_review")
+            self.assertEqual(item2_done["workflowStatus"], "needs_review")
+
+            # 6. Preserved seller edit
+            self.assertEqual(item1_done["listing"]["brand"], "Custom Preserved Brand")
+
+            # Titles and price tiers populated
+            self.assertGreaterEqual(len(item2_done["titleCandidates"]), 2)
+            self.assertIn("balanced", item2_done["pricingOptions"])
+
+            # 7. Duplicate triggers do not create duplicate jobs
+            res_dup = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item1_id, item2_id])
+            with commerce_agent.connect() as db:
+                for item_id in (item1_id, item2_id):
+                    job_count = db.execute(
+                        "SELECT COUNT(*) AS cnt FROM commerce_jobs WHERE kind = 'listing_analysis' AND seller_id = ? AND result_json LIKE ?",
+                        (self.seller_id, f'%"{item_id}"%'),
+                    ).fetchone()["cnt"]
+                    self.assertEqual(job_count, 1)
+
+        # 8. Provider failure becomes needs_review instead of stuck in Analyzing
+        batch_fail = inventory_workspace.create_batch(self.seller_id, name="Fail Batch", grouping_mode="1")
+        inventory_workspace.register_batch_photos(batch_fail["id"], self.seller_id, [
+            {"filename": "fail.jpg", "previewUrl": "https://example.com/fail.jpg", "storageUrl": "https://example.com/fail.jpg"}
+        ])
+        fail_item = inventory_workspace.list_batch_items(batch_fail["id"], self.seller_id)[0]
+
+        with mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()), \
+             mock.patch("hht_app.providers.analyze_images", side_effect=ProviderError("Provider unavailable 503", failures=[{"provider": "groq", "status": 503}])), \
+             mock.patch.dict(os.environ, {"ANALYSIS_DIRECT_MODE_ENABLED": "true"}):
+
+            res_fail = inventory_workspace.start_workspace_analysis(batch_fail["id"], self.seller_id, [fail_item["id"]])
+            inventory_workspace.wait_for_workspace_jobs(res_fail["jobIds"], timeout=5.0)
+
+            fail_reloaded = inventory_workspace.get_item(fail_item["id"], self.seller_id)
+            self.assertEqual(fail_reloaded["workflowStatus"], "needs_review")
+            self.assertEqual(fail_reloaded["listing"].get("analysisStatus"), "failed")
+            self.assertIn("503", fail_reloaded["listing"].get("analysisError", ""))
+
+        # 9. Verify Flask endpoint returns HTTP 202
+        with self.app.test_client() as client:
+            with mock.patch("hht_app.supabase_auth.authenticate_request", return_value=None), \
+                 mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()):
+                http_res = client.post(
+                    f"/api/inventory/batches/{batch['id']}/analyze",
+                    json={"itemIds": [item1_id]},
+                )
+                self.assertEqual(http_res.status_code, 202)
+                body = http_res.get_json()
+                self.assertIn("result", body)
+                self.assertIn("jobIds", body["result"])
 
 
 if __name__ == "__main__":

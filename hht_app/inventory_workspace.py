@@ -16,6 +16,7 @@ import os
 import re
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -53,6 +54,33 @@ WORKFLOW_STATES = (
 )
 
 REQUIRED_FIELDS = ("title", "price", "cat", "size")
+
+INLINE_ANALYSIS_WORKERS = min(4, max(1, int(os.environ.get("ANALYSIS_INLINE_WORKERS", "2"))))
+_WORKSPACE_ANALYSIS_EXECUTOR = ThreadPoolExecutor(
+    max_workers=INLINE_ANALYSIS_WORKERS,
+    thread_name_prefix="workspace-analysis",
+)
+_ACTIVE_ANALYSIS_FUTURES: dict[str, Any] = {}
+
+
+def _submit_workspace_job(job_id: str) -> Any:
+    """Submit a listing_analysis job to the workspace background executor."""
+    from .commerce_agent import run_job
+    future = _WORKSPACE_ANALYSIS_EXECUTOR.submit(run_job, job_id)
+    _ACTIVE_ANALYSIS_FUTURES[job_id] = future
+    return future
+
+
+def wait_for_workspace_jobs(job_ids: list[str] | None = None, timeout: float = 5.0) -> None:
+    """Wait for active workspace analysis background jobs to finish (used for test synchronization)."""
+    target_ids = job_ids if job_ids is not None else list(_ACTIVE_ANALYSIS_FUTURES.keys())
+    for jid in target_ids:
+        fut = _ACTIVE_ANALYSIS_FUTURES.get(jid)
+        if fut and not fut.done():
+            try:
+                fut.result(timeout=timeout)
+            except Exception:
+                pass
 
 
 def _now_iso() -> str:
@@ -1378,25 +1406,42 @@ def start_workspace_analysis(
                     job_ids.append(str(existing_job["id"]))
                     continue
 
-        images: list[dict[str, Any]] = []
-        for photo in (item.get("photos") or [])[:5]:
-            url = str(photo.get("storageUrl") or photo.get("previewUrl") or "").strip()
-            if not url.lower().startswith("https://"):
-                continue
+        photos = [
+            p for p in (item.get("photos") or [])[:5]
+            if str(p.get("storageUrl") or p.get("previewUrl") or "").strip().lower().startswith("https://")
+        ]
+
+        def _fetch_photo(p: dict[str, Any]) -> dict[str, Any] | None:
+            url = str(p.get("storageUrl") or p.get("previewUrl") or "").strip()
             try:
                 request = urllib.request.Request(url, headers={"User-Agent": "HHT-Commerce-Agent/1.0"})
-                with urllib.request.urlopen(request, timeout=20) as response:
+                with urllib.request.urlopen(request, timeout=10) as response:
                     data = response.read(12 * 1024 * 1024 + 1)
                 if len(data) > 12 * 1024 * 1024:
                     raise ValueError("Photo exceeds the analysis size limit.")
                 if data:
-                    images.append({
+                    return {
                         "data": data,
                         "mimeType": "image/jpeg",
-                        "filename": str(photo.get("originalFilename") or "photo.jpg"),
-                    })
+                        "filename": str(p.get("originalFilename") or "photo.jpg"),
+                    }
             except Exception as exc:
                 logger.warning("Workspace photo download failed for item %s: %s", item["id"], type(exc).__name__)
+                return None
+            return None
+
+        images: list[dict[str, Any]] = []
+        if len(photos) > 1:
+            with ThreadPoolExecutor(max_workers=min(5, len(photos))) as pool:
+                for img in pool.map(_fetch_photo, photos):
+                    if img:
+                        images.append(img)
+        else:
+            for p in photos:
+                img = _fetch_photo(p)
+                if img:
+                    images.append(img)
+
         if not images:
             raise ValueError(f"No usable hosted photos are available for item {item['id'][:8]}.")
 
@@ -1430,8 +1475,7 @@ def start_workspace_analysis(
                 (job["jobId"], _now_iso(), item["id"], seller_id),
             )
         if os.environ.get("ANALYSIS_DIRECT_MODE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
-            from .commerce_agent import run_job
-            run_job(str(job["jobId"]))
+            _submit_workspace_job(str(job["jobId"]))
 
     return {"queuedCount": len(job_ids), "jobIds": job_ids, "batchId": batch_id}
 

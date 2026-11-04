@@ -1372,6 +1372,16 @@ def run_job(job_id: str) -> dict[str, Any] | None:
             return dict(db.execute("SELECT * FROM commerce_jobs WHERE id=?", (job_id,)).fetchone())
         kind = str(row["kind"])
         payload = _decode(row["result_json"], {})
+        workspace_item_id = str(
+            (payload.get("workspaceItemId") if isinstance(payload, dict) else "")
+            or ((payload.get("sellerDefaults") or {}).get("workspaceItemId") if isinstance(payload, dict) else "")
+            or ""
+        ).strip()
+        if kind == "listing_analysis" and workspace_item_id and row["seller_id"]:
+            db.execute(
+                "UPDATE inventory_items SET workflow_status='analysis_running', updated_at=? WHERE id=? AND seller_id=? AND workflow_status='analysis_queued'",
+                (utc_now(), workspace_item_id, str(row["seller_id"])),
+            )
     try:
         if kind == "active_import":
             result = import_active_listings(str(payload.get("sellerId") or "") or None)

@@ -1175,7 +1175,7 @@ def inventory_batch_analyze(batch_id):
     item_ids = body.get("itemIds")
     try:
         result = inventory_workspace.start_workspace_analysis(batch_id, str(seller_id), item_ids)
-        return jsonify({"result": result})
+        return jsonify({"result": result}), 202
     except (KeyError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
 

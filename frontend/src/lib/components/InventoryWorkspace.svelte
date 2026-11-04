@@ -80,37 +80,60 @@
     // Reactive Batch Lifecycle Counts
     $: totalItemCount = items.length;
     $: analyzingCount = items.filter(
-        (it) => it.workflowStatus === "analysis_queued" || it.workflowStatus === "analysis_running"
+        (it) =>
+            it.workflowStatus === "analysis_queued" ||
+            it.workflowStatus === "analysis_running",
     ).length;
-    $: readyCount = items.filter((it) => it.workflowStatus === "ready_for_approval").length;
-    $: needsReviewCount = items.filter((it) => it.workflowStatus === "needs_review").length;
-    $: approvedCount = items.filter((it) => it.workflowStatus === "approved").length;
+    $: readyCount = items.filter(
+        (it) => it.workflowStatus === "ready_for_approval",
+    ).length;
+    $: needsReviewCount = items.filter(
+        (it) => it.workflowStatus === "needs_review",
+    ).length;
+    $: approvedCount = items.filter(
+        (it) => it.workflowStatus === "approved",
+    ).length;
     $: submittedCount = items.filter(
-        (it) => it.workflowStatus === "draft_submitted" || it.workflowStatus === "draft_result_available"
+        (it) =>
+            it.workflowStatus === "draft_submitted" ||
+            it.workflowStatus === "draft_result_available",
     ).length;
 
     // State-Dependent Action Analysis
-    $: relevantItems = selectedItemIds.size > 0
-        ? items.filter((it) => selectedItemIds.has(it.id))
-        : items;
+    $: relevantItems =
+        selectedItemIds.size > 0
+            ? items.filter((it) => selectedItemIds.has(it.id))
+            : items;
     $: hasAnalyzing = relevantItems.some(
-        (it) => it.workflowStatus === "analysis_queued" || it.workflowStatus === "analysis_running"
+        (it) =>
+            it.workflowStatus === "analysis_queued" ||
+            it.workflowStatus === "analysis_running",
     );
     $: hasGrouped = relevantItems.some(
-        (it) => it.workflowStatus === "grouped" || it.workflowStatus === "photo_staged"
+        (it) =>
+            it.workflowStatus === "grouped" ||
+            it.workflowStatus === "photo_staged",
     );
     $: hasMissingRequired = relevantItems.some((it) => {
         const l = it.listing || {};
         return !l.title || !l.price || !l.cat;
     });
-    $: hasNeedsReview = relevantItems.some((it) => it.workflowStatus === "needs_review");
+    $: hasNeedsReview = relevantItems.some(
+        (it) => it.workflowStatus === "needs_review",
+    );
     $: hasValidated = relevantItems.some(
-        (it) => it.rulesCheck?.valid && it.workflowStatus !== "approved"
+        (it) => it.rulesCheck?.valid && it.workflowStatus !== "approved",
     );
-    $: allApproved = relevantItems.length > 0 && relevantItems.every((it) => it.workflowStatus === "approved");
-    $: allSubmitted = relevantItems.length > 0 && relevantItems.every(
-        (it) => it.workflowStatus === "draft_submitted" || it.workflowStatus === "draft_result_available"
-    );
+    $: allApproved =
+        relevantItems.length > 0 &&
+        relevantItems.every((it) => it.workflowStatus === "approved");
+    $: allSubmitted =
+        relevantItems.length > 0 &&
+        relevantItems.every(
+            (it) =>
+                it.workflowStatus === "draft_submitted" ||
+                it.workflowStatus === "draft_result_available",
+        );
 
     // Filters and sorting
     let searchQuery = "";
@@ -235,14 +258,17 @@
     async function deleteSelectedBatch() {
         if (!selectedBatchId || !selectedBatch) return;
         const hasSubmitted = items.some(
-            (it) => it.workflowStatus === "draft_submitted" || it.workflowStatus === "draft_result_available"
+            (it) =>
+                it.workflowStatus === "draft_submitted" ||
+                it.workflowStatus === "draft_result_available",
         );
         if (hasSubmitted) {
-            globalError = "Cannot delete batch: draft items have already been submitted to eBay.";
+            globalError =
+                "Cannot delete batch: draft items have already been submitted to eBay.";
             return;
         }
         const confirmed = window.confirm(
-            `Delete batch "${selectedBatch.name}" and its grouped photos? This cannot be undone.`
+            `Delete batch "${selectedBatch.name}" and its grouped photos? This cannot be undone.`,
         );
         if (!confirmed) return;
         batchLoading = true;
@@ -256,11 +282,15 @@
             if (batches.length) {
                 await selectBatch(batches[0].id);
             } else {
-                const newBatch = await inventoryCreateBatch("First Inventory Batch", "3");
+                const newBatch = await inventoryCreateBatch(
+                    "First Inventory Batch",
+                    "3",
+                );
                 batches = [newBatch];
                 await selectBatch(newBatch.id);
             }
-            globalStatus = "Batch deleted. You can start over with a clean batch.";
+            globalStatus =
+                "Batch deleted. You can start over with a clean batch.";
         } catch (err) {
             globalError = err.message || "Unable to delete this batch.";
         } finally {
@@ -276,16 +306,24 @@
             lastLoadedAspectCategoryId = "";
             return;
         }
-        if (catId === lastLoadedAspectCategoryId && categoryAspects.length > 0) {
+        if (
+            catId === lastLoadedAspectCategoryId &&
+            categoryAspects.length > 0
+        ) {
             return;
         }
         categoryAspectsLoading = true;
         categoryAspectsError = "";
         try {
             const res = await ebayCategoryAspects(catId);
-            if (res.status === "unavailable" || res.status === "not_configured") {
+            if (
+                res.status === "unavailable" ||
+                res.status === "not_configured"
+            ) {
                 categoryAspects = [];
-                categoryAspectsError = res.message || "eBay category options temporarily unavailable.";
+                categoryAspectsError =
+                    res.message ||
+                    "eBay category options temporarily unavailable.";
             } else {
                 categoryAspects = res.fields || [];
                 lastLoadedAspectCategoryId = catId;
@@ -294,7 +332,8 @@
                 }
             }
         } catch (err) {
-            categoryAspectsError = "eBay category options temporarily unavailable.";
+            categoryAspectsError =
+                "eBay category options temporarily unavailable.";
         } finally {
             categoryAspectsLoading = false;
         }
@@ -322,7 +361,11 @@
 
     async function selectCategorySuggestion(item, suggestion) {
         handleInlineEdit(item, "cat", suggestion.categoryId);
-        handleInlineEdit(item, "categoryName", suggestion.path || suggestion.categoryName);
+        handleInlineEdit(
+            item,
+            "categoryName",
+            suggestion.path || suggestion.categoryName,
+        );
         categorySuggestions = [];
         categoryQuery = "";
         await loadCategoryAspects(suggestion.categoryId);
@@ -370,7 +413,11 @@
         };
         const canonicalKey = aliases[aspectName.toLowerCase()];
         if (canonicalKey) {
-            handleInlineEdit(item, canonicalKey, Array.isArray(value) ? value.join(" | ") : value);
+            handleInlineEdit(
+                item,
+                canonicalKey,
+                Array.isArray(value) ? value.join(" | ") : value,
+            );
         }
         handleInlineEdit(item, "confirmField", aspectName);
     }
@@ -379,7 +426,10 @@
         const current = getAspectValue(item, aspectName);
         let list = Array.isArray(current)
             ? [...current]
-            : String(current || "").split("|").map((s) => s.trim()).filter(Boolean);
+            : String(current || "")
+                  .split("|")
+                  .map((s) => s.trim())
+                  .filter(Boolean);
         if (list.includes(val)) {
             list = list.filter((v) => v !== val);
         } else {
@@ -398,35 +448,66 @@
         const normalized = value === "1000" ? "1000" : "3000";
         handleInlineEdit(item, "cid", normalized);
         handleInlineEdit(item, "cid_condition", normalized);
-        handleInlineEdit(item, "condition", normalized === "1000" ? "New" : "Pre-owned");
+        handleInlineEdit(
+            item,
+            "condition",
+            normalized === "1000" ? "New" : "Pre-owned",
+        );
         handleInlineEdit(item, "confirmField", "condition");
     }
 
     function getAspectProvenance(item, aspect) {
         const val = getAspectValue(item, aspect.name);
-        const prov = item.provenance?.[aspect.name] || item.provenance?.[aspect.name.toLowerCase()] || {};
+        const prov =
+            item.provenance?.[aspect.name] ||
+            item.provenance?.[aspect.name.toLowerCase()] ||
+            {};
         if (prov.sellerConfirmed || item.sellerConfirmed) {
-            return { label: "Seller confirmed", color: "bg-emerald-100 text-emerald-800 border-emerald-300" };
+            return {
+                label: "Seller confirmed",
+                color: "bg-emerald-100 text-emerald-800 border-emerald-300",
+            };
         }
         if (!val || String(val).trim() === "") {
             if (aspect.required) {
-                return { label: "Required — missing", color: "bg-rose-100 text-rose-800 border-rose-300 font-bold" };
+                return {
+                    label: "Required — missing",
+                    color: "bg-rose-100 text-rose-800 border-rose-300 font-bold",
+                };
             }
             if (aspect.recommended) {
-                return { label: "Recommended", color: "bg-slate-100 text-slate-600 border-slate-300" };
+                return {
+                    label: "Recommended",
+                    color: "bg-slate-100 text-slate-600 border-slate-300",
+                };
             }
-            return { label: "Optional", color: "bg-gray-100 text-gray-500 border-gray-200" };
+            return {
+                label: "Optional",
+                color: "bg-gray-100 text-gray-500 border-gray-200",
+            };
         }
         if (prov.source === "photo") {
-            return { label: "Auto-filled from photo", color: "bg-blue-100 text-blue-800 border-blue-300" };
+            return {
+                label: "Auto-filled from photo",
+                color: "bg-blue-100 text-blue-800 border-blue-300",
+            };
         }
         if (prov.source === "clue") {
-            return { label: "Auto-filled from seller clue", color: "bg-purple-100 text-purple-800 border-purple-300" };
+            return {
+                label: "Auto-filled from seller clue",
+                color: "bg-purple-100 text-purple-800 border-purple-300",
+            };
         }
         if (prov.source === "default") {
-            return { label: "Seller default", color: "bg-slate-100 text-slate-700 border-slate-300" };
+            return {
+                label: "Seller default",
+                color: "bg-slate-100 text-slate-700 border-slate-300",
+            };
         }
-        return { label: "Auto-filled from photo", color: "bg-blue-100 text-blue-800 border-blue-300" };
+        return {
+            label: "Auto-filled from photo",
+            color: "bg-blue-100 text-blue-800 border-blue-300",
+        };
     }
 
     function getItemReadiness(item) {
@@ -438,14 +519,31 @@
         if (!l.price || Number(l.price) <= 0) missing.push("Price");
         if (!l.cat) missing.push("Category");
         if (item.rulesCheck?.missingRequiredAspects?.length) {
-            missing.push(...item.rulesCheck.missingRequiredAspects.map((a) => `Aspect: ${a}`));
+            missing.push(
+                ...item.rulesCheck.missingRequiredAspects.map(
+                    (a) => `Aspect: ${a}`,
+                ),
+            );
         }
         const totalChecks = 4 + (item.rulesCheck?.requiredAspects?.length || 0);
         const passedChecks = Math.max(0, totalChecks - missing.length);
-        const percent = Math.max(15, Math.min(100, Math.round((passedChecks / Math.max(1, totalChecks)) * 100)));
+        const percent = Math.max(
+            15,
+            Math.min(
+                100,
+                Math.round((passedChecks / Math.max(1, totalChecks)) * 100),
+            ),
+        );
         const isApproved = item.workflowStatus === "approved";
-        const isSubmitted = item.workflowStatus === "draft_submitted" || item.workflowStatus === "draft_result_available";
-        const isReady = isApproved || isSubmitted || (missing.length === 0 && (item.workflowStatus === "ready_for_approval" || item.rulesCheck?.valid));
+        const isSubmitted =
+            item.workflowStatus === "draft_submitted" ||
+            item.workflowStatus === "draft_result_available";
+        const isReady =
+            isApproved ||
+            isSubmitted ||
+            (missing.length === 0 &&
+                (item.workflowStatus === "ready_for_approval" ||
+                    item.rulesCheck?.valid));
         return {
             ready: isReady,
             percent: isReady ? 100 : percent,
@@ -477,32 +575,42 @@
     }
 
     async function handleDownloadDraftCsv() {
-        const approvedItems = items.filter((it) => it.workflowStatus === "approved");
+        const approvedItems = items.filter(
+            (it) => it.workflowStatus === "approved",
+        );
         if (approvedItems.length === 0) {
-            globalError = "No approved items to export. Validate and approve items first.";
+            globalError =
+                "No approved items to export. Validate and approve items first.";
             return;
         }
         exportCsvLoading = true;
         globalError = "";
         try {
-            const itemIds = selectedItemIds.size > 0
-                ? Array.from(selectedItemIds).filter((id) => {
-                    const it = items.find((i) => i.id === id);
-                    return it && it.workflowStatus === "approved";
-                })
-                : approvedItems.map((it) => it.id);
+            const itemIds =
+                selectedItemIds.size > 0
+                    ? Array.from(selectedItemIds).filter((id) => {
+                          const it = items.find((i) => i.id === id);
+                          return it && it.workflowStatus === "approved";
+                      })
+                    : approvedItems.map((it) => it.id);
             if (itemIds.length === 0) {
-                globalError = "None of the selected items are approved. Approve items before CSV export.";
+                globalError =
+                    "None of the selected items are approved. Approve items before CSV export.";
                 return;
             }
-            await inventoryExportBatchDraftCSV(selectedBatchId, itemIds, sellerTemplateCsv || null);
+            await inventoryExportBatchDraftCSV(
+                selectedBatchId,
+                itemIds,
+                sellerTemplateCsv || null,
+            );
             globalStatus = `Exported official eBay Seller Hub Create Drafts CSV with ${itemIds.length} approved item(s). Upload via eBay Seller Hub → Reports → Upload.`;
         } catch (err) {
             if (err.validationErrors?.length) {
                 const first = err.validationErrors[0];
                 globalError = `CSV Validation Failed: Row ${first.row} (${first.sku || first.title || "Item"}): ${first.field} — ${first.message}`;
             } else {
-                globalError = err.message || "Failed to export Seller Hub Draft CSV.";
+                globalError =
+                    err.message || "Failed to export Seller Hub Draft CSV.";
             }
         } finally {
             exportCsvLoading = false;
@@ -523,9 +631,10 @@
     }
 
     async function analyzeSelectedOrBatch() {
-        const ids = selectedItemIds.size > 0
-            ? Array.from(selectedItemIds)
-            : items.map((it) => it.id);
+        const ids =
+            selectedItemIds.size > 0
+                ? Array.from(selectedItemIds)
+                : items.map((it) => it.id);
         if (!ids.length) return;
         actionLoading = true;
         globalError = "";
@@ -542,10 +651,16 @@
 
     async function reprocessBatch() {
         const unconfirmedIds = items
-            .filter((it) => !it.sellerConfirmed && it.workflowStatus !== "draft_submitted" && it.workflowStatus !== "draft_result_available")
+            .filter(
+                (it) =>
+                    !it.sellerConfirmed &&
+                    it.workflowStatus !== "draft_submitted" &&
+                    it.workflowStatus !== "draft_result_available",
+            )
             .map((it) => it.id);
         if (!unconfirmedIds.length) {
-            globalStatus = "All items in this batch are already seller-confirmed or submitted.";
+            globalStatus =
+                "All items in this batch are already seller-confirmed or submitted.";
             return;
         }
         actionLoading = true;
@@ -564,7 +679,12 @@
     function fixHighlightedFields() {
         const target = items.find((it) => {
             const l = it.listing || {};
-            return !l.title || !l.price || !l.cat || it.workflowStatus === "needs_review";
+            return (
+                !l.title ||
+                !l.price ||
+                !l.cat ||
+                it.workflowStatus === "needs_review"
+            );
         });
         if (target) {
             openItemInspector(target);
@@ -573,7 +693,10 @@
     }
 
     function reviewSelectedOrFirst() {
-        const target = (selectedItemIds.size > 0 ? items.find((it) => selectedItemIds.has(it.id)) : null) ||
+        const target =
+            (selectedItemIds.size > 0
+                ? items.find((it) => selectedItemIds.has(it.id))
+                : null) ||
             items.find((it) => it.workflowStatus === "needs_review") ||
             items[0];
         if (target) {
@@ -721,7 +844,8 @@
     function openItemInspector(item) {
         inspectingItemId = item.id;
         inspectingItem = item;
-        categoryQuery = item.listing?.categoryQuery || item.listing?.categoryName || "";
+        categoryQuery =
+            item.listing?.categoryQuery || item.listing?.categoryName || "";
         researchClues = {
             ...researchClues,
             ...(item.listing?.researchClues || {}),
@@ -761,12 +885,16 @@
         actionLoading = true;
         globalError = "";
         try {
-            const result = await inventoryAnalyzeBatch(selectedBatchId, [itemId]);
+            const result = await inventoryAnalyzeBatch(selectedBatchId, [
+                itemId,
+            ]);
             items = await inventoryListBatchItems(selectedBatchId);
             if (inspectingItemId === itemId) {
-                inspectingItem = items.find((item) => item.id === itemId) || inspectingItem;
+                inspectingItem =
+                    items.find((item) => item.id === itemId) || inspectingItem;
             }
-            globalStatus = "Photo analysis queued. HHT will populate the title and estimated price when it finishes.";
+            globalStatus =
+                "Photo analysis queued. HHT will populate the title and estimated price when it finishes.";
             return result;
         } catch (err) {
             globalError = err.message || "Could not queue photo analysis.";
@@ -805,11 +933,15 @@
 
     async function approveSelected() {
         const readyItems = items.filter(
-            (it) => it.rulesCheck?.valid || it.workflowStatus === "ready_for_approval" || it.workflowStatus === "needs_review"
+            (it) =>
+                it.rulesCheck?.valid ||
+                it.workflowStatus === "ready_for_approval" ||
+                it.workflowStatus === "needs_review",
         );
-        const ids = selectedItemIds.size > 0
-            ? Array.from(selectedItemIds)
-            : readyItems.map((it) => it.id);
+        const ids =
+            selectedItemIds.size > 0
+                ? Array.from(selectedItemIds)
+                : readyItems.map((it) => it.id);
         if (!ids.length) {
             globalError = "No items ready to approve. Validate items first.";
             return;
@@ -838,16 +970,20 @@
     }
 
     async function submitSelectedDrafts() {
-        const approvedBatchItems = items.filter((it) => it.workflowStatus === "approved");
-        const ids = selectedItemIds.size > 0
-            ? Array.from(selectedItemIds).filter((id) => {
-                const it = items.find((i) => i.id === id);
-                return it && it.workflowStatus === "approved";
-            })
-            : approvedBatchItems.map((it) => it.id);
+        const approvedBatchItems = items.filter(
+            (it) => it.workflowStatus === "approved",
+        );
+        const ids =
+            selectedItemIds.size > 0
+                ? Array.from(selectedItemIds).filter((id) => {
+                      const it = items.find((i) => i.id === id);
+                      return it && it.workflowStatus === "approved";
+                  })
+                : approvedBatchItems.map((it) => it.id);
 
         if (!ids.length) {
-            globalError = "No approved items to submit. Validate and approve items before creating eBay drafts.";
+            globalError =
+                "No approved items to submit. Validate and approve items before creating eBay drafts.";
             return;
         }
 
@@ -871,7 +1007,7 @@
                 inspectingItem =
                     items.find((it) => it.id === inspectingItemId) || null;
             }
-            globalStatus = `Submitted ${res.submittedCount || ids.length} draft(s) to eBay Seller Hub! Task ID: ${res.feedTaskId || 'N/A'}.`;
+            globalStatus = `Submitted ${res.submittedCount || ids.length} draft(s) to eBay Seller Hub! Task ID: ${res.feedTaskId || "N/A"}.`;
         } catch (err) {
             globalError = err.message || "Seller Hub draft submission failed.";
         } finally {
@@ -1261,7 +1397,8 @@
                 <button
                     type="button"
                     class="batch-new-btn batch-actions-trigger"
-                    on:click={() => (isBatchActionsMenuOpen = !isBatchActionsMenuOpen)}
+                    on:click={() =>
+                        (isBatchActionsMenuOpen = !isBatchActionsMenuOpen)}
                 >
                     Batch actions ▾
                 </button>
@@ -1336,8 +1473,23 @@
                                 isBatchActionsMenuOpen = false;
                                 deleteSelectedBatch();
                             }}
-                            disabled={batchLoading || !selectedBatchId || items.some(it => it.workflowStatus === 'draft_submitted' || it.workflowStatus === 'draft_result_available')}
-                            title={items.some(it => it.workflowStatus === 'draft_submitted' || it.workflowStatus === 'draft_result_available') ? "Cannot delete batch after eBay draft submission" : "Delete unsubmitted batch"}
+                            disabled={batchLoading ||
+                                !selectedBatchId ||
+                                items.some(
+                                    (it) =>
+                                        it.workflowStatus ===
+                                            "draft_submitted" ||
+                                        it.workflowStatus ===
+                                            "draft_result_available",
+                                )}
+                            title={items.some(
+                                (it) =>
+                                    it.workflowStatus === "draft_submitted" ||
+                                    it.workflowStatus ===
+                                        "draft_result_available",
+                            )
+                                ? "Cannot delete batch after eBay draft submission"
+                                : "Delete unsubmitted batch"}
                         >
                             Delete batch
                         </button>
@@ -1351,7 +1503,9 @@
     <div class="batch-lifecycle-summary">
         <div class="lifecycle-chip">
             <span class="chip-label">Batch:</span>
-            <strong class="chip-value">{selectedBatch?.name || "No batch"}</strong>
+            <strong class="chip-value"
+                >{selectedBatch?.name || "No batch"}</strong
+            >
         </div>
         <div class="lifecycle-chip">
             <span class="chip-label">Total items:</span>
@@ -1448,14 +1602,19 @@
             <div class="cards-grid-container">
                 {#if batchLoading}
                     <div class="cards-empty-state">
-                        <p class="text-slate-400 font-medium animate-pulse">Loading batch items...</p>
+                        <p class="text-slate-400 font-medium animate-pulse">
+                            Loading batch items...
+                        </p>
                     </div>
                 {:else if filteredItems.length === 0}
                     <div class="cards-empty-state">
                         <div class="text-4xl mb-2">📸</div>
-                        <h3 class="text-base font-bold text-slate-800">No items found</h3>
+                        <h3 class="text-base font-bold text-slate-800">
+                            No items found
+                        </h3>
                         <p class="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-                            Upload photos to automatically create, group, and analyze your inventory items.
+                            Upload photos to automatically create, group, and
+                            analyze your inventory items.
                         </p>
                         <button
                             type="button"
@@ -1472,13 +1631,17 @@
                             {@const readiness = getItemReadiness(item)}
                             {@const isSelected = selectedItemIds.has(item.id)}
                             {@const isInspecting = inspectingItemId === item.id}
-                            {@const statusInfo = getStatusBadge(item.workflowStatus, item)}
+                            {@const statusInfo = getStatusBadge(
+                                item.workflowStatus,
+                                item,
+                            )}
 
                             <div
                                 class="listing-card"
                                 class:selected={isSelected}
                                 class:inspecting={isInspecting}
-                                class:is-approved={item.workflowStatus === 'approved'}
+                                class:is-approved={item.workflowStatus ===
+                                    "approved"}
                             >
                                 <!-- Card Header / Media Container -->
                                 <div class="card-header-container">
@@ -1496,7 +1659,9 @@
                                                 loading="lazy"
                                             />
                                         {:else}
-                                            <div class="card-img-placeholder">📷</div>
+                                            <div class="card-img-placeholder">
+                                                📷
+                                            </div>
                                         {/if}
                                     </button>
 
@@ -1506,30 +1671,51 @@
                                             <input
                                                 type="checkbox"
                                                 checked={isSelected}
-                                                on:change={() => toggleSelectItem(item.id)}
+                                                on:change={() =>
+                                                    toggleSelectItem(item.id)}
                                                 class="row-checkbox"
                                                 aria-label="Select item"
                                             />
                                         </div>
 
                                         <span class="card-photo-count">
-                                            📷 {item.photoCount} photo{item.photoCount === 1 ? '' : 's'}
+                                            📷 {item.photoCount} photo{item.photoCount ===
+                                            1
+                                                ? ""
+                                                : "s"}
                                         </span>
                                     </div>
 
                                     <!-- Readiness Pill -->
-                                    <div class="card-readiness-badge" class:ready={readiness.ready}>
+                                    <div
+                                        class="card-readiness-badge"
+                                        class:ready={readiness.ready}
+                                    >
                                         {#if item?.listing?.analysisStatus === "failed" || item?.listing?.analysisStatus === "timeout"}
-                                            <span class="readiness-dot bg-rose-500"></span>
-                                            <span class="text-rose-700 font-semibold">{statusInfo.text}</span>
+                                            <span
+                                                class="readiness-dot bg-rose-500"
+                                            ></span>
+                                            <span
+                                                class="text-rose-700 font-semibold"
+                                                >{statusInfo.text}</span
+                                            >
                                         {:else if readiness.ready}
-                                            <span class="readiness-dot bg-emerald-500"></span>
+                                            <span
+                                                class="readiness-dot bg-emerald-500"
+                                            ></span>
                                             <span>Ready for eBay Draft</span>
                                         {:else if readiness.missing.length > 0}
-                                            <span class="readiness-dot bg-amber-500"></span>
-                                            <span>Missing {readiness.missing[0]}</span>
+                                            <span
+                                                class="readiness-dot bg-amber-500"
+                                            ></span>
+                                            <span
+                                                >Missing {readiness
+                                                    .missing[0]}</span
+                                            >
                                         {:else}
-                                            <span class="readiness-dot bg-blue-500"></span>
+                                            <span
+                                                class="readiness-dot bg-blue-500"
+                                            ></span>
                                             <span>{statusInfo.text}</span>
                                         {/if}
                                     </div>
@@ -1543,30 +1729,51 @@
                                             type="button"
                                             class="card-category-btn"
                                             title="Click to search or change eBay category"
-                                            on:click={() => openItemInspector(item)}
+                                            on:click={() =>
+                                                openItemInspector(item)}
                                         >
                                             <span class="cat-icon">🏷️</span>
                                             <span class="cat-name">
-                                                {listing.categoryName || (listing.cat ? `Category #${listing.cat}` : "Select Category...")}
+                                                {listing.categoryName ||
+                                                    (listing.cat
+                                                        ? `Category #${listing.cat}`
+                                                        : "Select Category...")}
                                             </span>
                                         </button>
                                         {#if listing.cid === "1000" || listing.condition === "New"}
-                                            <span class="cond-pill cond-new">New</span>
+                                            <span class="cond-pill cond-new"
+                                                >New</span
+                                            >
                                         {:else}
-                                            <span class="cond-pill cond-preowned">Pre-owned</span>
+                                            <span
+                                                class="cond-pill cond-preowned"
+                                                >Pre-owned</span
+                                            >
                                         {/if}
                                     </div>
 
                                     <!-- Listing Title with Character Count -->
                                     <div class="card-title-row">
-                                        <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1">
-                                            <span class="font-medium text-slate-500">eBay Title</span>
+                                        <div
+                                            class="flex items-center justify-between text-[11px] text-slate-400 mb-1"
+                                        >
+                                            <span
+                                                class="font-medium text-slate-500"
+                                                >eBay Title</span
+                                            >
                                             <span
                                                 class="font-mono font-bold"
-                                                class:text-rose-600={(listing.title || "").length > 80}
-                                                class:text-emerald-700={(listing.title || "").length > 0 && (listing.title || "").length <= 80}
+                                                class:text-rose-600={(
+                                                    listing.title || ""
+                                                ).length > 80}
+                                                class:text-emerald-700={(
+                                                    listing.title || ""
+                                                ).length > 0 &&
+                                                    (listing.title || "")
+                                                        .length <= 80}
                                             >
-                                                {(listing.title || "").length}/80
+                                                {(listing.title || "")
+                                                    .length}/80
                                             </span>
                                         </div>
                                         <input
@@ -1575,37 +1782,81 @@
                                             value={listing.title || ""}
                                             placeholder="Enter listing title..."
                                             maxlength="80"
-                                            on:input={(e) => handleInlineEdit(item, "title", e.target.value)}
-                                            on:blur={() => handleInlineEdit(item, "confirmField", "title")}
+                                            on:input={(e) =>
+                                                handleInlineEdit(
+                                                    item,
+                                                    "title",
+                                                    e.target.value,
+                                                )}
+                                            on:blur={() =>
+                                                handleInlineEdit(
+                                                    item,
+                                                    "confirmField",
+                                                    "title",
+                                                )}
                                         />
 
                                         {#if item.titleCandidates && Object.keys(item.titleCandidates).length > 1}
-                                            <div class="mt-1 flex items-center justify-between">
+                                            <div
+                                                class="mt-1 flex items-center justify-between"
+                                            >
                                                 <button
                                                     type="button"
                                                     class="card-cand-toggle-btn"
                                                     on:click|stopPropagation={() => {
-                                                        activeTitleCandidatesItemId = activeTitleCandidatesItemId === item.id ? null : item.id;
+                                                        activeTitleCandidatesItemId =
+                                                            activeTitleCandidatesItemId ===
+                                                            item.id
+                                                                ? null
+                                                                : item.id;
                                                     }}
                                                 >
-                                                    ✨ Alternative Titles ({Object.keys(item.titleCandidates).length})
+                                                    ✨ Alternative Titles ({Object.keys(
+                                                        item.titleCandidates,
+                                                    ).length})
                                                 </button>
                                             </div>
 
                                             {#if activeTitleCandidatesItemId === item.id}
-                                                <div class="candidate-dropdown mt-1">
-                                                    <div class="p-2 border-b text-[11px] font-bold text-slate-700">Choose Title Option</div>
+                                                <div
+                                                    class="candidate-dropdown mt-1"
+                                                >
+                                                    <div
+                                                        class="p-2 border-b text-[11px] font-bold text-slate-700"
+                                                    >
+                                                        Choose Title Option
+                                                    </div>
                                                     {#each Object.entries(item.titleCandidates) as [cKey, cand]}
                                                         <button
                                                             type="button"
                                                             class="candidate-option-btn"
-                                                            on:click={() => selectTitleCandidate(item, cKey)}
+                                                            on:click={() =>
+                                                                selectTitleCandidate(
+                                                                    item,
+                                                                    cKey,
+                                                                )}
                                                         >
-                                                            <div class="flex justify-between text-[11px] font-semibold text-slate-700">
-                                                                <span class="capitalize">{cKey.replace("_", " ")}</span>
-                                                                <span class="text-slate-400">{cand.length}/80</span>
+                                                            <div
+                                                                class="flex justify-between text-[11px] font-semibold text-slate-700"
+                                                            >
+                                                                <span
+                                                                    class="capitalize"
+                                                                    >{cKey.replace(
+                                                                        "_",
+                                                                        " ",
+                                                                    )}</span
+                                                                >
+                                                                <span
+                                                                    class="text-slate-400"
+                                                                    >{cand.length}/80</span
+                                                                >
                                                             </div>
-                                                            <p class="text-xs text-slate-900 mt-0.5">{cand.title || cand}</p>
+                                                            <p
+                                                                class="text-xs text-slate-900 mt-0.5"
+                                                            >
+                                                                {cand.title ||
+                                                                    cand}
+                                                            </p>
                                                         </button>
                                                     {/each}
                                                 </div>
@@ -1616,25 +1867,47 @@
                                     <!-- Specifics Chips -->
                                     <div class="card-specifics-chips">
                                         {#if listing.brand}
-                                            <span class="spec-chip"><strong>Brand:</strong> {listing.brand}</span>
+                                            <span class="spec-chip"
+                                                ><strong>Brand:</strong>
+                                                {listing.brand}</span
+                                            >
                                         {/if}
                                         {#if listing.size && listing.size !== "Not visible"}
-                                            <span class="spec-chip"><strong>Size:</strong> {listing.size}</span>
+                                            <span class="spec-chip"
+                                                ><strong>Size:</strong>
+                                                {listing.size}</span
+                                            >
                                         {/if}
                                         {#if listing.color}
-                                            <span class="spec-chip"><strong>Color:</strong> {listing.color}</span>
+                                            <span class="spec-chip"
+                                                ><strong>Color:</strong>
+                                                {listing.color}</span
+                                            >
                                         {/if}
                                         {#if listing.sku}
-                                            <span class="spec-chip font-mono"><strong>SKU:</strong> {listing.sku}</span>
+                                            <span class="spec-chip font-mono"
+                                                ><strong>SKU:</strong>
+                                                {listing.sku}</span
+                                            >
                                         {/if}
                                     </div>
 
                                     <!-- Price Display & Quick Tiers -->
                                     <div class="card-price-section">
-                                        <div class="flex items-center justify-between mb-1.5">
-                                            <span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">Listing Price</span>
-                                            <div class="relative flex items-center">
-                                                <span class="absolute left-2 text-xs font-bold text-slate-400">$</span>
+                                        <div
+                                            class="flex items-center justify-between mb-1.5"
+                                        >
+                                            <span
+                                                class="text-[11px] font-bold uppercase tracking-wider text-slate-500"
+                                                >Listing Price</span
+                                            >
+                                            <div
+                                                class="relative flex items-center"
+                                            >
+                                                <span
+                                                    class="absolute left-2 text-xs font-bold text-slate-400"
+                                                    >$</span
+                                                >
                                                 <input
                                                     type="number"
                                                     step="0.01"
@@ -1642,8 +1915,20 @@
                                                     class="card-price-input"
                                                     value={listing.price || ""}
                                                     placeholder="0.00"
-                                                    on:input={(e) => handleInlineEdit(item, "price", parseFloat(e.target.value) || 0)}
-                                                    on:blur={() => handleInlineEdit(item, "confirmField", "price")}
+                                                    on:input={(e) =>
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "price",
+                                                            parseFloat(
+                                                                e.target.value,
+                                                            ) || 0,
+                                                        )}
+                                                    on:blur={() =>
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "confirmField",
+                                                            "price",
+                                                        )}
                                                 />
                                             </div>
                                         </div>
@@ -1655,45 +1940,102 @@
                                                 class="price-tier-chip"
                                                 title="Quick sale price"
                                                 on:click={() => {
-                                                    const p = item.quickSalePrice || item.pricingTiers?.quickSale?.price;
+                                                    const p =
+                                                        item.quickSalePrice ||
+                                                        item.pricingTiers
+                                                            ?.quickSale?.price;
                                                     if (p) {
-                                                        handleInlineEdit(item, "price", parseFloat(p));
-                                                        handleInlineEdit(item, "confirmField", "price");
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "price",
+                                                            parseFloat(p),
+                                                        );
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "confirmField",
+                                                            "price",
+                                                        );
                                                     }
                                                 }}
                                             >
-                                                <span class="tier-lbl">Quick</span>
-                                                <span class="tier-cost">${item.quickSalePrice || item.pricingTiers?.quickSale?.price || "--"}</span>
+                                                <span class="tier-lbl"
+                                                    >Quick</span
+                                                >
+                                                <span class="tier-cost"
+                                                    >${item.quickSalePrice ||
+                                                        item.pricingTiers
+                                                            ?.quickSale
+                                                            ?.price ||
+                                                        "--"}</span
+                                                >
                                             </button>
                                             <button
                                                 type="button"
                                                 class="price-tier-chip active-tier"
                                                 title="Balanced price"
                                                 on:click={() => {
-                                                    const p = item.balancedPrice || item.pricingTiers?.balanced?.price || listing.price;
+                                                    const p =
+                                                        item.balancedPrice ||
+                                                        item.pricingTiers
+                                                            ?.balanced?.price ||
+                                                        listing.price;
                                                     if (p) {
-                                                        handleInlineEdit(item, "price", parseFloat(p));
-                                                        handleInlineEdit(item, "confirmField", "price");
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "price",
+                                                            parseFloat(p),
+                                                        );
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "confirmField",
+                                                            "price",
+                                                        );
                                                     }
                                                 }}
                                             >
-                                                <span class="tier-lbl">Balanced</span>
-                                                <span class="tier-cost">${item.balancedPrice || item.pricingTiers?.balanced?.price || listing.price || "--"}</span>
+                                                <span class="tier-lbl"
+                                                    >Balanced</span
+                                                >
+                                                <span class="tier-cost"
+                                                    >${item.balancedPrice ||
+                                                        item.pricingTiers
+                                                            ?.balanced?.price ||
+                                                        listing.price ||
+                                                        "--"}</span
+                                                >
                                             </button>
                                             <button
                                                 type="button"
                                                 class="price-tier-chip"
                                                 title="Premium margin price"
                                                 on:click={() => {
-                                                    const p = item.premiumPrice || item.pricingTiers?.premium?.price;
+                                                    const p =
+                                                        item.premiumPrice ||
+                                                        item.pricingTiers
+                                                            ?.premium?.price;
                                                     if (p) {
-                                                        handleInlineEdit(item, "price", parseFloat(p));
-                                                        handleInlineEdit(item, "confirmField", "price");
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "price",
+                                                            parseFloat(p),
+                                                        );
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "confirmField",
+                                                            "price",
+                                                        );
                                                     }
                                                 }}
                                             >
-                                                <span class="tier-lbl">Premium</span>
-                                                <span class="tier-cost">${item.premiumPrice || item.pricingTiers?.premium?.price || "--"}</span>
+                                                <span class="tier-lbl"
+                                                    >Premium</span
+                                                >
+                                                <span class="tier-cost"
+                                                    >${item.premiumPrice ||
+                                                        item.pricingTiers
+                                                            ?.premium?.price ||
+                                                        "--"}</span
+                                                >
                                             </button>
                                         </div>
                                     </div>
@@ -1721,9 +2063,12 @@
                                         <button
                                             type="button"
                                             class="card-action-btn-retry"
-                                            on:click={() => analyzeWorkspaceItem(item.id)}
+                                            on:click={() =>
+                                                analyzeWorkspaceItem(item.id)}
                                             disabled={actionLoading}
-                                            title={item.listing?.analysisError || "Retry analysis"}
+                                            title={item.listing
+                                                ?.analysisError ||
+                                                "Retry analysis"}
                                         >
                                             ↻ Retry Analysis
                                         </button>
@@ -1731,7 +2076,8 @@
                                         <button
                                             type="button"
                                             class="card-action-btn-approve"
-                                            on:click={() => approveSingleItem(item)}
+                                            on:click={() =>
+                                                approveSingleItem(item)}
                                             disabled={actionLoading}
                                         >
                                             Approve ✓
@@ -1747,412 +2093,506 @@
             <!-- Main Spreadsheet Table (11-Column CSV Verification View) -->
             <div class="table-scroll-wrapper">
                 <table class="inventory-table">
-                <thead>
-                    <tr>
-                        <th class="w-12 text-center">
-                            <input
-                                type="checkbox"
-                                checked={selectedItemIds.size ===
-                                    filteredItems.length &&
-                                    filteredItems.length > 0}
-                                on:change={toggleSelectAll}
-                                class="row-checkbox"
-                            />
-                        </th>
-                        <th class="w-24">Item</th>
-                        <th
-                            class="min-w-[280px]"
-                            on:click={() => toggleSort("title")}
-                        >
-                            Title {sortBy === "title"
-                                ? sortDirection === "asc"
-                                    ? "↑"
-                                    : "↓"
-                                : ""}
-                        </th>
-                        <th class="min-w-[150px]">Category</th>
-                        <th class="w-32">Brand</th>
-                        <th class="w-28">Size</th>
-                        <th class="w-28">Condition</th>
-                        <th class="w-32" on:click={() => toggleSort("price")}>
-                            Price {sortBy === "price"
-                                ? sortDirection === "asc"
-                                    ? "↑"
-                                    : "↓"
-                                : ""}
-                        </th>
-                        <th class="w-20">Qty</th>
-                        <th class="w-32" on:click={() => toggleSort("status")}>
-                            Status {sortBy === "status"
-                                ? sortDirection === "asc"
-                                    ? "↑"
-                                    : "↓"
-                                : ""}
-                        </th>
-                        <th class="w-28">Updated</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {#if batchLoading}
+                    <thead>
                         <tr>
-                            <td
-                                colspan="11"
-                                class="text-center py-12 text-slate-400"
-                                >Loading batch items...</td
+                            <th class="w-12 text-center">
+                                <input
+                                    type="checkbox"
+                                    checked={selectedItemIds.size ===
+                                        filteredItems.length &&
+                                        filteredItems.length > 0}
+                                    on:change={toggleSelectAll}
+                                    class="row-checkbox"
+                                />
+                            </th>
+                            <th class="w-24">Item</th>
+                            <th
+                                class="min-w-[280px]"
+                                on:click={() => toggleSort("title")}
                             >
+                                Title {sortBy === "title"
+                                    ? sortDirection === "asc"
+                                        ? "↑"
+                                        : "↓"
+                                    : ""}
+                            </th>
+                            <th class="min-w-[150px]">Category</th>
+                            <th class="w-32">Brand</th>
+                            <th class="w-28">Size</th>
+                            <th class="w-28">Condition</th>
+                            <th
+                                class="w-32"
+                                on:click={() => toggleSort("price")}
+                            >
+                                Price {sortBy === "price"
+                                    ? sortDirection === "asc"
+                                        ? "↑"
+                                        : "↓"
+                                    : ""}
+                            </th>
+                            <th class="w-20">Qty</th>
+                            <th
+                                class="w-32"
+                                on:click={() => toggleSort("status")}
+                            >
+                                Status {sortBy === "status"
+                                    ? sortDirection === "asc"
+                                        ? "↑"
+                                        : "↓"
+                                    : ""}
+                            </th>
+                            <th class="w-28">Updated</th>
                         </tr>
-                    {:else if filteredItems.length === 0}
-                        <tr>
-                            <td
-                                colspan="11"
-                                class="text-center py-16 text-slate-500"
-                            >
-                                <p class="text-base font-semibold mb-1">
-                                    No items found in this view.
-                                </p>
-                                <p class="text-sm text-slate-400">
-                                    Upload photos to create and group items, or
-                                    change filters.
-                                </p>
-                                <button
-                                    class="mt-4 px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-semibold hover:bg-slate-800"
-                                    on:click={openUploadModal}
-                                >
-                                    Upload photos
-                                </button>
-                            </td>
-                        </tr>
-                    {:else}
-                        {#each filteredItems as item (item.id)}
-                            {@const listing = item.listing || {}}
-                            {@const prov = item.provenance || {}}
-                            {@const statusInfo = getStatusBadge(
-                                item.workflowStatus,
-                                item,
-                            )}
-                            {@const isMissingSize =
-                                !listing.size || listing.size === "Not visible"}
-                            {@const isSelected = selectedItemIds.has(item.id)}
-                            {@const isInspecting = inspectingItemId === item.id}
-
-                            <tr
-                                class:selected-row={isSelected}
-                                class:inspecting-row={isInspecting}
-                            >
-                                <!-- Checkbox -->
+                    </thead>
+                    <tbody>
+                        {#if batchLoading}
+                            <tr>
                                 <td
-                                    class="text-center"
-                                    on:click|stopPropagation
+                                    colspan="11"
+                                    class="text-center py-12 text-slate-400"
+                                    >Loading batch items...</td
                                 >
-                                    <input
-                                        type="checkbox"
-                                        checked={isSelected}
-                                        on:change={() =>
-                                            toggleSelectItem(item.id)}
-                                        class="row-checkbox"
-                                    />
+                            </tr>
+                        {:else if filteredItems.length === 0}
+                            <tr>
+                                <td
+                                    colspan="11"
+                                    class="text-center py-16 text-slate-500"
+                                >
+                                    <p class="text-base font-semibold mb-1">
+                                        No items found in this view.
+                                    </p>
+                                    <p class="text-sm text-slate-400">
+                                        Upload photos to create and group items,
+                                        or change filters.
+                                    </p>
+                                    <button
+                                        class="mt-4 px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-semibold hover:bg-slate-800"
+                                        on:click={openUploadModal}
+                                    >
+                                        Upload photos
+                                    </button>
                                 </td>
+                            </tr>
+                        {:else}
+                            {#each filteredItems as item (item.id)}
+                                {@const listing = item.listing || {}}
+                                {@const prov = item.provenance || {}}
+                                {@const statusInfo = getStatusBadge(
+                                    item.workflowStatus,
+                                    item,
+                                )}
+                                {@const isMissingSize =
+                                    !listing.size ||
+                                    listing.size === "Not visible"}
+                                {@const isSelected = selectedItemIds.has(
+                                    item.id,
+                                )}
+                                {@const isInspecting =
+                                    inspectingItemId === item.id}
 
-                                <!-- Thumbnail & Photo Count Pill matching media_1792112229.png -->
-                                <td
-                                    class="cursor-pointer"
-                                    on:click={() => openItemInspector(item)}
+                                <tr
+                                    class:selected-row={isSelected}
+                                    class:inspecting-row={isInspecting}
                                 >
-                                    <div class="thumb-cell">
-                                        <div class="thumb-box">
-                                            {#if item.coverThumbnail}
-                                                <img
-                                                    src={item.coverThumbnail}
-                                                    alt={listing.title ||
-                                                        "Item"}
-                                                    class="thumb-img"
-                                                />
-                                            {:else}
-                                                <div class="thumb-placeholder">
-                                                    📷
-                                                </div>
+                                    <!-- Checkbox -->
+                                    <td
+                                        class="text-center"
+                                        on:click|stopPropagation
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={isSelected}
+                                            on:change={() =>
+                                                toggleSelectItem(item.id)}
+                                            class="row-checkbox"
+                                        />
+                                    </td>
+
+                                    <!-- Thumbnail & Photo Count Pill matching media_1792112229.png -->
+                                    <td
+                                        class="cursor-pointer"
+                                        on:click={() => openItemInspector(item)}
+                                    >
+                                        <div class="thumb-cell">
+                                            <div class="thumb-box">
+                                                {#if item.coverThumbnail}
+                                                    <img
+                                                        src={item.coverThumbnail}
+                                                        alt={listing.title ||
+                                                            "Item"}
+                                                        class="thumb-img"
+                                                    />
+                                                {:else}
+                                                    <div
+                                                        class="thumb-placeholder"
+                                                    >
+                                                        📷
+                                                    </div>
+                                                {/if}
+                                            </div>
+                                            <span class="photo-count-label">
+                                                {item.photoCount} photo{item.photoCount ===
+                                                1
+                                                    ? ""
+                                                    : "s"}
+                                            </span>
+                                        </div>
+                                    </td>
+
+                                    <!-- Title (with Candidate Picker popover) -->
+                                    <td>
+                                        <div class="relative">
+                                            <input
+                                                type="text"
+                                                class="table-input"
+                                                value={listing.title || ""}
+                                                placeholder="Enter listing title..."
+                                                maxlength="80"
+                                                on:input={(e) =>
+                                                    handleInlineEdit(
+                                                        item,
+                                                        "title",
+                                                        e.target.value,
+                                                    )}
+                                            />
+                                            {#if item.titleCandidates && Object.keys(item.titleCandidates).length > 0}
+                                                <button
+                                                    type="button"
+                                                    class="candidate-toggle-btn"
+                                                    title="Select optimized title candidate"
+                                                    on:click|stopPropagation={() => {
+                                                        activeTitleCandidatesItemId =
+                                                            activeTitleCandidatesItemId ===
+                                                            item.id
+                                                                ? null
+                                                                : item.id;
+                                                    }}
+                                                >
+                                                    ✨
+                                                </button>
+                                                {#if activeTitleCandidatesItemId === item.id}
+                                                    <div
+                                                        class="candidate-dropdown"
+                                                    >
+                                                        <div
+                                                            class="p-2 border-b text-xs font-bold text-slate-700"
+                                                        >
+                                                            Select Title
+                                                            Candidate
+                                                        </div>
+                                                        {#each Object.entries(item.titleCandidates) as [cKey, cand]}
+                                                            <button
+                                                                type="button"
+                                                                class="candidate-option-btn"
+                                                                on:click={() =>
+                                                                    selectTitleCandidate(
+                                                                        item,
+                                                                        cKey,
+                                                                    )}
+                                                            >
+                                                                <div
+                                                                    class="flex justify-between text-xs font-semibold"
+                                                                >
+                                                                    <span
+                                                                        class="capitalize"
+                                                                        >{cKey.replace(
+                                                                            "_",
+                                                                            " ",
+                                                                        )}</span
+                                                                    >
+                                                                    <span
+                                                                        class="text-slate-400"
+                                                                        >{cand.length}/80</span
+                                                                    >
+                                                                </div>
+                                                                <p
+                                                                    class="text-xs text-slate-800 mt-0.5"
+                                                                >
+                                                                    {cand.title}
+                                                                </p>
+                                                            </button>
+                                                        {/each}
+                                                    </div>
+                                                {/if}
                                             {/if}
                                         </div>
-                                        <span class="photo-count-label">
-                                            {item.photoCount} photo{item.photoCount ===
-                                            1
-                                                ? ""
-                                                : "s"}
-                                        </span>
-                                    </div>
-                                </td>
+                                    </td>
 
-                                <!-- Title (with Candidate Picker popover) -->
-                                <td>
-                                    <div class="relative">
+                                    <!-- Category -->
+                                    <td>
+                                        <div class="flex flex-col gap-1">
+                                            <input
+                                                type="text"
+                                                class="table-input"
+                                                value={listing.categoryName ||
+                                                    listing.cat ||
+                                                    ""}
+                                                placeholder="Choose eBay category"
+                                                readonly
+                                                on:click={() =>
+                                                    openItemInspector(item)}
+                                            />
+                                            <button
+                                                type="button"
+                                                class="text-[10px] text-blue-700 font-semibold text-left hover:underline"
+                                                on:click={() =>
+                                                    openItemInspector(item)}
+                                            >
+                                                {listing.cat
+                                                    ? "Edit eBay specifics"
+                                                    : "Search eBay category"}
+                                            </button>
+                                        </div>
+                                    </td>
+
+                                    <!-- Brand -->
+                                    <td>
                                         <input
                                             type="text"
                                             class="table-input"
-                                            value={listing.title || ""}
-                                            placeholder="Enter listing title..."
-                                            maxlength="80"
+                                            value={listing.brand || ""}
+                                            placeholder="Brand..."
                                             on:input={(e) =>
                                                 handleInlineEdit(
                                                     item,
-                                                    "title",
+                                                    "brand",
                                                     e.target.value,
                                                 )}
                                         />
-                                        {#if item.titleCandidates && Object.keys(item.titleCandidates).length > 0}
-                                            <button
-                                                type="button"
-                                                class="candidate-toggle-btn"
-                                                title="Select optimized title candidate"
-                                                on:click|stopPropagation={() => {
-                                                    activeTitleCandidatesItemId =
-                                                        activeTitleCandidatesItemId ===
-                                                        item.id
-                                                            ? null
-                                                            : item.id;
-                                                }}
+                                    </td>
+
+                                    <!-- Size -->
+                                    <td>
+                                        <div class="relative">
+                                            <input
+                                                type="text"
+                                                class="table-input"
+                                                class:missing-input={isMissingSize}
+                                                value={listing.size || ""}
+                                                placeholder="Set size"
+                                                on:input={(e) =>
+                                                    handleInlineEdit(
+                                                        item,
+                                                        "size",
+                                                        e.target.value,
+                                                    )}
+                                            />
+                                        </div>
+                                    </td>
+
+                                    <!-- Condition -->
+                                    <td>
+                                        <span
+                                            class="text-sm text-slate-700 font-medium"
+                                        >
+                                            {listing.cid === "1000"
+                                                ? "New"
+                                                : "Pre-owned"}
+                                        </span>
+                                    </td>
+
+                                    <!-- Price (with Tier options popover and AI Estimate notice) -->
+                                    <td>
+                                        <div
+                                            class="relative flex flex-col gap-0.5"
+                                        >
+                                            <div
+                                                class="flex items-center gap-1"
                                             >
-                                                ✨
-                                            </button>
-                                            {#if activeTitleCandidatesItemId === item.id}
+                                                <span
+                                                    class="text-slate-400 text-sm"
+                                                    >$</span
+                                                >
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    class="table-input w-20 text-right font-semibold"
+                                                    value={listing.price || ""}
+                                                    placeholder="0.00"
+                                                    on:input={(e) => {
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "price",
+                                                            e.target.value,
+                                                        );
+                                                        handleInlineEdit(
+                                                            item,
+                                                            "confirmField",
+                                                            "price",
+                                                        );
+                                                    }}
+                                                />
+                                                {#if item.pricingOptions && Object.keys(item.pricingOptions).length > 0}
+                                                    <button
+                                                        type="button"
+                                                        class="price-tiers-btn"
+                                                        title="View recommended price tiers"
+                                                        on:click|stopPropagation={() => {
+                                                            activePriceTiersItemId =
+                                                                activePriceTiersItemId ===
+                                                                item.id
+                                                                    ? null
+                                                                    : item.id;
+                                                        }}
+                                                    >
+                                                        🏷️
+                                                    </button>
+                                                {/if}
+                                            </div>
+                                            <div
+                                                class="text-[10px] text-slate-500 flex items-center gap-1 whitespace-nowrap"
+                                            >
+                                                {#if item.provenance?.price?.sellerConfirmed || item.sellerConfirmed}
+                                                    <span
+                                                        class="text-emerald-700 font-bold"
+                                                        >✓ Confirmed</span
+                                                    >
+                                                {:else}
+                                                    <span
+                                                        class="text-amber-700 font-medium"
+                                                        title="AI estimate — verify before approval"
+                                                        >AI estimate</span
+                                                    >
+                                                {/if}
+                                                {#if item.pricingOptions?.quickSale?.price}
+                                                    <span
+                                                        class="text-slate-400"
+                                                        title="Quick Sale price"
+                                                        >· Q:${item
+                                                            .pricingOptions
+                                                            .quickSale
+                                                            .price}</span
+                                                    >
+                                                {/if}
+                                                {#if item.pricingOptions?.balanced?.price}
+                                                    <span
+                                                        class="text-slate-400"
+                                                        title="Balanced price"
+                                                        >· B:${item
+                                                            .pricingOptions
+                                                            .balanced
+                                                            .price}</span
+                                                    >
+                                                {/if}
+                                            </div>
+                                            {#if activePriceTiersItemId === item.id}
                                                 <div class="candidate-dropdown">
                                                     <div
-                                                        class="p-2 border-b text-xs font-bold text-slate-700"
+                                                        class="p-2 border-b text-xs font-bold text-slate-700 flex justify-between items-center"
                                                     >
-                                                        Select Title Candidate
+                                                        <span
+                                                            >Recommended Price
+                                                            Tiers</span
+                                                        >
+                                                        <span
+                                                            class="text-[10px] text-amber-700 font-normal"
+                                                            >AI estimate —
+                                                            verify before
+                                                            approval</span
+                                                        >
                                                     </div>
-                                                    {#each Object.entries(item.titleCandidates) as [cKey, cand]}
+                                                    {#each Object.entries(item.pricingOptions) as [tKey, opt]}
                                                         <button
                                                             type="button"
                                                             class="candidate-option-btn"
                                                             on:click={() =>
-                                                                selectTitleCandidate(
+                                                                selectPricingOption(
                                                                     item,
-                                                                    cKey,
+                                                                    tKey,
                                                                 )}
                                                         >
                                                             <div
-                                                                class="flex justify-between text-xs font-semibold"
+                                                                class="flex justify-between items-center text-xs font-bold"
                                                             >
                                                                 <span
-                                                                    class="capitalize"
-                                                                    >{cKey.replace(
-                                                                        "_",
-                                                                        " ",
-                                                                    )}</span
+                                                                    >{opt.label}</span
                                                                 >
                                                                 <span
-                                                                    class="text-slate-400"
-                                                                    >{cand.length}/80</span
+                                                                    class="text-emerald-700"
+                                                                    >${opt.price}</span
                                                                 >
                                                             </div>
                                                             <p
-                                                                class="text-xs text-slate-800 mt-0.5"
+                                                                class="text-xs text-slate-500 mt-0.5"
                                                             >
-                                                                {cand.title}
+                                                                {opt.reason}
                                                             </p>
                                                         </button>
                                                     {/each}
                                                 </div>
                                             {/if}
-                                        {/if}
-                                    </div>
-                                </td>
+                                        </div>
+                                    </td>
 
-                                <!-- Category -->
-                                <td>
-                                    <div class="flex flex-col gap-1">
+                                    <!-- Quantity -->
+                                    <td>
                                         <input
-                                            type="text"
-                                            class="table-input"
-                                            value={listing.categoryName || listing.cat || ""}
-                                            placeholder="Choose eBay category"
-                                            readonly
-                                            on:click={() => openItemInspector(item)}
-                                        />
-                                        <button
-                                            type="button"
-                                            class="text-[10px] text-blue-700 font-semibold text-left hover:underline"
-                                            on:click={() => openItemInspector(item)}
-                                        >
-                                            {listing.cat ? "Edit eBay specifics" : "Search eBay category"}
-                                        </button>
-                                    </div>
-                                </td>
-
-                                <!-- Brand -->
-                                <td>
-                                    <input
-                                        type="text"
-                                        class="table-input"
-                                        value={listing.brand || ""}
-                                        placeholder="Brand..."
-                                        on:input={(e) =>
-                                            handleInlineEdit(
-                                                item,
-                                                "brand",
-                                                e.target.value,
-                                            )}
-                                    />
-                                </td>
-
-                                <!-- Size -->
-                                <td>
-                                    <div class="relative">
-                                        <input
-                                            type="text"
-                                            class="table-input"
-                                            class:missing-input={isMissingSize}
-                                            value={listing.size || ""}
-                                            placeholder="Set size"
+                                            type="number"
+                                            class="table-input w-16 text-center"
+                                            value={listing.quantity || 1}
+                                            min="1"
                                             on:input={(e) =>
                                                 handleInlineEdit(
                                                     item,
-                                                    "size",
-                                                    e.target.value,
+                                                    "quantity",
+                                                    Number(e.target.value) || 1,
                                                 )}
                                         />
-                                    </div>
-                                </td>
+                                    </td>
 
-                                <!-- Condition -->
-                                <td>
-                                    <span
-                                        class="text-sm text-slate-700 font-medium"
-                                    >
-                                        {listing.cid === "1000"
-                                            ? "New"
-                                            : "Pre-owned"}
-                                    </span>
-                                </td>
-
-                                <!-- Price (with Tier options popover and AI Estimate notice) -->
-                                <td>
-                                    <div class="relative flex flex-col gap-0.5">
-                                        <div class="flex items-center gap-1">
-                                            <span class="text-slate-400 text-sm">$</span>
-                                            <input
-                                                type="number"
-                                                step="0.01"
-                                                class="table-input w-20 text-right font-semibold"
-                                                value={listing.price || ""}
-                                                placeholder="0.00"
-                                                on:input={(e) => {
-                                                    handleInlineEdit(item, "price", e.target.value);
-                                                    handleInlineEdit(item, "confirmField", "price");
-                                                }}
-                                            />
-                                            {#if item.pricingOptions && Object.keys(item.pricingOptions).length > 0}
+                                    <!-- Status Badge matching media_1792112229.png -->
+                                    <td>
+                                        {#if item.listing?.analysisStatus === "failed" || item.listing?.analysisStatus === "timeout" || (item.workflowStatus === "needs_review" && item.listing?.analysisError)}
+                                            <div
+                                                class="flex items-center gap-1.5 flex-wrap"
+                                            >
+                                                <span
+                                                    class="status-pill {statusInfo.bg}"
+                                                    title={item.listing
+                                                        ?.analysisError || ""}
+                                                >
+                                                    {statusInfo.text}
+                                                </span>
                                                 <button
                                                     type="button"
-                                                    class="price-tiers-btn"
-                                                    title="View recommended price tiers"
-                                                    on:click|stopPropagation={() => {
-                                                        activePriceTiersItemId =
-                                                            activePriceTiersItemId === item.id ? null : item.id;
-                                                    }}
+                                                    class="text-[11px] font-semibold text-rose-600 hover:text-rose-800 underline"
+                                                    on:click|stopPropagation={() =>
+                                                        analyzeWorkspaceItem(
+                                                            item.id,
+                                                        )}
+                                                    disabled={actionLoading}
                                                 >
-                                                    🏷️
+                                                    Retry
                                                 </button>
-                                            {/if}
-                                        </div>
-                                        <div class="text-[10px] text-slate-500 flex items-center gap-1 whitespace-nowrap">
-                                            {#if item.provenance?.price?.sellerConfirmed || item.sellerConfirmed}
-                                                <span class="text-emerald-700 font-bold">✓ Confirmed</span>
-                                            {:else}
-                                                <span class="text-amber-700 font-medium" title="AI estimate — verify before approval">AI estimate</span>
-                                            {/if}
-                                            {#if item.pricingOptions?.quickSale?.price}
-                                                <span class="text-slate-400" title="Quick Sale price">· Q:${item.pricingOptions.quickSale.price}</span>
-                                            {/if}
-                                            {#if item.pricingOptions?.balanced?.price}
-                                                <span class="text-slate-400" title="Balanced price">· B:${item.pricingOptions.balanced.price}</span>
-                                            {/if}
-                                        </div>
-                                        {#if activePriceTiersItemId === item.id}
-                                            <div class="candidate-dropdown">
-                                                <div class="p-2 border-b text-xs font-bold text-slate-700 flex justify-between items-center">
-                                                    <span>Recommended Price Tiers</span>
-                                                    <span class="text-[10px] text-amber-700 font-normal">AI estimate — verify before approval</span>
-                                                </div>
-                                                {#each Object.entries(item.pricingOptions) as [tKey, opt]}
-                                                    <button
-                                                        type="button"
-                                                        class="candidate-option-btn"
-                                                        on:click={() => selectPricingOption(item, tKey)}
-                                                    >
-                                                        <div class="flex justify-between items-center text-xs font-bold">
-                                                            <span>{opt.label}</span>
-                                                            <span class="text-emerald-700">${opt.price}</span>
-                                                        </div>
-                                                        <p class="text-xs text-slate-500 mt-0.5">
-                                                            {opt.reason}
-                                                        </p>
-                                                    </button>
-                                                {/each}
                                             </div>
-                                        {/if}
-                                    </div>
-                                </td>
-
-                                <!-- Quantity -->
-                                <td>
-                                    <input
-                                        type="number"
-                                        class="table-input w-16 text-center"
-                                        value={listing.quantity || 1}
-                                        min="1"
-                                        on:input={(e) =>
-                                            handleInlineEdit(
-                                                item,
-                                                "quantity",
-                                                Number(e.target.value) || 1,
-                                            )}
-                                    />
-                                </td>
-
-                                <!-- Status Badge matching media_1792112229.png -->
-                                <td>
-                                    {#if item.listing?.analysisStatus === "failed" || item.listing?.analysisStatus === "timeout" || (item.workflowStatus === "needs_review" && item.listing?.analysisError)}
-                                        <div class="flex items-center gap-1.5 flex-wrap">
-                                            <span class="status-pill {statusInfo.bg}" title={item.listing?.analysisError || ""}>
+                                        {:else if isMissingSize && item.workflowStatus === "needs_review"}
+                                            <span
+                                                class="status-pill bg-amber-50 text-amber-700 border-amber-200"
+                                            >
+                                                Missing size
+                                            </span>
+                                        {:else}
+                                            <span
+                                                class="status-pill {statusInfo.bg}"
+                                            >
                                                 {statusInfo.text}
                                             </span>
-                                            <button
-                                                type="button"
-                                                class="text-[11px] font-semibold text-rose-600 hover:text-rose-800 underline"
-                                                on:click|stopPropagation={() => analyzeWorkspaceItem(item.id)}
-                                                disabled={actionLoading}
-                                            >
-                                                Retry
-                                            </button>
-                                        </div>
-                                    {:else if isMissingSize && item.workflowStatus === "needs_review"}
-                                        <span
-                                            class="status-pill bg-amber-50 text-amber-700 border-amber-200"
-                                        >
-                                            Missing size
-                                        </span>
-                                    {:else}
-                                        <span
-                                            class="status-pill {statusInfo.bg}"
-                                        >
-                                            {statusInfo.text}
-                                        </span>
-                                    {/if}
-                                </td>
+                                        {/if}
+                                    </td>
 
-                                <!-- Updated -->
-                                <td
-                                    class="text-xs text-slate-500 whitespace-nowrap"
-                                >
-                                    {formatTime(item.updatedAt)}
-                                </td>
-                            </tr>
-                        {/each}
-                    {/if}
-                </tbody>
-            </table>
-        </div>
+                                    <!-- Updated -->
+                                    <td
+                                        class="text-xs text-slate-500 whitespace-nowrap"
+                                    >
+                                        {formatTime(item.updatedAt)}
+                                    </td>
+                                </tr>
+                            {/each}
+                        {/if}
+                    </tbody>
+                </table>
+            </div>
         {/if}
 
         <!-- Slide-Over Item Inspector Panel -->
@@ -2185,49 +2625,124 @@
 
                 <div class="inspector-body">
                     <!-- eBay Listing Readiness Health Check Banner -->
-                    <div class="inspector-readiness-banner" class:is-ready={inspReadiness.ready}>
+                    <div
+                        class="inspector-readiness-banner"
+                        class:is-ready={inspReadiness.ready}
+                    >
                         <div class="flex items-center justify-between mb-2">
                             <div class="flex items-center gap-2">
-                                <span class="text-sm font-bold {inspReadiness.ready ? 'text-emerald-900' : 'text-slate-800'}">
-                                    {inspReadiness.ready ? "✓ Ready for eBay Draft" : "eBay Listing Readiness"}
+                                <span
+                                    class="text-sm font-bold {inspReadiness.ready
+                                        ? 'text-emerald-900'
+                                        : 'text-slate-800'}"
+                                >
+                                    {inspReadiness.ready
+                                        ? "✓ Ready for eBay Draft"
+                                        : "eBay Listing Readiness"}
                                 </span>
-                                <span class="text-[11px] font-bold px-2 py-0.5 rounded-full {inspReadiness.ready ? 'bg-emerald-200 text-emerald-800' : 'bg-amber-100 text-amber-800'}">
+                                <span
+                                    class="text-[11px] font-bold px-2 py-0.5 rounded-full {inspReadiness.ready
+                                        ? 'bg-emerald-200 text-emerald-800'
+                                        : 'bg-amber-100 text-amber-800'}"
+                                >
                                     {inspReadiness.percent}%
                                 </span>
                             </div>
-                            {#if !inspReadiness.ready && inspectingItem.workflowStatus !== 'approved'}
-                                <span class="text-[10px] text-amber-700 font-medium">
+                            {#if !inspReadiness.ready && inspectingItem.workflowStatus !== "approved"}
+                                <span
+                                    class="text-[10px] text-amber-700 font-medium"
+                                >
                                     {inspReadiness.missing.length} item(s) needed
                                 </span>
-                            {:else if inspectingItem.workflowStatus === 'approved'}
-                                <span class="text-[10px] bg-teal-100 text-teal-800 font-bold px-2 py-0.5 rounded">
+                            {:else if inspectingItem.workflowStatus === "approved"}
+                                <span
+                                    class="text-[10px] bg-teal-100 text-teal-800 font-bold px-2 py-0.5 rounded"
+                                >
                                     Approved
                                 </span>
                             {/if}
                         </div>
                         <div class="grid grid-cols-3 gap-1.5 text-[11px]">
-                            <div class="readiness-check-item" class:passed={inspectingItem.photos?.length > 0}>
-                                <span class="indicator">{inspectingItem.photos?.length > 0 ? "✓" : "○"}</span>
-                                <span>Photos ({inspectingItem.photoCount || inspectingItem.photos?.length || 0})</span>
+                            <div
+                                class="readiness-check-item"
+                                class:passed={inspectingItem.photos?.length > 0}
+                            >
+                                <span class="indicator"
+                                    >{inspectingItem.photos?.length > 0
+                                        ? "✓"
+                                        : "○"}</span
+                                >
+                                <span
+                                    >Photos ({inspectingItem.photoCount ||
+                                        inspectingItem.photos?.length ||
+                                        0})</span
+                                >
                             </div>
-                            <div class="readiness-check-item" class:passed={Boolean(inspectingItem.listing?.title)}>
-                                <span class="indicator">{inspectingItem.listing?.title ? "✓" : "○"}</span>
+                            <div
+                                class="readiness-check-item"
+                                class:passed={Boolean(
+                                    inspectingItem.listing?.title,
+                                )}
+                            >
+                                <span class="indicator"
+                                    >{inspectingItem.listing?.title
+                                        ? "✓"
+                                        : "○"}</span
+                                >
                                 <span>Title</span>
                             </div>
-                            <div class="readiness-check-item" class:passed={Boolean(inspectingItem.listing?.price)}>
-                                <span class="indicator">{inspectingItem.listing?.price ? "✓" : "○"}</span>
+                            <div
+                                class="readiness-check-item"
+                                class:passed={Boolean(
+                                    inspectingItem.listing?.price,
+                                )}
+                            >
+                                <span class="indicator"
+                                    >{inspectingItem.listing?.price
+                                        ? "✓"
+                                        : "○"}</span
+                                >
                                 <span>Price</span>
                             </div>
-                            <div class="readiness-check-item" class:passed={Boolean(inspectingItem.listing?.cat)}>
-                                <span class="indicator">{inspectingItem.listing?.cat ? "✓" : "○"}</span>
+                            <div
+                                class="readiness-check-item"
+                                class:passed={Boolean(
+                                    inspectingItem.listing?.cat,
+                                )}
+                            >
+                                <span class="indicator"
+                                    >{inspectingItem.listing?.cat
+                                        ? "✓"
+                                        : "○"}</span
+                                >
                                 <span>Category</span>
                             </div>
-                            <div class="readiness-check-item" class:passed={Boolean(inspectingItem.listing?.cid || inspectingItem.listing?.condition)}>
-                                <span class="indicator">{inspectingItem.listing?.cid || inspectingItem.listing?.condition ? "✓" : "○"}</span>
+                            <div
+                                class="readiness-check-item"
+                                class:passed={Boolean(
+                                    inspectingItem.listing?.cid ||
+                                        inspectingItem.listing?.condition,
+                                )}
+                            >
+                                <span class="indicator"
+                                    >{inspectingItem.listing?.cid ||
+                                    inspectingItem.listing?.condition
+                                        ? "✓"
+                                        : "○"}</span
+                                >
                                 <span>Condition</span>
                             </div>
-                            <div class="readiness-check-item" class:passed={!inspectingItem.rulesCheck?.missingRequiredAspects?.length}>
-                                <span class="indicator">{!inspectingItem.rulesCheck?.missingRequiredAspects?.length ? "✓" : "○"}</span>
+                            <div
+                                class="readiness-check-item"
+                                class:passed={!inspectingItem.rulesCheck
+                                    ?.missingRequiredAspects?.length}
+                            >
+                                <span class="indicator"
+                                    >{!inspectingItem.rulesCheck
+                                        ?.missingRequiredAspects?.length
+                                        ? "✓"
+                                        : "○"}</span
+                                >
                                 <span>Aspects</span>
                             </div>
                         </div>
@@ -2260,18 +2775,30 @@
 
                     <div class="inspector-section">
                         {#if inspectingItem.listing?.analysisStatus === "failed" || inspectingItem.listing?.analysisStatus === "timeout" || (inspectingItem.workflowStatus === "needs_review" && inspectingItem.listing?.analysisError)}
-                            <div class="mb-3 p-3 rounded-lg border border-rose-200 bg-rose-50 text-rose-800 text-xs">
-                                <div class="font-bold text-rose-900 mb-1 flex items-center gap-1.5">
-                                    <span>⚠️ Analysis {inspectingItem.listing?.analysisStatus === "timeout" ? "Timed Out" : "Failed"}</span>
+                            <div
+                                class="mb-3 p-3 rounded-lg border border-rose-200 bg-rose-50 text-rose-800 text-xs"
+                            >
+                                <div
+                                    class="font-bold text-rose-900 mb-1 flex items-center gap-1.5"
+                                >
+                                    <span
+                                        >⚠️ Analysis {inspectingItem.listing
+                                            ?.analysisStatus === "timeout"
+                                            ? "Timed Out"
+                                            : "Failed"}</span
+                                    >
                                 </div>
                                 <p class="mb-2 leading-relaxed">
-                                    {inspectingItem.listing?.analysisError || "Analysis could not complete. Please retry shortly."}
+                                    {inspectingItem.listing?.analysisError ||
+                                        "Analysis could not complete. Please retry shortly."}
                                 </p>
                                 <button
                                     type="button"
                                     class="px-3 py-1.5 text-xs font-bold rounded bg-rose-600 text-white hover:bg-rose-700 transition"
-                                    on:click={() => analyzeWorkspaceItem(inspectingItem.id)}
-                                    disabled={actionLoading || !inspectingItem.photos?.length}
+                                    on:click={() =>
+                                        analyzeWorkspaceItem(inspectingItem.id)}
+                                    disabled={actionLoading ||
+                                        !inspectingItem.photos?.length}
                                 >
                                     ↻ Retry Analysis
                                 </button>
@@ -2280,26 +2807,43 @@
                         <button
                             type="button"
                             class="action-btn-primary w-full"
-                            on:click={() => analyzeWorkspaceItem(inspectingItem.id)}
-                            disabled={actionLoading || !inspectingItem.photos?.length}
+                            on:click={() =>
+                                analyzeWorkspaceItem(inspectingItem.id)}
+                            disabled={actionLoading ||
+                                !inspectingItem.photos?.length}
                         >
                             {actionLoading
                                 ? "Queueing photo analysis..."
-                                : (inspectingItem.listing?.analysisStatus === "failed" || inspectingItem.listing?.analysisStatus === "timeout"
-                                    ? "Retry photo analysis & price"
-                                    : "Analyze photos & estimate price")}
+                                : inspectingItem.listing?.analysisStatus ===
+                                        "failed" ||
+                                    inspectingItem.listing?.analysisStatus ===
+                                        "timeout"
+                                  ? "Retry photo analysis & price"
+                                  : "Analyze photos & estimate price"}
                         </button>
                         <p class="text-xs text-slate-500 mt-2">
-                            Runs the existing vision worker from Workspace. No Analyze-tab upload is required.
+                            Runs the existing vision worker from Workspace. No
+                            Analyze-tab upload is required.
                         </p>
                     </div>
 
                     <!-- Title & SKU Section -->
                     <div class="inspector-section">
                         <div class="flex items-center justify-between mb-1">
-                            <h4 class="inspector-section-title mb-0">Title & SKU</h4>
-                            <span class="text-xs font-semibold" class:text-rose-600={(inspectingItem.listing?.title || "").length > 80} class:text-slate-500={(inspectingItem.listing?.title || "").length <= 80}>
-                                {(inspectingItem.listing?.title || "").length}/80 chars
+                            <h4 class="inspector-section-title mb-0">
+                                Title & SKU
+                            </h4>
+                            <span
+                                class="text-xs font-semibold"
+                                class:text-rose-600={(
+                                    inspectingItem.listing?.title || ""
+                                ).length > 80}
+                                class:text-slate-500={(
+                                    inspectingItem.listing?.title || ""
+                                ).length <= 80}
+                            >
+                                {(inspectingItem.listing?.title || "")
+                                    .length}/80 chars
                             </span>
                         </div>
                         <input
@@ -2309,21 +2853,40 @@
                             value={inspectingItem.listing?.title || ""}
                             maxlength="80"
                             on:input={(e) => {
-                                handleInlineEdit(inspectingItem, "title", e.target.value);
-                                handleInlineEdit(inspectingItem, "confirmField", "title");
+                                handleInlineEdit(
+                                    inspectingItem,
+                                    "title",
+                                    e.target.value,
+                                );
+                                handleInlineEdit(
+                                    inspectingItem,
+                                    "confirmField",
+                                    "title",
+                                );
                             }}
                         />
                         {#if (inspectingItem.titleCandidates || []).length > 1}
                             <div class="mt-1">
-                                <span class="text-[11px] text-slate-500 font-medium">Alternative suggested titles:</span>
+                                <span
+                                    class="text-[11px] text-slate-500 font-medium"
+                                    >Alternative suggested titles:</span
+                                >
                                 <div class="flex flex-col gap-1 mt-1">
                                     {#each inspectingItem.titleCandidates as cand}
                                         <button
                                             type="button"
                                             class="text-left text-xs p-1.5 border rounded hover:bg-slate-50 text-slate-700 transition"
                                             on:click={() => {
-                                                handleInlineEdit(inspectingItem, "title", cand);
-                                                handleInlineEdit(inspectingItem, "confirmField", "title");
+                                                handleInlineEdit(
+                                                    inspectingItem,
+                                                    "title",
+                                                    cand,
+                                                );
+                                                handleInlineEdit(
+                                                    inspectingItem,
+                                                    "confirmField",
+                                                    "title",
+                                                );
                                             }}
                                         >
                                             {cand}
@@ -2333,15 +2896,23 @@
                             </div>
                         {/if}
                         <div class="mt-2">
-                            <label class="block text-xs font-semibold text-slate-600 mb-0.5">
+                            <label
+                                class="block text-xs font-semibold text-slate-600 mb-0.5"
+                            >
                                 Custom Label (SKU)
                                 <input
                                     type="text"
                                     class="w-full text-xs p-1.5 border rounded text-slate-800 mt-0.5"
                                     placeholder="e.g. HHT-2026-001"
-                                    value={inspectingItem.listing?.sku || inspectingItem.sku || ""}
+                                    value={inspectingItem.listing?.sku ||
+                                        inspectingItem.sku ||
+                                        ""}
                                     on:input={(e) => {
-                                        handleInlineEdit(inspectingItem, "sku", e.target.value);
+                                        handleInlineEdit(
+                                            inspectingItem,
+                                            "sku",
+                                            e.target.value,
+                                        );
                                     }}
                                 />
                             </label>
@@ -2351,20 +2922,29 @@
                     <!-- Pricing & Visible Price Tiers (Requirement 8) -->
                     <div class="inspector-section">
                         <div class="flex items-center justify-between mb-1">
-                            <h4 class="inspector-section-title mb-0">Pricing & Tiers</h4>
+                            <h4 class="inspector-section-title mb-0">
+                                Pricing & Tiers
+                            </h4>
                             {#if inspectingItem.sellerConfirmed || inspectingItem.provenance?.price?.sellerConfirmed}
-                                <span class="text-[11px] px-2 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                <span
+                                    class="text-[11px] px-2 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300"
+                                >
                                     ✓ Confirmed
                                 </span>
                             {:else}
-                                <span class="text-[11px] px-2 py-0.5 rounded font-semibold bg-amber-100 text-amber-800 border border-amber-300">
+                                <span
+                                    class="text-[11px] px-2 py-0.5 rounded font-semibold bg-amber-100 text-amber-800 border border-amber-300"
+                                >
                                     AI estimate — verify before approval
                                 </span>
                             {/if}
                         </div>
                         <div class="flex items-center gap-2 mb-2">
                             <div class="relative flex-1">
-                                <span class="absolute left-2.5 top-2 text-slate-400 text-sm">$</span>
+                                <span
+                                    class="absolute left-2.5 top-2 text-slate-400 text-sm"
+                                    >$</span
+                                >
                                 <input
                                     type="number"
                                     step="0.01"
@@ -2373,20 +2953,37 @@
                                     placeholder="0.00"
                                     value={inspectingItem.listing?.price || ""}
                                     on:input={(e) => {
-                                        handleInlineEdit(inspectingItem, "price", parseFloat(e.target.value) || 0);
-                                        handleInlineEdit(inspectingItem, "confirmField", "price");
+                                        handleInlineEdit(
+                                            inspectingItem,
+                                            "price",
+                                            parseFloat(e.target.value) || 0,
+                                        );
+                                        handleInlineEdit(
+                                            inspectingItem,
+                                            "confirmField",
+                                            "price",
+                                        );
                                     }}
                                 />
                             </div>
                             <div class="w-24">
-                                <label class="text-[10px] uppercase font-bold text-slate-500 block">
+                                <label
+                                    class="text-[10px] uppercase font-bold text-slate-500 block"
+                                >
                                     Quantity
                                     <input
                                         type="number"
                                         min="1"
                                         class="w-full text-xs p-1.5 border rounded text-slate-800 mt-0.5"
-                                        value={inspectingItem.listing?.quantity || 1}
-                                        on:input={(e) => handleInlineEdit(inspectingItem, "quantity", parseInt(e.target.value, 10) || 1)}
+                                        value={inspectingItem.listing
+                                            ?.quantity || 1}
+                                        on:input={(e) =>
+                                            handleInlineEdit(
+                                                inspectingItem,
+                                                "quantity",
+                                                parseInt(e.target.value, 10) ||
+                                                    1,
+                                            )}
                                     />
                                 </label>
                             </div>
@@ -2397,45 +2994,96 @@
                                 class="price-tier-btn"
                                 title="Fast inventory turnover"
                                 on:click={() => {
-                                    const p = inspectingItem.quickSalePrice || inspectingItem.pricingTiers?.quickSale?.price || inspectingItem.listing?.price;
+                                    const p =
+                                        inspectingItem.quickSalePrice ||
+                                        inspectingItem.pricingTiers?.quickSale
+                                            ?.price ||
+                                        inspectingItem.listing?.price;
                                     if (p) {
-                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
-                                        handleInlineEdit(inspectingItem, "confirmField", "price");
+                                        handleInlineEdit(
+                                            inspectingItem,
+                                            "price",
+                                            parseFloat(p),
+                                        );
+                                        handleInlineEdit(
+                                            inspectingItem,
+                                            "confirmField",
+                                            "price",
+                                        );
                                     }
                                 }}
                             >
                                 <span class="tier-name">Quick Sale</span>
-                                <span class="tier-val">${inspectingItem.quickSalePrice || inspectingItem.pricingTiers?.quickSale?.price || "--"}</span>
+                                <span class="tier-val"
+                                    >${inspectingItem.quickSalePrice ||
+                                        inspectingItem.pricingTiers?.quickSale
+                                            ?.price ||
+                                        "--"}</span
+                                >
                             </button>
                             <button
                                 type="button"
                                 class="price-tier-btn"
                                 title="Balanced profit and velocity"
                                 on:click={() => {
-                                    const p = inspectingItem.balancedPrice || inspectingItem.pricingTiers?.balanced?.price || inspectingItem.listing?.price;
+                                    const p =
+                                        inspectingItem.balancedPrice ||
+                                        inspectingItem.pricingTiers?.balanced
+                                            ?.price ||
+                                        inspectingItem.listing?.price;
                                     if (p) {
-                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
-                                        handleInlineEdit(inspectingItem, "confirmField", "price");
+                                        handleInlineEdit(
+                                            inspectingItem,
+                                            "price",
+                                            parseFloat(p),
+                                        );
+                                        handleInlineEdit(
+                                            inspectingItem,
+                                            "confirmField",
+                                            "price",
+                                        );
                                     }
                                 }}
                             >
                                 <span class="tier-name">Balanced</span>
-                                <span class="tier-val">${inspectingItem.balancedPrice || inspectingItem.pricingTiers?.balanced?.price || "--"}</span>
+                                <span class="tier-val"
+                                    >${inspectingItem.balancedPrice ||
+                                        inspectingItem.pricingTiers?.balanced
+                                            ?.price ||
+                                        "--"}</span
+                                >
                             </button>
                             <button
                                 type="button"
                                 class="price-tier-btn"
                                 title="Maximum margin"
                                 on:click={() => {
-                                    const p = inspectingItem.premiumPrice || inspectingItem.pricingTiers?.premium?.price || inspectingItem.listing?.price;
+                                    const p =
+                                        inspectingItem.premiumPrice ||
+                                        inspectingItem.pricingTiers?.premium
+                                            ?.price ||
+                                        inspectingItem.listing?.price;
                                     if (p) {
-                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
-                                        handleInlineEdit(inspectingItem, "confirmField", "price");
+                                        handleInlineEdit(
+                                            inspectingItem,
+                                            "price",
+                                            parseFloat(p),
+                                        );
+                                        handleInlineEdit(
+                                            inspectingItem,
+                                            "confirmField",
+                                            "price",
+                                        );
                                     }
                                 }}
                             >
                                 <span class="tier-name">Premium</span>
-                                <span class="tier-val">${inspectingItem.premiumPrice || inspectingItem.pricingTiers?.premium?.price || "--"}</span>
+                                <span class="tier-val"
+                                    >${inspectingItem.premiumPrice ||
+                                        inspectingItem.pricingTiers?.premium
+                                            ?.price ||
+                                        "--"}</span
+                                >
                             </button>
                         </div>
                     </div>
@@ -2443,31 +3091,46 @@
                     <!-- Seller-confirmed condition -->
                     <div class="inspector-section">
                         <div class="flex items-center justify-between mb-1">
-                            <h4 class="inspector-section-title mb-0">Condition</h4>
-                            <span class="text-[11px] text-slate-500">eBay listing condition</span>
+                            <h4 class="inspector-section-title mb-0">
+                                Condition
+                            </h4>
+                            <span class="text-[11px] text-slate-500"
+                                >eBay listing condition</span
+                            >
                         </div>
                         <select
                             class="w-full text-sm p-2 border rounded-md bg-white text-slate-800"
-                            value={inspectingItem.listing?.cid || inspectingItem.listing?.cid_condition || "3000"}
-                            on:change={(e) => setCondition(inspectingItem, e.target.value)}
+                            value={inspectingItem.listing?.cid ||
+                                inspectingItem.listing?.cid_condition ||
+                                "3000"}
+                            on:change={(e) =>
+                                setCondition(inspectingItem, e.target.value)}
                         >
                             <option value="1000">New</option>
                             <option value="3000">Pre-owned</option>
                         </select>
-                        <p class="text-[11px] text-slate-500 mt-1">Choose the value that matches the item before approval.</p>
+                        <p class="text-[11px] text-slate-500 mt-1">
+                            Choose the value that matches the item before
+                            approval.
+                        </p>
                     </div>
                     <!-- eBay Category & Live Aspects (Critical Requirement) -->
                     <div class="inspector-section">
                         <div class="flex items-center justify-between mb-1">
-                            <h4 class="inspector-section-title mb-0">eBay Category</h4>
+                            <h4 class="inspector-section-title mb-0">
+                                eBay Category
+                            </h4>
                             {#if inspectingItem.listing?.cat}
-                                <span class="text-xs font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded border">
+                                <span
+                                    class="text-xs font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded border"
+                                >
                                     ID: {inspectingItem.listing.cat}
                                 </span>
                             {/if}
                         </div>
                         <div class="text-xs text-slate-600 mb-2 font-medium">
-                            {inspectingItem.listing?.categoryName || "(No category selected)"}
+                            {inspectingItem.listing?.categoryName ||
+                                "(No category selected)"}
                         </div>
                         <div class="relative mb-2">
                             <input
@@ -2475,10 +3138,14 @@
                                 class="w-full text-xs p-2 border rounded text-slate-800"
                                 placeholder="Search eBay category (e.g. vintage jacket, boots)..."
                                 bind:value={categoryQuery}
-                                on:input={(e) => searchCategories(e.target.value)}
+                                on:input={(e) =>
+                                    searchCategories(e.target.value)}
                             />
                             {#if categorySearching}
-                                <span class="absolute right-2 top-2 text-[11px] text-slate-400">Searching...</span>
+                                <span
+                                    class="absolute right-2 top-2 text-[11px] text-slate-400"
+                                    >Searching...</span
+                                >
                             {/if}
                             {#if categorySuggestions.length > 0}
                                 <div class="category-suggestions-dropdown">
@@ -2486,10 +3153,19 @@
                                         <button
                                             type="button"
                                             class="sug-item"
-                                            on:click={() => selectCategorySuggestion(inspectingItem, sug)}
+                                            on:click={() =>
+                                                selectCategorySuggestion(
+                                                    inspectingItem,
+                                                    sug,
+                                                )}
                                         >
-                                            <span class="sug-path">{sug.path || sug.categoryName}</span>
-                                            <span class="sug-id">#{sug.categoryId}</span>
+                                            <span class="sug-path"
+                                                >{sug.path ||
+                                                    sug.categoryName}</span
+                                            >
+                                            <span class="sug-id"
+                                                >#{sug.categoryId}</span
+                                            >
                                         </button>
                                     {/each}
                                 </div>
@@ -2499,19 +3175,30 @@
                         <!-- Live Category Aspects -->
                         <div class="category-aspects-container mt-3">
                             <div class="flex items-center justify-between mb-2">
-                                <span class="text-xs font-bold uppercase text-slate-700">eBay Item Specifics</span>
+                                <span
+                                    class="text-xs font-bold uppercase text-slate-700"
+                                    >eBay Item Specifics</span
+                                >
                                 {#if categoryAspectsLoading}
-                                    <span class="text-[11px] text-blue-600 animate-pulse">Loading live options...</span>
+                                    <span
+                                        class="text-[11px] text-blue-600 animate-pulse"
+                                        >Loading live options...</span
+                                    >
                                 {/if}
                             </div>
 
                             {#if categoryAspectsError}
-                                <div class="p-2.5 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-900 mb-2 flex items-center justify-between">
+                                <div
+                                    class="p-2.5 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-900 mb-2 flex items-center justify-between"
+                                >
                                     <span>{categoryAspectsError}</span>
                                     <button
                                         type="button"
                                         class="px-2 py-1 bg-amber-200 hover:bg-amber-300 rounded font-semibold text-[11px]"
-                                        on:click={() => loadCategoryAspects(inspectingItem.listing?.cat)}
+                                        on:click={() =>
+                                            loadCategoryAspects(
+                                                inspectingItem.listing?.cat,
+                                            )}
                                     >
                                         Retry
                                     </button>
@@ -2519,33 +3206,85 @@
                             {/if}
 
                             {#if categoryAspects.length > 0}
-                                {@const reqAspects = categoryAspects.filter((a) => a.required)}
-                                {@const recAspects = categoryAspects.filter((a) => a.recommended && !a.required)}
+                                {@const reqAspects = categoryAspects.filter(
+                                    (a) => a.required,
+                                )}
+                                {@const recAspects = categoryAspects.filter(
+                                    (a) => a.recommended && !a.required,
+                                )}
 
                                 {#if reqAspects.length > 0}
                                     <div class="aspect-group mb-3">
-                                        <span class="text-[11px] font-bold text-rose-700 uppercase tracking-wide block mb-1.5">
+                                        <span
+                                            class="text-[11px] font-bold text-rose-700 uppercase tracking-wide block mb-1.5"
+                                        >
                                             Required by eBay ({reqAspects.length})
                                         </span>
                                         <div class="space-y-2">
                                             {#each reqAspects as aspect}
-                                                {@const aVal = getAspectValue(inspectingItem, aspect.name)}
-                                                {@const aProv = getAspectProvenance(inspectingItem, aspect)}
-                                                <div class="aspect-field-card border-rose-200 bg-rose-50/20">
-                                                    <div class="flex items-center justify-between mb-1">
-                                                        <span class="text-xs font-bold text-slate-800">{aspect.name} *</span>
-                                                        <span class="text-[10px] px-1.5 py-0.5 rounded border {aProv.color}">{aProv.label}</span>
+                                                {@const aVal = getAspectValue(
+                                                    inspectingItem,
+                                                    aspect.name,
+                                                )}
+                                                {@const aProv =
+                                                    getAspectProvenance(
+                                                        inspectingItem,
+                                                        aspect,
+                                                    )}
+                                                <div
+                                                    class="aspect-field-card border-rose-200 bg-rose-50/20"
+                                                >
+                                                    <div
+                                                        class="flex items-center justify-between mb-1"
+                                                    >
+                                                        <span
+                                                            class="text-xs font-bold text-slate-800"
+                                                            >{aspect.name} *</span
+                                                        >
+                                                        <span
+                                                            class="text-[10px] px-1.5 py-0.5 rounded border {aProv.color}"
+                                                            >{aProv.label}</span
+                                                        >
                                                     </div>
                                                     {#if aspect.values && aspect.values.length > 0}
                                                         {#if aspect.multiSelect}
-                                                            <div class="flex flex-wrap gap-1 mt-1">
+                                                            <div
+                                                                class="flex flex-wrap gap-1 mt-1"
+                                                            >
                                                                 {#each aspect.values as optVal}
-                                                                    {@const isSelected = Array.isArray(aVal) ? aVal.includes(optVal) : String(aVal || "").split("|").map(s => s.trim()).includes(optVal)}
+                                                                    {@const isSelected =
+                                                                        Array.isArray(
+                                                                            aVal,
+                                                                        )
+                                                                            ? aVal.includes(
+                                                                                  optVal,
+                                                                              )
+                                                                            : String(
+                                                                                  aVal ||
+                                                                                      "",
+                                                                              )
+                                                                                  .split(
+                                                                                      "|",
+                                                                                  )
+                                                                                  .map(
+                                                                                      (
+                                                                                          s,
+                                                                                      ) =>
+                                                                                          s.trim(),
+                                                                                  )
+                                                                                  .includes(
+                                                                                      optVal,
+                                                                                  )}
                                                                     <button
                                                                         type="button"
                                                                         class="aspect-val-pill"
                                                                         class:selected={isSelected}
-                                                                        on:click={() => toggleMultiAspectValue(inspectingItem, aspect.name, optVal)}
+                                                                        on:click={() =>
+                                                                            toggleMultiAspectValue(
+                                                                                inspectingItem,
+                                                                                aspect.name,
+                                                                                optVal,
+                                                                            )}
                                                                     >
                                                                         {optVal}
                                                                     </button>
@@ -2553,13 +3292,21 @@
                                                             </div>
                                                         {:else}
                                                             {#if aspect.values && aspect.values.length > 0}
-                                                                <div class="flex flex-wrap gap-1 mb-1.5">
+                                                                <div
+                                                                    class="flex flex-wrap gap-1 mb-1.5"
+                                                                >
                                                                     {#each aspect.values.slice(0, 5) as optVal}
                                                                         <button
                                                                             type="button"
                                                                             class="aspect-val-pill text-[10px] py-0.5 px-2"
-                                                                            class:selected={aVal === optVal}
-                                                                            on:click={() => setAspectValue(inspectingItem, aspect.name, optVal)}
+                                                                            class:selected={aVal ===
+                                                                                optVal}
+                                                                            on:click={() =>
+                                                                                setAspectValue(
+                                                                                    inspectingItem,
+                                                                                    aspect.name,
+                                                                                    optVal,
+                                                                                )}
                                                                         >
                                                                             {optVal}
                                                                         </button>
@@ -2568,14 +3315,29 @@
                                                             {/if}
                                                             <input
                                                                 class="w-full text-xs p-1.5 border rounded bg-white"
-                                                                list={aspectListId(aspect.name)}
+                                                                list={aspectListId(
+                                                                    aspect.name,
+                                                                )}
                                                                 value={aVal}
                                                                 placeholder={`Search or select ${aspect.name}`}
-                                                                on:input={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                                on:input={(e) =>
+                                                                    setAspectValue(
+                                                                        inspectingItem,
+                                                                        aspect.name,
+                                                                        e.target
+                                                                            .value,
+                                                                    )}
                                                             />
-                                                            <datalist id={aspectListId(aspect.name)}>
+                                                            <datalist
+                                                                id={aspectListId(
+                                                                    aspect.name,
+                                                                )}
+                                                            >
                                                                 {#each aspect.values as optVal}
-                                                                    <option value={optVal}>{optVal}</option>
+                                                                    <option
+                                                                        value={optVal}
+                                                                        >{optVal}</option
+                                                                    >
                                                                 {/each}
                                                             </datalist>
                                                         {/if}
@@ -2585,7 +3347,13 @@
                                                             class="w-full text-xs p-1.5 border rounded bg-white"
                                                             placeholder={`Enter ${aspect.name}...`}
                                                             value={aVal}
-                                                            on:input={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                            on:input={(e) =>
+                                                                setAspectValue(
+                                                                    inspectingItem,
+                                                                    aspect.name,
+                                                                    e.target
+                                                                        .value,
+                                                                )}
                                                         />
                                                     {/if}
                                                 </div>
@@ -2596,28 +3364,74 @@
 
                                 {#if recAspects.length > 0}
                                     <div class="aspect-group mb-3">
-                                        <span class="text-[11px] font-bold text-slate-600 uppercase tracking-wide block mb-1.5">
+                                        <span
+                                            class="text-[11px] font-bold text-slate-600 uppercase tracking-wide block mb-1.5"
+                                        >
                                             Recommended Specifics ({recAspects.length})
                                         </span>
                                         <div class="space-y-2">
                                             {#each recAspects.slice(0, 10) as aspect}
-                                                {@const aVal = getAspectValue(inspectingItem, aspect.name)}
-                                                {@const aProv = getAspectProvenance(inspectingItem, aspect)}
+                                                {@const aVal = getAspectValue(
+                                                    inspectingItem,
+                                                    aspect.name,
+                                                )}
+                                                {@const aProv =
+                                                    getAspectProvenance(
+                                                        inspectingItem,
+                                                        aspect,
+                                                    )}
                                                 <div class="aspect-field-card">
-                                                    <div class="flex items-center justify-between mb-1">
-                                                        <span class="text-xs font-semibold text-slate-700">{aspect.name}</span>
-                                                        <span class="text-[10px] px-1.5 py-0.5 rounded border {aProv.color}">{aProv.label}</span>
+                                                    <div
+                                                        class="flex items-center justify-between mb-1"
+                                                    >
+                                                        <span
+                                                            class="text-xs font-semibold text-slate-700"
+                                                            >{aspect.name}</span
+                                                        >
+                                                        <span
+                                                            class="text-[10px] px-1.5 py-0.5 rounded border {aProv.color}"
+                                                            >{aProv.label}</span
+                                                        >
                                                     </div>
                                                     {#if aspect.values && aspect.values.length > 0}
                                                         {#if aspect.multiSelect}
-                                                            <div class="flex flex-wrap gap-1 mt-1">
+                                                            <div
+                                                                class="flex flex-wrap gap-1 mt-1"
+                                                            >
                                                                 {#each aspect.values.slice(0, 12) as optVal}
-                                                                    {@const isSelected = Array.isArray(aVal) ? aVal.includes(optVal) : String(aVal || "").split("|").map(s => s.trim()).includes(optVal)}
+                                                                    {@const isSelected =
+                                                                        Array.isArray(
+                                                                            aVal,
+                                                                        )
+                                                                            ? aVal.includes(
+                                                                                  optVal,
+                                                                              )
+                                                                            : String(
+                                                                                  aVal ||
+                                                                                      "",
+                                                                              )
+                                                                                  .split(
+                                                                                      "|",
+                                                                                  )
+                                                                                  .map(
+                                                                                      (
+                                                                                          s,
+                                                                                      ) =>
+                                                                                          s.trim(),
+                                                                                  )
+                                                                                  .includes(
+                                                                                      optVal,
+                                                                                  )}
                                                                     <button
                                                                         type="button"
                                                                         class="aspect-val-pill"
                                                                         class:selected={isSelected}
-                                                                        on:click={() => toggleMultiAspectValue(inspectingItem, aspect.name, optVal)}
+                                                                        on:click={() =>
+                                                                            toggleMultiAspectValue(
+                                                                                inspectingItem,
+                                                                                aspect.name,
+                                                                                optVal,
+                                                                            )}
                                                                     >
                                                                         {optVal}
                                                                     </button>
@@ -2625,13 +3439,21 @@
                                                             </div>
                                                         {:else}
                                                             {#if aspect.values && aspect.values.length > 0}
-                                                                <div class="flex flex-wrap gap-1 mb-1.5">
+                                                                <div
+                                                                    class="flex flex-wrap gap-1 mb-1.5"
+                                                                >
                                                                     {#each aspect.values.slice(0, 5) as optVal}
                                                                         <button
                                                                             type="button"
                                                                             class="aspect-val-pill text-[10px] py-0.5 px-2"
-                                                                            class:selected={aVal === optVal}
-                                                                            on:click={() => setAspectValue(inspectingItem, aspect.name, optVal)}
+                                                                            class:selected={aVal ===
+                                                                                optVal}
+                                                                            on:click={() =>
+                                                                                setAspectValue(
+                                                                                    inspectingItem,
+                                                                                    aspect.name,
+                                                                                    optVal,
+                                                                                )}
                                                                         >
                                                                             {optVal}
                                                                         </button>
@@ -2640,14 +3462,29 @@
                                                             {/if}
                                                             <input
                                                                 class="w-full text-xs p-1.5 border rounded bg-white"
-                                                                list={aspectListId(aspect.name)}
+                                                                list={aspectListId(
+                                                                    aspect.name,
+                                                                )}
                                                                 value={aVal}
                                                                 placeholder={`Search or select ${aspect.name}`}
-                                                                on:input={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                                on:input={(e) =>
+                                                                    setAspectValue(
+                                                                        inspectingItem,
+                                                                        aspect.name,
+                                                                        e.target
+                                                                            .value,
+                                                                    )}
                                                             />
-                                                            <datalist id={aspectListId(aspect.name)}>
+                                                            <datalist
+                                                                id={aspectListId(
+                                                                    aspect.name,
+                                                                )}
+                                                            >
                                                                 {#each aspect.values as optVal}
-                                                                    <option value={optVal}>{optVal}</option>
+                                                                    <option
+                                                                        value={optVal}
+                                                                        >{optVal}</option
+                                                                    >
                                                                 {/each}
                                                             </datalist>
                                                         {/if}
@@ -2657,7 +3494,13 @@
                                                             class="w-full text-xs p-1.5 border rounded bg-white"
                                                             placeholder={`Enter ${aspect.name}...`}
                                                             value={aVal}
-                                                            on:input={(e) => setAspectValue(inspectingItem, aspect.name, e.target.value)}
+                                                            on:input={(e) =>
+                                                                setAspectValue(
+                                                                    inspectingItem,
+                                                                    aspect.name,
+                                                                    e.target
+                                                                        .value,
+                                                                )}
                                                         />
                                                     {/if}
                                                 </div>
@@ -2898,7 +3741,9 @@
                     on:click={approveSelected}
                     disabled={actionLoading}
                 >
-                    Approve selected ({selectedItemIds.size > 0 ? selectedItemIds.size : items.filter(it => it.rulesCheck?.valid).length})
+                    Approve selected ({selectedItemIds.size > 0
+                        ? selectedItemIds.size
+                        : items.filter((it) => it.rulesCheck?.valid).length})
                 </button>
             {:else if allApproved}
                 <div style="display: flex; gap: 8px; align-items: center;">
@@ -2917,7 +3762,9 @@
                         on:click={handleDownloadDraftCsv}
                         disabled={exportCsvLoading}
                     >
-                        {exportCsvLoading ? "Generating CSV..." : "Download Seller Hub Draft CSV"}
+                        {exportCsvLoading
+                            ? "Generating CSV..."
+                            : "Download Seller Hub Draft CSV"}
                     </button>
                 </div>
             {:else if allSubmitted}
@@ -2936,7 +3783,9 @@
                     on:click={validateSelected}
                     disabled={actionLoading || items.length === 0}
                 >
-                    Validate selected ({selectedItemIds.size > 0 ? selectedItemIds.size : items.length})
+                    Validate selected ({selectedItemIds.size > 0
+                        ? selectedItemIds.size
+                        : items.length})
                 </button>
             {/if}
 
@@ -2948,7 +3797,9 @@
                     on:click={handleDownloadDraftCsv}
                     disabled={exportCsvLoading}
                 >
-                    {exportCsvLoading ? "Generating CSV..." : `Download Seller Hub Draft CSV (${approvedCount} approved)`}
+                    {exportCsvLoading
+                        ? "Generating CSV..."
+                        : `Download Seller Hub Draft CSV (${approvedCount} approved)`}
                 </button>
             {/if}
         </div>
@@ -3204,26 +4055,41 @@
         >
             <div class="modal-header">
                 <div>
-                    <h3 id="template-modal-title" class="text-lg font-bold text-slate-900">
+                    <h3
+                        id="template-modal-title"
+                        class="text-lg font-bold text-slate-900"
+                    >
                         Official eBay Seller Hub Draft Template
                     </h3>
                     <p class="text-xs text-slate-500">
-                        Configure source schema for Seller Hub Reports Draft CSV exports
+                        Configure source schema for Seller Hub Reports Draft CSV
+                        exports
                     </p>
                 </div>
                 <button
                     class="close-btn"
                     aria-label="Close modal"
-                    on:click={() => (isTemplateModalOpen = false)}
-                >✕</button>
+                    on:click={() => (isTemplateModalOpen = false)}>✕</button
+                >
             </div>
             <div class="modal-body space-y-4">
-                <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900 space-y-1.5">
-                    <p class="font-bold">How to download the current eBay template:</p>
+                <div
+                    class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900 space-y-1.5"
+                >
+                    <p class="font-bold">
+                        How to download the current eBay template:
+                    </p>
                     <ol class="list-decimal pl-4 space-y-1">
-                        <li>Go to <strong>eBay Seller Hub → Reports → Upload</strong></li>
+                        <li>
+                            Go to <strong
+                                >eBay Seller Hub → Reports → Upload</strong
+                            >
+                        </li>
                         <li>Click <strong>Get template</strong></li>
-                        <li>Select <strong>Listings</strong> → <strong>Create drafts template</strong></li>
+                        <li>
+                            Select <strong>Listings</strong> →
+                            <strong>Create drafts template</strong>
+                        </li>
                         <li>Download the CSV file and select it below</li>
                     </ol>
                 </div>
@@ -3239,12 +4105,19 @@
                     </label>
                 </div>
                 {#if templateFileName}
-                    <div class="p-2 bg-emerald-50 border border-emerald-200 rounded text-xs text-emerald-800">
-                        Active configured template: <strong>{templateFileName}</strong>
+                    <div
+                        class="p-2 bg-emerald-50 border border-emerald-200 rounded text-xs text-emerald-800"
+                    >
+                        Active configured template: <strong
+                            >{templateFileName}</strong
+                        >
                     </div>
                 {:else}
-                    <div class="p-2 bg-slate-50 border border-slate-200 rounded text-xs text-slate-600">
-                        Using built-in official eBay Seller Hub Drafts schema with standard eBay headers and #INFO metadata.
+                    <div
+                        class="p-2 bg-slate-50 border border-slate-200 rounded text-xs text-slate-600"
+                    >
+                        Using built-in official eBay Seller Hub Drafts schema
+                        with standard eBay headers and #INFO metadata.
                     </div>
                 {/if}
             </div>
@@ -3281,48 +4154,81 @@
                 <button
                     class="close-btn"
                     aria-label="Close modal"
-                    on:click={() => (isDraftResultModalOpen = false)}
-                >✕</button>
+                    on:click={() => (isDraftResultModalOpen = false)}>✕</button
+                >
             </div>
             <div class="modal-body space-y-4">
-                <div class="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-center">
+                <div
+                    class="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-center"
+                >
                     <div class="text-3xl mb-1">🎉</div>
                     <h4 class="text-base font-bold text-emerald-900">
                         eBay Drafts Created Successfully!
                     </h4>
                     <p class="text-xs text-emerald-700 mt-1">
-                        Your approved listings have been sent directly to eBay Seller Hub as drafts.
+                        Your approved listings have been sent directly to eBay
+                        Seller Hub as drafts.
                     </p>
                 </div>
 
-                <div class="bg-slate-50 p-3.5 rounded-lg border border-slate-200 text-xs space-y-2.5">
-                    <div class="flex justify-between items-center pb-1.5 border-b border-slate-200/70">
+                <div
+                    class="bg-slate-50 p-3.5 rounded-lg border border-slate-200 text-xs space-y-2.5"
+                >
+                    <div
+                        class="flex justify-between items-center pb-1.5 border-b border-slate-200/70"
+                    >
                         <span class="text-slate-500 font-medium">Batch:</span>
-                        <strong class="text-slate-800">{selectedBatch?.name || "Active Batch"}</strong>
+                        <strong class="text-slate-800"
+                            >{selectedBatch?.name || "Active Batch"}</strong
+                        >
                     </div>
-                    <div class="flex justify-between items-center pb-1.5 border-b border-slate-200/70">
-                        <span class="text-slate-500 font-medium">Drafts Submitted:</span>
-                        <strong class="text-emerald-700 font-bold">{lastDraftResult?.submittedCount || submittedCount || approvedCount} item(s)</strong>
+                    <div
+                        class="flex justify-between items-center pb-1.5 border-b border-slate-200/70"
+                    >
+                        <span class="text-slate-500 font-medium"
+                            >Drafts Submitted:</span
+                        >
+                        <strong class="text-emerald-700 font-bold"
+                            >{lastDraftResult?.submittedCount ||
+                                submittedCount ||
+                                approvedCount} item(s)</strong
+                        >
                     </div>
                     {#if lastDraftResult?.feedTaskId}
-                        <div class="flex justify-between items-center pb-1.5 border-b border-slate-200/70">
-                            <span class="text-slate-500 font-medium">eBay Feed Task ID:</span>
-                            <span class="font-mono text-slate-800 bg-white px-1.5 py-0.5 rounded border border-slate-200">{lastDraftResult.feedTaskId}</span>
+                        <div
+                            class="flex justify-between items-center pb-1.5 border-b border-slate-200/70"
+                        >
+                            <span class="text-slate-500 font-medium"
+                                >eBay Feed Task ID:</span
+                            >
+                            <span
+                                class="font-mono text-slate-800 bg-white px-1.5 py-0.5 rounded border border-slate-200"
+                                >{lastDraftResult.feedTaskId}</span
+                            >
                         </div>
                     {/if}
                     <div class="flex justify-between items-center">
                         <span class="text-slate-500 font-medium">Mode:</span>
-                        <span class="text-emerald-800 font-semibold bg-emerald-100/60 px-2 py-0.5 rounded">
+                        <span
+                            class="text-emerald-800 font-semibold bg-emerald-100/60 px-2 py-0.5 rounded"
+                        >
                             Seller Hub Draft (No live listings published)
                         </span>
                     </div>
                 </div>
 
-                <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900">
-                    <p class="font-bold mb-1">Where to find your drafts in eBay:</p>
+                <div
+                    class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900"
+                >
+                    <p class="font-bold mb-1">
+                        Where to find your drafts in eBay:
+                    </p>
                     <p class="text-slate-700">
-                        Go to <strong>eBay Seller Hub → Listings → Drafts</strong>.
-                        Your items are pre-populated with titles, prices, categories, and item specifics ready for you to schedule or publish whenever you want.
+                        Go to <strong
+                            >eBay Seller Hub → Listings → Drafts</strong
+                        >. Your items are pre-populated with titles, prices,
+                        categories, and item specifics ready for you to schedule
+                        or publish whenever you want.
                     </p>
                 </div>
             </div>
@@ -3334,7 +4240,9 @@
                     on:click={handleDownloadDraftCsv}
                     disabled={exportCsvLoading}
                 >
-                    {exportCsvLoading ? "Generating CSV..." : "Download Backup CSV"}
+                    {exportCsvLoading
+                        ? "Generating CSV..."
+                        : "Download Backup CSV"}
                 </button>
                 <button
                     type="button"
@@ -3535,7 +4443,10 @@
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
         display: flex;
         flex-direction: column;
-        transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+        transition:
+            transform 0.15s ease,
+            box-shadow 0.15s ease,
+            border-color 0.15s ease;
     }
 
     .listing-card:hover {
@@ -4477,7 +5388,10 @@
         background: #ffffff;
         border: 1px solid #cbd5e1;
         border-radius: 8px;
-        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        box-shadow:
+            0 10px 15px -3px rgba(0, 0, 0, 0.1),
+            0 4px 6px -2px rgba(0, 0, 0, 0.05);
+
         z-index: 50;
         padding: 4px 0;
     }
