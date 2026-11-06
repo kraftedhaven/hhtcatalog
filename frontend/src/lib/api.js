@@ -530,3 +530,110 @@ export async function downloadSellerHubDraftCSV(items, templateCsv = null) {
     triggerDownload(text, 'hht_seller_hub_drafts.csv', 'text/csv');
     return text;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2 Inventory Workspace Additions & Contracts
+// ---------------------------------------------------------------------------
+
+export async function listInventoryBatches() {
+    return inventoryListBatches();
+}
+
+export async function createInventoryBatch(name = 'New inventory', groupingMode = 'auto') {
+    return inventoryCreateBatch(name, groupingMode);
+}
+
+export async function getInventoryBatch(batchId) {
+    return inventoryGetBatch(batchId);
+}
+
+export async function registerInventoryPhotos(batchId, photos) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/photos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photos }),
+    });
+    const body = await parseResponse(res);
+    return body.photos || body.result || [];
+}
+
+export async function createInventoryItem(batchId, payload) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/items`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    const body = await parseResponse(res);
+    return body.item || body.result || body;
+}
+
+export async function updateInventoryItem(itemId, fields) {
+    return inventoryPatchItem(itemId, fields);
+}
+
+export async function updateInventoryItemPhotos(itemId, photoIds, coverPhotoId = null) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}/photos`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photoIds, coverPhotoId }),
+    });
+    const body = await parseResponse(res);
+    return body.item || body.result || body;
+}
+
+export async function applyInventoryAnalysis(itemId, listing, provenance = {}, analysisJobId = '') {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}/analysis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ listing, provenance, analysisJobId }),
+    });
+    const body = await parseResponse(res);
+    return body.item || body.result || body;
+}
+
+export async function approveInventoryItem(itemId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}/approve`, {
+        method: 'POST',
+    });
+    const body = await parseResponse(res);
+    return body.item || body.result || body;
+}
+
+export async function revokeInventoryItemApproval(itemId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}/approve`, {
+        method: 'DELETE',
+    });
+    const body = await parseResponse(res);
+    return body.item || body.result || body;
+}
+
+export async function proposeInventoryGroups(batchId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/group-proposals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+    });
+    const body = await parseResponse(res);
+    return body.proposal || body.result || body;
+}
+
+export async function latestInventoryGroupProposal(batchId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/group-proposals`);
+    const body = await parseResponse(res);
+    return body.proposal || body.result || body;
+}
+
+export async function startInventoryReanalysis(itemId, sellerDefaults = {}) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}/reanalysis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sellerDefaults }),
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryReanalysisStatus(itemId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}/reanalysis`);
+    const body = await parseResponse(res);
+    return body.result || body;
+}

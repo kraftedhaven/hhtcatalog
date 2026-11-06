@@ -1169,14 +1169,21 @@ def inventory_batch_grouping(batch_id):
         return jsonify({"error": err_msg}), 400
 
 
-@app.route("/api/inventory/batches/<batch_id>/items", methods=["GET"])
+@app.route("/api/inventory/batches/<batch_id>/items", methods=["GET", "POST"])
 def inventory_batch_items(batch_id):
     seller_id = getattr(g, "seller_id", None)
     if not seller_id:
         return jsonify({"error": "Seller authentication is required."}), 401
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        try:
+            item = inventory_workspace.create_item(batch_id, str(seller_id), body)
+            return jsonify({"result": item, "item": item}), 201
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
     try:
         items = inventory_workspace.list_batch_items(batch_id, str(seller_id))
-        return jsonify({"result": items})
+        return jsonify({"result": items, "items": items})
     except KeyError as exc:
         return jsonify({"error": str(exc)}), 404
     except ValueError as exc:
@@ -1315,6 +1322,40 @@ def inventory_item_reanalysis(item_id):
         body = request.get_json(silent=True) or {}
         res = inventory_workspace.start_persisted_reanalysis(item_id, str(seller_id), body.get("sellerDefaults") or {})
         return jsonify({"result": res, **res}), 202
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/<item_id>/approve", methods=["POST", "DELETE"])
+def inventory_item_single_approve(item_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    try:
+        if request.method == "DELETE":
+            item = inventory_workspace.revoke_approval(item_id, str(seller_id))
+            return jsonify({"result": item, "item": item})
+        item = inventory_workspace.approve_item(item_id, str(seller_id))
+        return jsonify({"result": item, "item": item})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/<item_id>/analysis", methods=["POST"])
+def inventory_item_apply_analysis(item_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    try:
+        item = inventory_workspace.apply_analysis_result(
+            item_id,
+            str(seller_id),
+            body.get("listing") or {},
+            body.get("provenance") or {},
+            str(body.get("analysisJobId") or ""),
+        )
+        return jsonify({"result": item, "item": item})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 

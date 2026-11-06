@@ -1682,7 +1682,7 @@ def _photo_stem(filename: str) -> str:
 def _perceptual_hash(data: bytes) -> tuple[str, int, int]:
     image = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("L")
     width, height = image.size
-    values = list(image.resize((8, 8)).getdata())
+    values = list(image.resize((8, 8)).tobytes())
     average = sum(values) / len(values) if values else 0
     return "".join("1" if value >= average else "0" for value in values), width, height
 

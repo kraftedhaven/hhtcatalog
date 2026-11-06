@@ -843,15 +843,17 @@ class InventoryWorkspaceTests(unittest.TestCase):
     def test_group_proposal_flags_duplicates_and_persists_without_assigning_photos(self):
         """Phase 2: Group proposals detect duplicates and persist non-destructively without modifying photo assignments."""
         batch = inventory_workspace.create_batch(self.seller_id, grouping_mode="auto")
+        aid1 = f"asset-prop-{uuid.uuid4()}"
+        aid2 = f"asset-prop-{uuid.uuid4()}"
         with commerce_agent.connect() as db:
-            for aid in ("asset-prop-1", "asset-prop-2"):
+            for aid in (aid1, aid2):
                 db.execute(
                     "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES(?, ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, ?, 'https://example.com/' || ?, '2099-01-01T00:00:00Z', ?)",
                     (aid, self.seller_id, aid, aid, "2026-10-15T00:00:00Z"),
                 )
         photos = inventory_workspace.register_photos(batch["id"], self.seller_id, [
-            {"photoAssetId": "asset-prop-1", "filename": "buckeyes_front.jpg", "previewUrl": "https://example.com/asset-prop-1"},
-            {"photoAssetId": "asset-prop-2", "filename": "buckeyes_back.jpg", "previewUrl": "https://example.com/asset-prop-2"},
+            {"photoAssetId": aid1, "filename": "buckeyes_front.jpg", "previewUrl": f"https://example.com/{aid1}"},
+            {"photoAssetId": aid2, "filename": "buckeyes_back.jpg", "previewUrl": f"https://example.com/{aid2}"},
         ])
         from PIL import Image
         import io
@@ -873,12 +875,13 @@ class InventoryWorkspaceTests(unittest.TestCase):
     def test_persisted_reanalysis_fetches_stored_assets_and_reuses_existing_job(self):
         """Phase 2: Reanalysis fetches stored photos and triggers listing analysis job."""
         batch = inventory_workspace.create_batch(self.seller_id)
+        aid = f"asset-re-{uuid.uuid4()}"
         with commerce_agent.connect() as db:
             db.execute(
-                "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES('asset-re', ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, 'sha', 'https://example.com/asset-re', '2099-01-01T00:00:00Z', '2026-10-15T00:00:00Z')",
-                (self.seller_id,),
+                "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES(?, ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, 'sha', 'https://example.com/' || ?, '2099-01-01T00:00:00Z', '2026-10-15T00:00:00Z')",
+                (aid, self.seller_id, aid),
             )
-        photos = inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": "asset-re", "previewUrl": "https://example.com/asset-re"}])
+        photos = inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": aid, "previewUrl": f"https://example.com/{aid}"}])
         item = inventory_workspace.create_item(batch["id"], self.seller_id, {"photoIds": [photos[0]["id"]]})
 
         from PIL import Image
@@ -900,12 +903,13 @@ class InventoryWorkspaceTests(unittest.TestCase):
     def test_completed_persisted_reanalysis_applies_result_without_replacing_confirmation(self):
         """Phase 2: Completed reanalysis strictly preserves seller-confirmed fields."""
         batch = inventory_workspace.create_batch(self.seller_id)
+        aid = f"asset-sync-{uuid.uuid4()}"
         with commerce_agent.connect() as db:
             db.execute(
-                "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES('asset-sync', ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, 'sha', 'https://example.com/asset-sync', '2099-01-01T00:00:00Z', '2026-10-15T00:00:00Z')",
-                (self.seller_id,),
+                "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES(?, ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, 'sha', 'https://example.com/' || ?, '2099-01-01T00:00:00Z', '2026-10-15T00:00:00Z')",
+                (aid, self.seller_id, aid),
             )
-        photos = inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": "asset-sync", "previewUrl": "https://example.com/asset-sync"}])
+        photos = inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": aid, "previewUrl": f"https://example.com/{aid}"}])
         item = inventory_workspace.create_item(batch["id"], self.seller_id, {
             "photoIds": [photos[0]["id"]],
             "listing": {"title": "Seller Confirmed Original Title"},
@@ -934,13 +938,14 @@ class InventoryWorkspaceTests(unittest.TestCase):
         """Phase 2: Seller data isolation prevents accessing another seller's photo assets."""
         batch = inventory_workspace.create_batch(self.seller_id)
         other_seller = str(uuid.uuid4())
+        aid = f"asset-other-{uuid.uuid4()}"
         with commerce_agent.connect() as db:
             db.execute(
-                "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES('asset-other', ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, 'sha', 'https://example.com/asset-other', '2099-01-01T00:00:00Z', '2026-10-15T00:00:00Z')",
-                (other_seller,),
+                "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES(?, ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, 'sha', 'https://example.com/' || ?, '2099-01-01T00:00:00Z', '2026-10-15T00:00:00Z')",
+                (aid, other_seller, aid),
             )
         with self.assertRaises(ValueError):
-            inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": "asset-other"}])
+            inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": aid}])
 
 
 if __name__ == "__main__":

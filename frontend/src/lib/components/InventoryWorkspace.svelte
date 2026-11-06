@@ -19,6 +19,11 @@
         inventoryExportBatchDraftCSV,
         ebayCategorySuggestions,
         ebayCategoryAspects,
+        latestInventoryGroupProposal,
+        proposeInventoryGroups,
+        startInventoryReanalysis,
+        inventoryReanalysisStatus,
+        createInventoryItem,
     } from "$lib/api";
     import {
         formatBytes,
@@ -50,6 +55,10 @@
     let viewMode = "cards";
     let isDraftResultModalOpen = false;
     let lastDraftResult = null;
+
+    // Grouping proposal and re-analysis states (Phase 2)
+    let proposal = null;
+    let reanalyzing = new Set();
 
     // Category aspects state for inspecting item
     let categoryAspects = [];
@@ -229,6 +238,7 @@
                 batches.find((b) => b.id === batchId) ||
                 (await inventoryGetBatch(batchId));
             items = await inventoryListBatchItems(batchId);
+            proposal = await latestInventoryGroupProposal(batchId).catch(() => null);
         } catch (err) {
             globalError = err.message || "Failed to load batch items.";
         } finally {
@@ -1192,6 +1202,76 @@
         }
     }
 
+    async function updateInventoryItem(itemId, fields) {
+        return inventoryPatchItem(itemId, fields);
+    }
+
+    async function suggestGroups() {
+        if (!selectedBatchId) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            proposal = await proposeInventoryGroups(selectedBatchId);
+            globalStatus = "Photo grouping saved. Grouping suggestions are ready for review.";
+        } catch (err) {
+            globalError = err.message || "Failed to generate grouping suggestions.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function applyProposedGroup(group) {
+        if (!selectedBatchId || !group?.photoIds?.length) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            await createInventoryItem(selectedBatchId, {
+                photoIds: group.photoIds,
+                coverPhotoId: group.photoIds[0],
+            });
+            items = await inventoryListBatchItems(selectedBatchId);
+            globalStatus = "Photo grouping saved. The reviewed group was created.";
+        } catch (err) {
+            globalError = err.message || "Failed to save the proposed group.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function reanalyzeItem(item) {
+        if (!item?.id) return;
+        reanalyzing = new Set([...reanalyzing, item.id]);
+        globalError = "";
+        try {
+            await startInventoryReanalysis(item.id);
+            globalStatus = `Re-analyzing stored photos for ${item.listing?.title || item.id}...`;
+            for (let i = 0; i < 30; i++) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                const state = await inventoryReanalysisStatus(item.id).catch(() => null);
+                if (!state || state.status === "completed" || state.status === "failed") {
+                    if (state?.item) {
+                        items = items.map((it) => (it.id === item.id ? { ...it, ...state.item } : it));
+                    } else {
+                        const refreshed = await inventoryGetItem(item.id).catch(() => null);
+                        if (refreshed) {
+                            items = items.map((it) => (it.id === item.id ? refreshed : it));
+                        }
+                    }
+                    if (state?.status === "completed") {
+                        globalStatus = `Re-analysis complete for ${item.listing?.title || item.id}.`;
+                    }
+                    break;
+                }
+            }
+        } catch (err) {
+            globalError = err.message || "Re-analysis failed.";
+        } finally {
+            const next = new Set(reanalyzing);
+            next.delete(item.id);
+            reanalyzing = next;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Title Candidate & Pricing Option Pickers
     // -----------------------------------------------------------------------
@@ -1393,6 +1473,15 @@
             >
 
             <!-- Batch Actions Menu -->
+            <button
+                type="button"
+                class="batch-new-btn"
+                on:click={suggestGroups}
+                disabled={actionLoading || !selectedBatchId}
+                title="Run perceptual analysis to propose item groupings and detect duplicate photos"
+            >
+                Suggest groups
+            </button>
             <div class="batch-actions-dropdown-container">
                 <button
                     type="button"
@@ -1404,6 +1493,16 @@
                 </button>
                 {#if isBatchActionsMenuOpen}
                     <div class="batch-actions-menu">
+                        <button
+                            type="button"
+                            class="menu-item"
+                            on:click={() => {
+                                isBatchActionsMenuOpen = false;
+                                suggestGroups();
+                            }}
+                        >
+                            Suggest groups
+                        </button>
                         <button
                             type="button"
                             class="menu-item"
@@ -1498,6 +1597,30 @@
             </div>
         </div>
     </div>
+
+    <!-- Grouping Proposal Review Panel (Phase 2) -->
+    {#if proposal}
+        <div class="proposal-panel p-4 my-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div class="flex items-center justify-between">
+                <div>
+                    <strong class="text-blue-900 font-semibold">Grouping suggestions require review</strong>
+                    <p class="text-xs text-blue-700">Visual similarity is a proposal only. Duplicate candidates are flagged and never deleted.</p>
+                </div>
+                <button type="button" class="text-xs text-blue-600 hover:underline cursor-pointer" on:click={() => (proposal = null)}>Dismiss</button>
+            </div>
+            {#each proposal.proposal?.groups || [] as group, index}
+                <div class="proposal-row flex items-center justify-between py-2 border-t border-blue-100 text-sm">
+                    <span>Group {index + 1}: {group.photoIds?.length || 0} photo{(group.photoIds?.length || 0) === 1 ? '' : 's'} · confidence {Math.round((group.confidence || 0) * 100)}%</span>
+                    <button type="button" class="px-2 py-1 text-xs bg-white border border-blue-300 rounded hover:bg-blue-50 cursor-pointer" on:click={() => applyProposedGroup(group)}>Use this group</button>
+                </div>
+            {/each}
+            {#if proposal.duplicateCandidates?.length}
+                <div class="duplicate-warning text-xs text-amber-800 font-medium mt-2">
+                    {proposal.duplicateCandidates.length} possible duplicate pair{proposal.duplicateCandidates.length === 1 ? '' : 's'} flagged for review.
+                </div>
+            {/if}
+        </div>
+    {/if}
 
     <!-- Batch Lifecycle Summary Bar -->
     <div class="batch-lifecycle-summary">

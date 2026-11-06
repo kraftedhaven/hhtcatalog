@@ -349,6 +349,7 @@ def _ensure_inventory_workspace_schema(db: _Database) -> None:
             title_candidates_json TEXT NOT NULL DEFAULT '{}',
             analysis_job_id TEXT NOT NULL DEFAULT '',
             seller_confirmed INTEGER NOT NULL DEFAULT 0,
+            seller_confirmed_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -363,6 +364,31 @@ def _ensure_inventory_workspace_schema(db: _Database) -> None:
             position INTEGER NOT NULL DEFAULT 0,
             is_cover INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS inventory_photo_signatures (
+            id TEXT PRIMARY KEY,
+            photo_id TEXT NOT NULL UNIQUE REFERENCES inventory_item_photos(id) ON DELETE CASCADE,
+            seller_id TEXT NOT NULL REFERENCES sellers(id),
+            exact_checksum TEXT NOT NULL DEFAULT '',
+            perceptual_hash TEXT NOT NULL DEFAULT '',
+            width INTEGER,
+            height INTEGER,
+            access_status TEXT NOT NULL DEFAULT 'ok',
+            access_error TEXT NOT NULL DEFAULT '',
+            checked_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS inventory_group_proposals (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES inventory_batches(id) ON DELETE CASCADE,
+            seller_id TEXT NOT NULL REFERENCES sellers(id),
+            status TEXT NOT NULL DEFAULT 'proposed',
+            method TEXT NOT NULL DEFAULT 'visual_similarity',
+            confidence REAL NOT NULL DEFAULT 0,
+            proposal_json TEXT NOT NULL DEFAULT '{}',
+            duplicate_candidates_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT,
+            reviewed_by TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS inventory_submissions (
             id TEXT PRIMARY KEY,
@@ -381,8 +407,13 @@ def _ensure_inventory_workspace_schema(db: _Database) -> None:
         CREATE INDEX IF NOT EXISTS inventory_item_photos_batch_idx ON inventory_item_photos(batch_id, position);
         CREATE INDEX IF NOT EXISTS inventory_item_photos_item_idx ON inventory_item_photos(item_id, position);
         CREATE INDEX IF NOT EXISTS inventory_submissions_item_idx ON inventory_submissions(item_id, created_at);
+        CREATE INDEX IF NOT EXISTS inventory_group_proposals_batch_idx ON inventory_group_proposals(seller_id, batch_id, created_at);
+        CREATE INDEX IF NOT EXISTS inventory_photo_signatures_seller_idx ON inventory_photo_signatures(seller_id, checked_at);
         """
     )
+    item_cols = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(inventory_items)").fetchall()}
+    if "seller_confirmed_json" not in item_cols:
+        db.execute("ALTER TABLE inventory_items ADD COLUMN seller_confirmed_json TEXT NOT NULL DEFAULT '{}'")
 
 
 def ebay_scope_status() -> dict[str, Any]:
