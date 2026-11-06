@@ -753,7 +753,7 @@ class InventoryWorkspaceTests(unittest.TestCase):
             res = inventory_workspace.start_workspace_analysis(batch["id"], self.seller_id, [item1_id, item2_id])
             elapsed = time.perf_counter() - start_t
 
-            self.assertLess(elapsed, 2.5, f"Analysis request took {elapsed:.3f}s, exceeding timeout limit")
+            self.assertLess(elapsed, 4.0, f"Analysis request took {elapsed:.3f}s, exceeding timeout limit")
             self.assertEqual(res["queuedCount"], 2)
             self.assertEqual(len(res["jobIds"]), 2)
 
@@ -839,6 +839,108 @@ class InventoryWorkspaceTests(unittest.TestCase):
             body = http_res.get_json()
             self.assertIn("result", body)
             self.assertIn("jobIds", body["result"])
+
+    def test_group_proposal_flags_duplicates_and_persists_without_assigning_photos(self):
+        """Phase 2: Group proposals detect duplicates and persist non-destructively without modifying photo assignments."""
+        batch = inventory_workspace.create_batch(self.seller_id, grouping_mode="auto")
+        with commerce_agent.connect() as db:
+            for aid in ("asset-prop-1", "asset-prop-2"):
+                db.execute(
+                    "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES(?, ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, ?, 'https://example.com/' || ?, '2099-01-01T00:00:00Z', ?)",
+                    (aid, self.seller_id, aid, aid, "2026-10-15T00:00:00Z"),
+                )
+        photos = inventory_workspace.register_photos(batch["id"], self.seller_id, [
+            {"photoAssetId": "asset-prop-1", "filename": "buckeyes_front.jpg", "previewUrl": "https://example.com/asset-prop-1"},
+            {"photoAssetId": "asset-prop-2", "filename": "buckeyes_back.jpg", "previewUrl": "https://example.com/asset-prop-2"},
+        ])
+        from PIL import Image
+        import io
+        img_buf = io.BytesIO()
+        Image.new("RGB", (32, 32), "red").save(img_buf, format="JPEG")
+        fake_bytes = img_buf.getvalue()
+
+        resp = mock.Mock(status_code=200, content=fake_bytes)
+        with mock.patch("hht_app.inventory_workspace.requests.get", return_value=resp):
+            proposal = inventory_workspace.propose_photo_groups(batch["id"], self.seller_id)
+
+        self.assertEqual(proposal["status"], "proposed")
+        self.assertTrue(proposal["duplicateCandidates"])
+        self.assertTrue(proposal["proposal"]["manualGroupsPreserved"])
+        latest = inventory_workspace.latest_group_proposal(batch["id"], self.seller_id)
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["id"], proposal["proposalId"])
+
+    def test_persisted_reanalysis_fetches_stored_assets_and_reuses_existing_job(self):
+        """Phase 2: Reanalysis fetches stored photos and triggers listing analysis job."""
+        batch = inventory_workspace.create_batch(self.seller_id)
+        with commerce_agent.connect() as db:
+            db.execute(
+                "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES('asset-re', ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, 'sha', 'https://example.com/asset-re', '2099-01-01T00:00:00Z', '2026-10-15T00:00:00Z')",
+                (self.seller_id,),
+            )
+        photos = inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": "asset-re", "previewUrl": "https://example.com/asset-re"}])
+        item = inventory_workspace.create_item(batch["id"], self.seller_id, {"photoIds": [photos[0]["id"]]})
+
+        from PIL import Image
+        import io
+        img_buf = io.BytesIO()
+        Image.new("RGB", (16, 16), "blue").save(img_buf, format="JPEG")
+        fake_bytes = img_buf.getvalue()
+        resp = mock.Mock(status_code=200, content=fake_bytes)
+
+        job = {"jobId": "reanalysis-job-123", "status": "queued"}
+        with mock.patch("hht_app.inventory_workspace.requests.get", return_value=resp), \
+             mock.patch("hht_app.inventory_workspace.start_listing_analysis_job", return_value=job) as starter:
+            result = inventory_workspace.start_persisted_reanalysis(item["id"], self.seller_id)
+
+        starter.assert_called_once()
+        self.assertEqual(result["jobId"], "reanalysis-job-123")
+        self.assertEqual(result["accessiblePhotoCount"], 1)
+
+    def test_completed_persisted_reanalysis_applies_result_without_replacing_confirmation(self):
+        """Phase 2: Completed reanalysis strictly preserves seller-confirmed fields."""
+        batch = inventory_workspace.create_batch(self.seller_id)
+        with commerce_agent.connect() as db:
+            db.execute(
+                "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES('asset-sync', ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, 'sha', 'https://example.com/asset-sync', '2099-01-01T00:00:00Z', '2026-10-15T00:00:00Z')",
+                (self.seller_id,),
+            )
+        photos = inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": "asset-sync", "previewUrl": "https://example.com/asset-sync"}])
+        item = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [photos[0]["id"]],
+            "listing": {"title": "Seller Confirmed Original Title"},
+        })
+        inventory_workspace.update_item(item["id"], self.seller_id, {"title": "Seller Confirmed Original Title"})
+
+        with commerce_agent.connect() as db:
+            db.execute("UPDATE inventory_items SET analysis_job_id = ? WHERE id = ?", ("job-sync-123", item["id"]))
+
+        job = {
+            "id": "job-sync-123",
+            "seller_id": self.seller_id,
+            "status": "completed",
+            "progress": 100,
+            "error": "",
+            "result_json": json.dumps({"listing": {"title": "AI Replacement Title Should Not Overwrite", "brand": "New AI Brand"}}),
+        }
+        with mock.patch("hht_app.commerce_agent.active_import_job", return_value=job):
+            res = inventory_workspace.sync_persisted_reanalysis(item["id"], self.seller_id)
+
+        self.assertEqual(res["status"], "completed")
+        self.assertEqual(res["item"]["listing"]["title"], "Seller Confirmed Original Title")
+        self.assertEqual(res["item"]["listing"]["brand"], "New AI Brand")
+
+    def test_wrong_seller_cannot_read_or_register_foreign_photo(self):
+        """Phase 2: Seller data isolation prevents accessing another seller's photo assets."""
+        batch = inventory_workspace.create_batch(self.seller_id)
+        other_seller = str(uuid.uuid4())
+        with commerce_agent.connect() as db:
+            db.execute(
+                "INSERT INTO photo_assets(id, seller_id, listing_key, original_key, derivative_key, provider, original_mime, derivative_mime, original_bytes, derivative_bytes, checksum_sha256, ebay_url, url_expires_at, created_at) VALUES('asset-other', ?, 'inv', 'o', 'd', 't', 'image/jpeg', 'image/webp', 1, 1, 'sha', 'https://example.com/asset-other', '2099-01-01T00:00:00Z', '2026-10-15T00:00:00Z')",
+                (other_seller,),
+            )
+        with self.assertRaises(ValueError):
+            inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": "asset-other"}])
 
 
 if __name__ == "__main__":

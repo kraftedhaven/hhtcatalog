@@ -1125,6 +1125,23 @@ def inventory_batch_photos(batch_id):
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/api/inventory/batches/<batch_id>/group-proposals", methods=["GET", "POST"])
+def inventory_batch_group_proposals(batch_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    try:
+        if request.method == "GET":
+            proposal = inventory_workspace.latest_group_proposal(batch_id, str(seller_id))
+            if not proposal:
+                return jsonify({"error": "No grouping proposal found."}), 404
+            return jsonify({"result": proposal, "proposal": proposal})
+        proposal = inventory_workspace.propose_photo_groups(batch_id, str(seller_id))
+        return jsonify({"result": proposal, "proposal": proposal}), 201
+    except (ValueError, PermissionError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/inventory/batches/<batch_id>/photos/groups", methods=["PUT"])
 def inventory_batch_grouping(batch_id):
     seller_id = getattr(g, "seller_id", None)
@@ -1203,6 +1220,21 @@ def inventory_item_detail(item_id):
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/api/inventory/items/<item_id>/photos", methods=["PUT"])
+def inventory_item_photos_update(item_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    try:
+        item = inventory_workspace.update_item_photos(
+            item_id, str(seller_id), body.get("photoIds") or [], body.get("coverPhotoId")
+        )
+        return jsonify({"result": item, "item": item})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/inventory/items/<item_id>/research", methods=["POST"])
 def inventory_item_research(item_id):
     seller_id = getattr(g, "seller_id", None)
@@ -1267,6 +1299,22 @@ def inventory_items_submit_drafts():
         return jsonify({"result": result})
     except EbayFeedError as exc:
         return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/<item_id>/reanalysis", methods=["GET", "POST"])
+def inventory_item_reanalysis(item_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    try:
+        if request.method == "GET":
+            res = inventory_workspace.sync_persisted_reanalysis(item_id, str(seller_id))
+            return jsonify({"result": res, **res})
+        body = request.get_json(silent=True) or {}
+        res = inventory_workspace.start_persisted_reanalysis(item_id, str(seller_id), body.get("sellerDefaults") or {})
+        return jsonify({"result": res, **res}), 202
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
