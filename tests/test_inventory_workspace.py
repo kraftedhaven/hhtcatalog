@@ -823,17 +823,22 @@ class InventoryWorkspaceTests(unittest.TestCase):
             self.assertIn("503", fail_reloaded["listing"].get("analysisError", ""))
 
         # 9. Verify Flask endpoint returns HTTP 202
-        with self.app.test_client() as client:
-            with mock.patch("hht_app.supabase_auth.authenticate_request", return_value=None), \
-                 mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()):
-                http_res = client.post(
-                    f"/api/inventory/batches/{batch['id']}/analyze",
-                    json={"itemIds": [item1_id]},
-                )
-                self.assertEqual(http_res.status_code, 202)
-                body = http_res.get_json()
-                self.assertIn("result", body)
-                self.assertIn("jobIds", body["result"])
+        client = hht_app.app.test_client()
+        def authenticate():
+            from flask import g
+            g.supabase_user = {"sub": self.auth_user_id}
+
+        with mock.patch("app.authenticate_request", side_effect=authenticate), \
+             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}), \
+             mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()):
+            http_res = client.post(
+                f"/api/inventory/batches/{batch['id']}/analyze",
+                json={"itemIds": [item1_id]},
+            )
+            self.assertEqual(http_res.status_code, 202)
+            body = http_res.get_json()
+            self.assertIn("result", body)
+            self.assertIn("jobIds", body["result"])
 
 
 if __name__ == "__main__":
