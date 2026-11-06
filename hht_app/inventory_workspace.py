@@ -10,6 +10,8 @@ Compatible with existing schema.py, export_ebay_draft_csv, and Seller Hub draft 
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import logging
 import os
@@ -19,6 +21,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
+
+import requests
+from PIL import Image, ImageOps
 
 from .commerce_agent import (
     connect,
@@ -1661,3 +1666,538 @@ def export_batch_seller_hub_draft_csv(
 
     from .seller_hub_draft_template import export_seller_hub_draft_csv
     return export_seller_hub_draft_csv(approved_items, template_text=template_text, category_metadata_map=category_metadata_map)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 Capabilities: Signatures, Perceptual Hashing & Group Proposals
+# ---------------------------------------------------------------------------
+
+def _photo_stem(filename: str) -> str:
+    stem = os.path.splitext(os.path.basename(str(filename or "photo")))[0].lower().replace("-", "_")
+    for marker in ("_front", "_back", "_side", "_tag", "_detail", "_closeup", "_close_up"):
+        stem = stem.split(marker, 1)[0]
+    return stem.rstrip("_ ") or "photo"
+
+
+def _perceptual_hash(data: bytes) -> tuple[str, int, int]:
+    image = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("L")
+    width, height = image.size
+    values = list(image.resize((8, 8)).getdata())
+    average = sum(values) / len(values) if values else 0
+    return "".join("1" if value >= average else "0" for value in values), width, height
+
+
+def _hamming(left: str, right: str) -> int:
+    return sum(a != b for a, b in zip(left, right)) if left and right and len(left) == len(right) else 64
+
+
+def _fetch_photo_bytes(photo: dict[str, Any]) -> tuple[bytes | None, str, str]:
+    url = str(photo.get("storageUrl") or photo.get("previewUrl") or photo.get("ebay_url") or "").strip()
+    if not url.startswith("https://"):
+        return None, "inaccessible", "Stored photo has no accessible HTTPS URL."
+    try:
+        response = requests.get(url, timeout=(5, 15))
+        if response.status_code != 200 or not response.content:
+            return None, "inaccessible", f"Stored photo returned HTTP {response.status_code}."
+        return response.content, "ok", ""
+    except requests.RequestException:
+        return None, "inaccessible", "Stored photo could not be fetched."
+
+
+def register_photos(batch_id: str, seller_id: str, photos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Register stored photo assets into a batch, respecting existing assets and calculating signatures."""
+    if not isinstance(photos, list) or not photos:
+        raise ValueError("Provide at least one photo asset.")
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    get_batch(batch_id, seller_id)
+    now = _now_iso()
+    created = []
+
+    with connect() as db:
+        pos_row = db.execute(
+            "SELECT COALESCE(MAX(position), -1) AS max_pos FROM inventory_item_photos WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchone()
+        start_pos = (int(pos_row["max_pos"]) if pos_row else -1) + 1
+
+        for idx, raw in enumerate(photos):
+            if not isinstance(raw, dict):
+                continue
+            asset_id = raw.get("photoAssetId") or raw.get("assetId") or raw.get("id") or None
+            preview_url = str(raw.get("previewUrl") or raw.get("ebayUrl") or raw.get("url") or "")
+            storage_url = str(raw.get("storageUrl") or raw.get("ebayUrl") or preview_url)
+            filename = str(raw.get("filename") or raw.get("name") or f"photo_{start_pos + idx}.jpg")[:180]
+
+            if asset_id:
+                asset = db.execute("SELECT id, seller_id, ebay_url FROM photo_assets WHERE id = ?", (str(asset_id),)).fetchone()
+                if not asset or str(asset["seller_id"]) != str(seller_id):
+                    raise ValueError("Photo asset does not belong to this seller.")
+                if not storage_url and asset["ebay_url"]:
+                    storage_url = str(asset["ebay_url"])
+                    preview_url = storage_url
+
+            photo_id = str(uuid.uuid4())
+            db.execute(
+                """INSERT INTO inventory_item_photos(
+                    id, batch_id, item_id, photo_asset_id, original_filename,
+                    preview_url, storage_url, position, is_cover, created_at
+                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    photo_id,
+                    batch_id,
+                    str(asset_id) if asset_id else None,
+                    filename,
+                    preview_url,
+                    storage_url,
+                    start_pos + idx,
+                    1 if (start_pos + idx) == 0 else 0,
+                    now,
+                ),
+            )
+            created.append({
+                "id": photo_id,
+                "batchId": batch_id,
+                "photoAssetId": str(asset_id) if asset_id else None,
+                "originalFilename": filename,
+                "previewUrl": preview_url,
+                "storageUrl": storage_url,
+                "position": start_pos + idx,
+                "isCover": (start_pos + idx) == 0,
+            })
+        db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, batch_id, seller_id))
+
+    return created
+
+
+def create_item(batch_id: str, seller_id: str, payload: dict[str, Any], actor: str = "") -> dict[str, Any]:
+    """Create an inventory item from selected photo IDs with provenance and validation."""
+    if not isinstance(payload, dict):
+        raise ValueError("Item payload must be an object.")
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    get_batch(batch_id, seller_id)
+
+    item_id = str(uuid.uuid4())
+    now = _now_iso()
+    listing = dict(payload.get("listing") or {})
+    provenance = dict(payload.get("provenance") or {})
+    confirmed = dict(payload.get("sellerConfirmed") or {})
+    photo_ids = [str(v) for v in (payload.get("photoIds") or [])]
+    cover_photo_id = payload.get("coverPhotoId") or (photo_ids[0] if photo_ids else None)
+
+    for k in ("title", "cat", "price", "brand", "size"):
+        if k not in provenance:
+            provenance[k] = {"source": "missing", "confidence": "none", "evidence": "Unanalyzed", "sellerConfirmed": False}
+
+    validation = check_listing_rules(listing, len(photo_ids), {})
+
+    with connect() as db:
+        db.execute(
+            """INSERT INTO inventory_items(
+                id, batch_id, seller_id, listing_json, provenance_json,
+                workflow_status, validation_json, pricing_options_json,
+                title_candidates_json, analysis_job_id, seller_confirmed,
+                seller_confirmed_json, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, 'needs_review', ?, '{}', '{}', ?, ?, ?, ?, ?)""",
+            (
+                item_id,
+                batch_id,
+                seller_id,
+                _json(listing),
+                _json(provenance),
+                _json(validation),
+                str(payload.get("analysisJobId") or ""),
+                bool(confirmed),
+                _json(confirmed),
+                now,
+                now,
+            ),
+        )
+        if photo_ids:
+            _assign_photos_to_item(db, batch_id, seller_id, item_id, photo_ids, cover_photo_id, now)
+        db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, batch_id, seller_id))
+
+    return get_item(item_id, seller_id)
+
+
+def _assign_photos_to_item(
+    db: Any, batch_id: str, seller_id: str, item_id: str, photo_ids: list[str], cover_photo_id: str | None, now: str
+) -> None:
+    db.execute(
+        "UPDATE inventory_item_photos SET item_id = NULL, is_cover = ? WHERE batch_id = ? AND item_id = ?",
+        (False, batch_id, item_id),
+    )
+    for pos, pid in enumerate(dict.fromkeys(photo_ids)):
+        photo = db.execute(
+            "SELECT id FROM inventory_item_photos WHERE id = ? AND batch_id = ?",
+            (pid, batch_id),
+        ).fetchone()
+        if not photo:
+            raise ValueError(f"Photo {pid} does not belong to this batch.")
+        is_cov = bool(str(pid) == str(cover_photo_id or (photo_ids[0] if pos == 0 else "")))
+        db.execute(
+            """UPDATE inventory_item_photos
+               SET item_id = ?, position = ?, is_cover = ?
+               WHERE id = ? AND batch_id = ?""",
+            (item_id, pos, is_cov, pid, batch_id),
+        )
+
+
+def update_item_photos(item_id: str, seller_id: str, photo_ids: list[str], cover_photo_id: str | None = None) -> dict[str, Any]:
+    """Reassign or reorder photos assigned to an item."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    item = get_item(item_id, seller_id)
+    now = _now_iso()
+    with connect() as db:
+        _assign_photos_to_item(db, item["batchId"], seller_id, item_id, [str(p) for p in photo_ids], cover_photo_id, now)
+        db.execute("UPDATE inventory_items SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, item_id, seller_id))
+    return get_item(item_id, seller_id)
+
+
+def update_item(item_id: str, seller_id: str, fields: dict[str, Any], actor: str = "") -> dict[str, Any]:
+    """Compatibility wrapper that calls patch_item while persisting seller_confirmed overrides."""
+    if not isinstance(fields, dict):
+        raise ValueError("Item fields must be an object.")
+    with connect() as db:
+        row = db.execute("SELECT seller_confirmed_json FROM inventory_items WHERE id = ? AND seller_id = ?", (item_id, seller_id)).fetchone()
+        confirmed = _decode(row["seller_confirmed_json"] if row else "{}", {}) if row else {}
+        for k, v in fields.items():
+            if k in ("title", "price", "cat", "brand", "size", "cnote", "quantity"):
+                confirmed[k] = v
+        db.execute("UPDATE inventory_items SET seller_confirmed_json = ? WHERE id = ? AND seller_id = ?", (_json(confirmed), item_id, seller_id))
+    return patch_item(item_id, seller_id, fields)
+
+
+def apply_analysis_result(
+    item_id: str, seller_id: str, listing: dict[str, Any], provenance: dict[str, Any] | None = None, analysis_job_id: str = ""
+) -> dict[str, Any]:
+    """Apply analysis results while strictly preserving any seller-confirmed fields."""
+    if not isinstance(listing, dict):
+        raise ValueError("Analysis listing must be an object.")
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    item = get_item(item_id, seller_id)
+    with connect() as db:
+        row = db.execute("SELECT seller_confirmed_json FROM inventory_items WHERE id = ? AND seller_id = ?", (item_id, seller_id)).fetchone()
+        confirmed = _decode(row["seller_confirmed_json"] if row else "{}", {}) if row else {}
+
+    current_listing = dict(item["listing"])
+    current_provenance = dict(item["provenance"])
+
+    for k, v in listing.items():
+        if k not in confirmed and not current_provenance.get(k, {}).get("sellerConfirmed"):
+            current_listing[k] = v
+            current_provenance[k] = (provenance or {}).get(k, {
+                "source": "ai_estimate",
+                "confidence": "medium",
+                "evidence": "AI analysis",
+                "sellerConfirmed": False,
+            })
+
+    photo_count = item["photoCount"]
+    validation = check_listing_rules(current_listing, photo_count, {})
+    now = _now_iso()
+
+    with connect() as db:
+        db.execute(
+            """UPDATE inventory_items
+               SET listing_json = ?, provenance_json = ?, validation_json = ?,
+                   analysis_job_id = ?, workflow_status = 'needs_review', updated_at = ?
+               WHERE id = ? AND seller_id = ?""",
+            (_json(current_listing), _json(current_provenance), _json(validation), analysis_job_id, now, item_id, seller_id),
+        )
+
+    return get_item(item_id, seller_id)
+
+
+def approve_item(item_id: str, seller_id: str, actor: str = "") -> dict[str, Any]:
+    """Single item approval respecting required fields and validation."""
+    res = approve_items([item_id], seller_id)
+    if res["rejected"]:
+        reason = res["rejected"][0].get("reason", "Validation failed")
+        raise ValueError(f"Complete required fields before approval: {reason}")
+    return get_item(item_id, seller_id)
+
+
+def revoke_approval(item_id: str, seller_id: str, actor: str = "") -> dict[str, Any]:
+    """Revoke item approval, reverting its status back to needs_review."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    get_item(item_id, seller_id)
+    now = _now_iso()
+    with connect() as db:
+        db.execute(
+            """UPDATE inventory_items
+               SET workflow_status = 'needs_review', seller_confirmed = ?, updated_at = ?
+               WHERE id = ? AND seller_id = ?""",
+            (False, now, item_id, seller_id),
+        )
+    return get_item(item_id, seller_id)
+
+
+def propose_photo_groups(batch_id: str, seller_id: str, max_photos: int = 120) -> dict[str, Any]:
+    """Generate reviewable visual grouping suggestions and near-duplicate detection without mutating photo assignments."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    get_batch(batch_id, seller_id)
+    now = _now_iso()
+
+    with connect() as db:
+        rows = db.execute(
+            """SELECT p.*, a.checksum_sha256 AS asset_checksum
+               FROM inventory_item_photos p
+               LEFT JOIN photo_assets a ON a.id = p.photo_asset_id
+               WHERE p.batch_id = ? AND p.item_id IS NULL
+               ORDER BY p.position ASC, p.created_at ASC
+               LIMIT ?""",
+            (batch_id, max(1, min(int(max_photos), 500))),
+        ).fetchall()
+
+    signatures = []
+    for r in rows:
+        photo_dict = {
+            "id": str(r["id"]),
+            "storageUrl": str(r["storage_url"] or ""),
+            "previewUrl": str(r["preview_url"] or ""),
+            "filename": str(r["original_filename"] or ""),
+            "asset_checksum": str(r["asset_checksum"] or "") if "asset_checksum" in r.keys() else "",
+        }
+        data, access_status, access_error = _fetch_photo_bytes(photo_dict)
+        phash = ""
+        width = height = None
+        checksum = photo_dict["asset_checksum"]
+        if data:
+            checksum = hashlib.sha256(data).hexdigest()
+            try:
+                phash, width, height = _perceptual_hash(data)
+            except Exception:
+                access_status, access_error = "invalid", "Stored photo is not a readable image."
+        signatures.append({
+            "photoId": photo_dict["id"],
+            "filename": photo_dict["filename"],
+            "stem": _photo_stem(photo_dict["filename"]),
+            "checksum": checksum,
+            "phash": phash,
+            "width": width,
+            "height": height,
+            "accessStatus": access_status,
+            "accessError": access_error,
+        })
+
+    with connect() as db:
+        for s in signatures:
+            sig_id = str(uuid.uuid4())
+            if db.postgres:
+                db.execute(
+                    """INSERT INTO inventory_photo_signatures(
+                        id, photo_id, seller_id, exact_checksum, perceptual_hash, width, height, access_status, access_error, checked_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(photo_id) DO UPDATE SET
+                        exact_checksum = EXCLUDED.exact_checksum,
+                        perceptual_hash = EXCLUDED.perceptual_hash,
+                        width = EXCLUDED.width,
+                        height = EXCLUDED.height,
+                        access_status = EXCLUDED.access_status,
+                        access_error = EXCLUDED.access_error,
+                        checked_at = EXCLUDED.checked_at""",
+                    (sig_id, s["photoId"], seller_id, s["checksum"], s["phash"], s["width"], s["height"], s["accessStatus"], s["accessError"], now),
+                )
+            else:
+                db.execute(
+                    """INSERT OR REPLACE INTO inventory_photo_signatures(
+                        id, photo_id, seller_id, exact_checksum, perceptual_hash, width, height, access_status, access_error, checked_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (sig_id, s["photoId"], seller_id, s["checksum"], s["phash"], s["width"], s["height"], s["accessStatus"], s["accessError"], now),
+                )
+
+    duplicates = []
+    for idx, left in enumerate(signatures):
+        for right in signatures[idx + 1:]:
+            distance = _hamming(left["phash"], right["phash"])
+            exact = bool(left["checksum"] and left["checksum"] == right["checksum"])
+            if exact or (left["phash"] and right["phash"] and distance <= 4):
+                duplicates.append({
+                    "photoIds": [left["photoId"], right["photoId"]],
+                    "reason": "exact_checksum" if exact else "near_duplicate",
+                    "distance": distance,
+                    "reviewRequired": True,
+                })
+
+    groups = []
+    used = set()
+    for idx, current in enumerate(signatures):
+        if current["photoId"] in used:
+            continue
+        members = [current["photoId"]]
+        confidences = []
+        used.add(current["photoId"])
+        for candidate in signatures[idx + 1:]:
+            if candidate["photoId"] in used or current["accessStatus"] != "ok" or candidate["accessStatus"] != "ok":
+                continue
+            distance = _hamming(current["phash"], candidate["phash"])
+            same_stem = current["stem"] == candidate["stem"] and current["stem"] != "photo"
+            if same_stem or distance <= 18:
+                members.append(candidate["photoId"])
+                used.add(candidate["photoId"])
+                confidences.append(0.95 if same_stem else max(0.55, 1 - distance / 64))
+        groups.append({
+            "photoIds": members,
+            "confidence": round(sum(confidences) / len(confidences), 3) if confidences else 0.5,
+            "reviewRequired": len(members) > 1 and (not confidences or min(confidences) < 0.8),
+            "accessWarnings": [entry for entry in signatures if entry["photoId"] in members and entry["accessStatus"] != "ok"],
+        })
+
+    proposal = {
+        "groups": groups,
+        "signatures": signatures,
+        "photoCount": len(signatures),
+        "manualGroupsPreserved": True,
+    }
+    proposal_id = str(uuid.uuid4())
+
+    with connect() as db:
+        db.execute(
+            "UPDATE inventory_group_proposals SET status = 'superseded' WHERE batch_id = ? AND seller_id = ? AND status = 'proposed'",
+            (batch_id, seller_id),
+        )
+        db.execute(
+            """INSERT INTO inventory_group_proposals(
+                id, batch_id, seller_id, status, method, confidence, proposal_json, duplicate_candidates_json, created_at
+            ) VALUES(?, ?, ?, 'proposed', 'visual_similarity', ?, ?, ?, ?)""",
+            (
+                proposal_id,
+                batch_id,
+                seller_id,
+                min((g["confidence"] for g in groups), default=0),
+                _json(proposal),
+                _json(duplicates),
+                now,
+            ),
+        )
+
+    return {
+        "proposalId": proposal_id,
+        "status": "proposed",
+        "method": "visual_similarity",
+        "proposal": proposal,
+        "duplicateCandidates": duplicates,
+    }
+
+
+def latest_group_proposal(batch_id: str, seller_id: str) -> dict[str, Any] | None:
+    """Fetch the latest active group proposal for a batch."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    with connect() as db:
+        row = db.execute(
+            """SELECT * FROM inventory_group_proposals
+               WHERE batch_id = ? AND seller_id = ? AND status = 'proposed'
+               ORDER BY created_at DESC LIMIT 1""",
+            (batch_id, seller_id),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row["id"]),
+            "batchId": str(row["batch_id"]),
+            "status": str(row["status"]),
+            "method": str(row["method"]),
+            "confidence": float(row["confidence"] or 0),
+            "proposal": _decode(row["proposal_json"], {}),
+            "duplicateCandidates": _decode(row["duplicate_candidates_json"], []),
+        }
+
+
+def start_persisted_reanalysis(item_id: str, seller_id: str, seller_defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Re-analyze an item's stored photos via the standard listing analysis job pipeline."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    item = get_item(item_id, seller_id)
+    if not item.get("photos"):
+        raise ValueError("This item has no stored photos to re-analyze.")
+
+    images = []
+    inaccessible = []
+    with connect() as db:
+        for p in item["photos"]:
+            asset = None
+            if p.get("photoAssetId"):
+                asset = db.execute(
+                    "SELECT id, ebay_url, derivative_mime FROM photo_assets WHERE id = ? AND seller_id = ?",
+                    (p["photoAssetId"], seller_id),
+                ).fetchone()
+            p_dict = {
+                "storageUrl": str(asset["ebay_url"]) if asset and asset["ebay_url"] else str(p.get("storageUrl") or p.get("previewUrl") or ""),
+            }
+            data, status, reason = _fetch_photo_bytes(p_dict)
+            if not data:
+                inaccessible.append({"photoId": p.get("id"), "reason": reason or "Stored photo unreachable."})
+                continue
+            images.append({
+                "data": data,
+                "mimeType": str(asset["derivative_mime"]) if asset and asset["derivative_mime"] else "image/jpeg",
+                "filename": str(p.get("originalFilename") or "photo.jpg"),
+            })
+
+    if not images:
+        raise ValueError("No stored photos are currently accessible for this item.")
+
+    job = start_listing_analysis_job(images, seller_id, seller_defaults or {})
+    now = _now_iso()
+    with connect() as db:
+        db.execute(
+            """UPDATE inventory_items
+               SET analysis_job_id = ?, workflow_status = 'needs_review', updated_at = ?
+               WHERE id = ? AND seller_id = ?""",
+            (job["jobId"], now, item_id, seller_id),
+        )
+
+    return {
+        "itemId": item_id,
+        "jobId": job["jobId"],
+        "status": job.get("status", "queued"),
+        "accessiblePhotoCount": len(images),
+        "inaccessiblePhotos": inaccessible,
+    }
+
+
+def sync_persisted_reanalysis(item_id: str, seller_id: str) -> dict[str, Any]:
+    """Check the status of a persisted reanalysis job and apply its findings when complete."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    item = get_item(item_id, seller_id)
+    job_id = str(item.get("analysisJobId") or "")
+    if not job_id:
+        return {"item": item, "status": "not_started"}
+
+    from .commerce_agent import active_import_job
+    job = active_import_job(job_id, seller_id=seller_id)
+    if not job:
+        raise ValueError("Analysis job not found for this seller.")
+
+    result = _decode(job.get("result_json"), {})
+    if job.get("status") == "completed":
+        listing = result.get("listing") if isinstance(result, dict) else {}
+        prov = {k: "ai_estimate" for k in (listing or {})}
+        updated_item = apply_analysis_result(item_id, seller_id, listing or {}, prov, job_id)
+        return {"item": updated_item, "status": "completed", "jobId": job_id}
+
+    return {
+        "item": item,
+        "status": job.get("status", "queued"),
+        "progress": job.get("progress", 0),
+        "error": job.get("error", ""),
+        "jobId": job_id,
+    }
+
