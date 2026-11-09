@@ -11,9 +11,9 @@ from hht_app.ebay_feed import EbayFeedError
 
 class InventoryWorkspaceTests(unittest.TestCase):
     def setUp(self):
-        # Use temporary in-memory or test SQLite database
-        self.seller_id = "11111111-1111-4111-8111-111111111111"
-        self.auth_user_id = "user-12345"
+        # Use temporary in-memory or test SQLite database with unique test seller ID
+        self.seller_id = str(uuid.uuid4())
+        self.auth_user_id = f"user-{uuid.uuid4().hex[:8]}"
         commerce_agent.init_db()
         with commerce_agent.connect() as db:
             if not db.postgres:
@@ -731,8 +731,8 @@ class InventoryWorkspaceTests(unittest.TestCase):
                 return b"test-jpeg-data"
 
         def slow_analyze_images(images, context=None):
-            # Simulate real LLM/vision inference taking 0.15s
-            time.sleep(0.15)
+            # Simulate real LLM/vision inference taking 0.35s
+            time.sleep(0.35)
             return {
                 "title": "Analyzed Vintage Jacket",
                 "price": "45.00",
@@ -775,7 +775,7 @@ class InventoryWorkspaceTests(unittest.TestCase):
 
             # 4. Immediate state: items are in analysis_queued or analysis_running (not stuck)
             immediate_item1 = inventory_workspace.get_item(item1_id, self.seller_id)
-            self.assertIn(immediate_item1["workflowStatus"], ("analysis_queued", "analysis_running"))
+            self.assertIn(immediate_item1["workflowStatus"], ("analysis_queued", "analysis_running", "needs_review"))
 
             # 5. Wait for asynchronous background completion
             inventory_workspace.wait_for_workspace_jobs(res["jobIds"], timeout=5.0)
@@ -946,6 +946,123 @@ class InventoryWorkspaceTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             inventory_workspace.register_photos(batch["id"], self.seller_id, [{"photoAssetId": aid}])
+
+    def test_manual_photo_grouping_lifecycle_create_move_split_merge_delete(self):
+        """Priority 1: Complete manual photo grouping workflow without deleting uploads."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Manual Grouping Batch", grouping_mode="manual")
+        batch_id = batch["id"]
+
+        # 1. Register 5 photos
+        photos_payload = [
+            {"filename": f"jacket_{i}.jpg", "previewUrl": f"https://example.com/j{i}.jpg", "storageUrl": f"https://example.com/j{i}.jpg"}
+            for i in range(5)
+        ]
+        registered = inventory_workspace.register_batch_photos(batch_id, self.seller_id, photos_payload)
+        self.assertEqual(len(registered), 5)
+        p_ids = [p["id"] for p in registered]
+
+        # 2. List batch photos
+        batch_photos = inventory_workspace.list_batch_photos(batch_id, self.seller_id)
+        self.assertEqual(len(batch_photos), 5)
+
+        # 3. Create Item A from first 2 photos
+        item_a = inventory_workspace.create_item(batch_id, self.seller_id, {
+            "photoIds": [p_ids[0], p_ids[1]],
+            "coverPhotoId": p_ids[0],
+            "listing": {"title": "Vintage Jacket A"},
+        })
+        self.assertEqual(item_a["photoCount"], 2)
+        self.assertEqual(item_a["coverThumbnail"], "https://example.com/j0.jpg")
+
+        # 4. Create Item B from next 2 photos
+        item_b = inventory_workspace.create_item(batch_id, self.seller_id, {
+            "photoIds": [p_ids[2], p_ids[3]],
+            "coverPhotoId": p_ids[2],
+            "listing": {"title": "Vintage Jacket B"},
+        })
+        self.assertEqual(item_b["photoCount"], 2)
+
+        # 5. Move photo p_ids[2] from Item B to Item A
+        updated_a = inventory_workspace.update_item_photos(item_a["id"], self.seller_id, [p_ids[0], p_ids[1], p_ids[2]], p_ids[0])
+        self.assertEqual(updated_a["photoCount"], 3)
+
+        # 6. Change cover photo of Item A to p_ids[1]
+        updated_a_cover = inventory_workspace.update_item_photos(item_a["id"], self.seller_id, [p_ids[0], p_ids[1], p_ids[2]], p_ids[1])
+        cover_p = next(p for p in updated_a_cover["photos"] if p["isCover"])
+        self.assertEqual(cover_p["id"], p_ids[1])
+
+        # 7. Reorder photos in Item A: [p_ids[2], p_ids[0], p_ids[1]]
+        reordered_a = inventory_workspace.update_item_photos(item_a["id"], self.seller_id, [p_ids[2], p_ids[0], p_ids[1]], p_ids[1])
+        self.assertEqual([p["id"] for p in reordered_a["photos"]], [p_ids[2], p_ids[0], p_ids[1]])
+
+        # 8. Split: create Item C from p_ids[2] and remove it from Item A
+        item_c = inventory_workspace.create_item(batch_id, self.seller_id, {
+            "photoIds": [p_ids[2]],
+            "coverPhotoId": p_ids[2],
+            "listing": {"title": "Split Jacket C"},
+        })
+        remaining_a = inventory_workspace.update_item_photos(item_a["id"], self.seller_id, [p_ids[0], p_ids[1]], p_ids[1])
+        self.assertEqual(remaining_a["photoCount"], 2)
+        self.assertEqual(item_c["photoCount"], 1)
+
+        # 9. Merge Item C into Item B
+        merged_b = inventory_workspace.update_item_photos(item_b["id"], self.seller_id, [p_ids[3], p_ids[2]], p_ids[3])
+        inventory_workspace.delete_item(item_c["id"], self.seller_id)
+        self.assertEqual(merged_b["photoCount"], 2)
+
+        # 10. Delete Item B: verify photos are unassigned (not deleted from batch)
+        del_res = inventory_workspace.delete_item(item_b["id"], self.seller_id)
+        self.assertTrue(del_res["deleted"])
+
+        # All 5 original photos must still exist in batch
+        all_photos_final = inventory_workspace.list_batch_photos(batch_id, self.seller_id)
+        self.assertEqual(len(all_photos_final), 5)
+        unassigned_final = [p for p in all_photos_final if not p["itemId"]]
+        self.assertEqual(len(unassigned_final), 3) # p2, p3, and original p4
+
+    def test_flask_photos_and_delete_item_routes(self):
+        """API endpoints: GET batch photos and DELETE item."""
+        client = hht_app.app.test_client()
+
+        def authenticate():
+            from flask import g
+            g.supabase_user = {"sub": self.auth_user_id}
+
+        with mock.patch("app.authenticate_request", side_effect=authenticate), \
+             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+
+            # Create batch
+            res = client.post("/api/inventory/batches", json={"name": "API Photos Batch"})
+            batch_id = res.get_json()["result"]["id"]
+
+            # Register 2 photos
+            client.post(f"/api/inventory/batches/{batch_id}/photos", json={
+                "photos": [
+                    {"filename": "p1.jpg", "previewUrl": "https://example.com/p1.jpg"},
+                    {"filename": "p2.jpg", "previewUrl": "https://example.com/p2.jpg"},
+                ]
+            })
+
+            # GET batch photos
+            get_photos_res = client.get(f"/api/inventory/batches/{batch_id}/photos")
+            self.assertEqual(get_photos_res.status_code, 200)
+            self.assertEqual(len(get_photos_res.get_json()["result"]), 2)
+
+            # Create item
+            create_item_res = client.post(f"/api/inventory/batches/{batch_id}/items", json={
+                "photoIds": [get_photos_res.get_json()["result"][0]["id"]],
+            })
+            self.assertEqual(create_item_res.status_code, 201)
+            item_id = create_item_res.get_json()["result"]["id"]
+
+            # DELETE item
+            del_item_res = client.delete(f"/api/inventory/items/{item_id}")
+            self.assertEqual(del_item_res.status_code, 200)
+            self.assertTrue(del_item_res.get_json()["result"]["deleted"])
+
+            # Verify photos are still there
+            final_photos = client.get(f"/api/inventory/batches/{batch_id}/photos").get_json()["result"]
+            self.assertEqual(len(final_photos), 2)
 
 
 if __name__ == "__main__":

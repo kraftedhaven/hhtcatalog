@@ -117,7 +117,7 @@ def create_batch(seller_id: str, name: str = "", grouping_mode: str = "auto") ->
     init_db()
     batch_id = str(uuid.uuid4())
     name = (name or "").strip() or f"Batch {datetime.now(timezone.utc).strftime('%b %d, %Y %H:%M')}"
-    if grouping_mode not in {"1", "2", "3", "auto"}:
+    if grouping_mode not in {"1", "2", "3", "auto", "manual"}:
         grouping_mode = "auto"
     now = _now_iso()
 
@@ -292,7 +292,9 @@ def register_batch_photos(
             (batch_id,),
         ).fetchall()
 
-    if not existing_items:
+    if grouping_mode == "manual":
+        pass
+    elif not existing_items:
         apply_photo_grouping(batch_id, seller_id, mode=grouping_mode, force=True)
     else:
         _group_new_photos(batch_id, seller_id, registered_photos, mode=grouping_mode)
@@ -353,7 +355,7 @@ def _group_new_photos(
     batch_id: str, seller_id: str, new_photos: list[dict[str, Any]], mode: str = "3"
 ) -> list[dict[str, Any]]:
     """Group newly uploaded photos into new items without modifying or deleting existing items."""
-    if not new_photos:
+    if not new_photos or mode == "manual":
         return []
     step = 3
     if mode == "1":
@@ -496,6 +498,8 @@ def apply_photo_grouping(
             if unassigned:
                 for p in unassigned:
                     groupings.append([p])
+        elif mode == "manual":
+            groupings = []
         else:
             step = 3
             if mode == "1":
@@ -1589,17 +1593,40 @@ def get_item_submission_status(item_id: str, seller_id: str) -> dict[str, Any]:
         if current_status in {"submitted", "processing"}:
             try:
                 task_details = get_feed_task_details(feed_task_id)
-                task_status = str(task_details.get("status") or "").lower()
+                task_status = str(task_details.get("status") or "").upper()
+                upload_summary = task_details.get("uploadSummary") or {}
+                failure_count = int(upload_summary.get("failureCount") or 0)
+                success_count = int(upload_summary.get("successCount") or 0)
+                result_details = task_details.get("resultDetails") or {}
+                row_errors = result_details.get("errors") or []
+                error_count = int(result_details.get("errorCount") or len(row_errors))
                 now = _now_iso()
-                new_sub_status = current_status
-                new_item_status = "draft_submitted"
 
-                if task_status in {"completed", "success"}:
-                    new_sub_status = "completed"
-                    new_item_status = "draft_result_available"
-                elif task_status in {"failed", "error"}:
+                if task_status in {"QUEUED", "IN_PROCESS", "COMPILING"}:
+                    new_sub_status = "processing"
+                    new_item_status = "draft_submitted"
+                elif task_status in {"COMPLETED", "SUCCESS"}:
+                    if failure_count == 0 and error_count == 0:
+                        new_sub_status = "completed"
+                        new_item_status = "draft_result_available"
+                    elif success_count > 0:
+                        new_sub_status = "completed_with_errors"
+                        item_rec = db.execute("SELECT id, listing_json FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+                        sku = ""
+                        if item_rec:
+                            listing = _decode(item_rec["listing_json"], {})
+                            sku = str(listing.get("sku") or "")
+                        is_item_failed = any(err.get("customLabel") == sku for err in row_errors) if sku else (failure_count > 0)
+                        new_item_status = "draft_failed" if is_item_failed else "draft_result_available"
+                    else:
+                        new_sub_status = "failed"
+                        new_item_status = "draft_failed"
+                elif task_status in {"FAILED", "COMPLETED_WITH_ERROR", "ERROR"}:
                     new_sub_status = "failed"
                     new_item_status = "draft_failed"
+                else:
+                    new_sub_status = current_status
+                    new_item_status = "draft_submitted"
 
                 db.execute(
                     """UPDATE inventory_submissions
@@ -1871,6 +1898,60 @@ def update_item(item_id: str, seller_id: str, fields: dict[str, Any], actor: str
                 confirmed[k] = v
         db.execute("UPDATE inventory_items SET seller_confirmed_json = ? WHERE id = ? AND seller_id = ?", (_json(confirmed), item_id, seller_id))
     return patch_item(item_id, seller_id, fields)
+
+
+def delete_item(item_id: str, seller_id: str) -> dict[str, Any]:
+    """Delete an item from a batch while preserving all uploaded photos in the batch."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    item = get_item(item_id, seller_id)
+    if item["workflowStatus"] in ("draft_submitted", "draft_created"):
+        raise ValueError("Cannot delete an item with an active eBay draft submission.")
+    now = _now_iso()
+    with connect() as db:
+        db.execute(
+            "UPDATE inventory_item_photos SET item_id = NULL, is_cover = ? WHERE item_id = ? AND batch_id = ?",
+            (False, item_id, item["batchId"]),
+        )
+        db.execute("DELETE FROM inventory_items WHERE id = ? AND seller_id = ?", (item_id, seller_id))
+        db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, item["batchId"], seller_id))
+    return {"deleted": True, "itemId": item_id, "batchId": item["batchId"]}
+
+
+def list_batch_photos(batch_id: str, seller_id: str) -> list[dict[str, Any]]:
+    """List all photo assets registered to this batch with assignment metadata."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    init_db()
+    get_batch(batch_id, seller_id)
+    with connect() as db:
+        rows = db.execute(
+            """SELECT p.*, i.listing_json, i.workflow_status
+               FROM inventory_item_photos p
+               LEFT JOIN inventory_items i ON p.item_id = i.id
+               WHERE p.batch_id = ?
+               ORDER BY p.position ASC, p.created_at ASC""",
+            (batch_id,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            listing = _decode(r["listing_json"], {}) if r["listing_json"] else {}
+            result.append({
+                "id": str(r["id"]),
+                "batchId": str(r["batch_id"]),
+                "itemId": str(r["item_id"]) if r["item_id"] else None,
+                "itemTitle": listing.get("title", ""),
+                "itemWorkflowStatus": str(r["workflow_status"] or "") if r["workflow_status"] else None,
+                "photoAssetId": str(r["photo_asset_id"]) if r["photo_asset_id"] else None,
+                "originalFilename": str(r["original_filename"]),
+                "previewUrl": str(r["preview_url"]),
+                "storageUrl": str(r["storage_url"]),
+                "position": int(r["position"] or 0),
+                "isCover": bool(r["is_cover"]),
+                "createdAt": str(r["created_at"]),
+            })
+        return result
 
 
 def apply_analysis_result(

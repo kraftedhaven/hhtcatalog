@@ -425,6 +425,20 @@ export async function inventoryListBatchItems(batchId) {
     return body.result || [];
 }
 
+export async function inventoryListBatchPhotos(batchId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/photos`);
+    const body = await parseResponse(res);
+    return body.result || body.photos || [];
+}
+
+export async function deleteInventoryItem(itemId) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}`, {
+        method: 'DELETE',
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
 export async function inventoryAnalyzeBatch(batchId, itemIds = null) {
     const res = await authenticatedFetch(`${baseUrl()}/api/inventory/batches/${encodeURIComponent(batchId)}/analyze`, {
         method: 'POST',

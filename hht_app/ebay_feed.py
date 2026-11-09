@@ -6,6 +6,7 @@ import gzip
 import io
 import os
 import re
+import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
 from typing import Any
@@ -59,7 +60,67 @@ class EbayFeedError(RuntimeError):
         return body
 
 
-def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+def _validate_upload_bytes(data: bytes) -> None:
+    """Ensure the uploaded bytes are exactly valid UTF-8 eBay draft CSV with no live actions."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EbayFeedError(400, "invalid_csv", "Draft CSV upload payload must be valid UTF-8.", operation="validate_upload_bytes") from exc
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        raise EbayFeedError(400, "invalid_csv", "Draft CSV upload payload is empty.", operation="validate_upload_bytes")
+
+    reader = csv.reader(io.StringIO(text))
+    header_row: list[str] = []
+    data_rows: list[list[str]] = []
+
+    for row in reader:
+        if not row:
+            continue
+        first = row[0].strip()
+        if first.startswith("#INFO"):
+            continue
+        elif not header_row:
+            header_row = [c.strip() for c in row]
+        else:
+            data_rows.append(row)
+
+    if not header_row:
+        raise EbayFeedError(400, "invalid_csv", "Draft CSV missing column headers.", operation="validate_upload_bytes")
+
+    action_idx = -1
+    for idx, col in enumerate(header_row):
+        if col.lower().startswith("action"):
+            action_idx = idx
+            break
+
+    if action_idx == -1:
+        raise EbayFeedError(400, "invalid_csv", "Draft CSV missing Action header.", operation="validate_upload_bytes")
+
+    if not data_rows:
+        raise EbayFeedError(400, "invalid_csv", "Draft CSV contains no item rows.", operation="validate_upload_bytes")
+
+    live_actions = {"add", "revise", "relist", "end", "publish", "verifyadd"}
+    for r_idx, d_row in enumerate(data_rows, start=1):
+        if action_idx >= len(d_row):
+            raise EbayFeedError(400, "invalid_csv", f"Row {r_idx} missing Action value.", operation="validate_upload_bytes")
+        val = d_row[action_idx].strip()
+        if val.lower() in live_actions or val.lower() != "draft":
+            raise EbayFeedError(
+                400,
+                "invalid_csv",
+                f"Row {r_idx} contains unauthorized action '{val}'. Only 'Draft' is permitted.",
+                operation="validate_upload_bytes",
+            )
+
+
+def upload_seller_hub_draft_csv(
+    items: list[dict[str, Any]],
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    template_text: str | None = None,
+    category_metadata_map: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not isinstance(items, list) or not items:
         raise EbayFeedError(400, "invalid_request", "Queue must include at least one reviewed item.", operation="create_task")
     unique_items = deduplicate_draft_items(items)
@@ -75,11 +136,24 @@ def upload_seller_hub_draft_csv(items: list[dict[str, Any]], timeout: float = DE
     if _environment() == "sandbox":
         raise EbayFeedError(503, "configuration", f"Seller Hub {_draft_feed_type()} feed uploads are production-only; eBay does not support this Seller Hub upload flow in sandbox.", operation="create_task")
     validate_draft_photo_urls(unique_items)
-    csv_text = export_ebay_draft_csv(unique_items)
+
+    from .seller_hub_draft_template import export_seller_hub_draft_csv, DraftExportValidationError
+    try:
+        csv_text = export_seller_hub_draft_csv(
+            unique_items, template_text=template_text, category_metadata_map=category_metadata_map
+        )
+    except DraftExportValidationError as exc:
+        raise EbayFeedError(400, "validation_failed", str(exc), operation="generate_draft_csv") from exc
+    except ValueError as exc:
+        raise EbayFeedError(400, "invalid_request", str(exc), operation="generate_draft_csv") from exc
+
+    payload_bytes = csv_text.encode("utf-8")
+    _validate_upload_bytes(payload_bytes)
+
     token = _seller_token(timeout)
     task_id = _create_task(token, timeout)
     filename = f"hht_seller_hub_drafts_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
-    upload = _upload_file(token, task_id, filename, csv_text.encode("utf-8"), timeout)
+    upload = _upload_file(token, task_id, filename, payload_bytes, timeout)
     task = get_feed_task(task_id, token=token, timeout=timeout)
     return {
         "status": "submitted",
@@ -196,8 +270,74 @@ def get_feed_result_file(task_id: str, *, token: str | None = None, timeout: flo
     return response.content, content_type, filename
 
 
+def _parse_xml_feed_errors(text: str) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    try:
+        root = ET.fromstring(text.strip())
+        error_elems = [e for e in root.iter() if e.tag.split("}")[-1].lower() in {"error", "errordetail"}]
+        if not error_elems:
+            error_elems = [e for e in root.iter() if e.tag.split("}")[-1].lower() in {"errorresponse", "response"}]
+
+        for elem in error_elems:
+            code = ""
+            msg = ""
+            severity = ""
+            line_num = ""
+            custom_label = ""
+            item_id = ""
+            for child in elem.iter():
+                if child is elem:
+                    continue
+                ctag = child.tag.split("}")[-1].lower()
+                cval = (child.text or "").strip()
+                if not cval:
+                    continue
+                if ctag in {"errorcode", "code", "errorid"}:
+                    code = cval
+                elif ctag in {"message", "errormessage", "longmessage", "shortmessage", "description"}:
+                    if not msg or ctag == "longmessage":
+                        msg = cval
+                elif ctag in {"severitycode", "severity", "status"}:
+                    severity = cval
+                elif ctag in {"linenumber", "line"}:
+                    line_num = cval
+                elif ctag in {"customlabel", "sku"}:
+                    custom_label = cval
+                elif ctag == "itemid":
+                    item_id = cval
+            if code or msg or (severity and severity.lower() in {"error", "failure"}):
+                errors.append({
+                    "lineNumber": line_num,
+                    "action": "Draft",
+                    "status": severity or "Failure",
+                    "code": code,
+                    "message": msg,
+                    "customLabel": custom_label,
+                    "itemId": item_id,
+                })
+    except Exception:
+        # Fallback regex parser for non-wellformed or fragmented XML
+        for match in re.finditer(r"<Error\b[^>]*>(.*?)</Error>", text, re.IGNORECASE | re.DOTALL):
+            block = match.group(1)
+            code_m = re.search(r"<(?:Code|ErrorCode|errorId)>(.*?)</", block, re.IGNORECASE)
+            msg_m = re.search(r"<(?:LongMessage|Message|ErrorMessage|ShortMessage)>(.*?)</", block, re.IGNORECASE)
+            code = code_m.group(1).strip() if code_m else ""
+            msg = msg_m.group(1).strip() if msg_m else ""
+            if code or msg:
+                errors.append({
+                    "lineNumber": "",
+                    "action": "Draft",
+                    "status": "Failure",
+                    "code": code,
+                    "message": msg,
+                    "customLabel": "",
+                    "itemId": "",
+                })
+    return errors
+
+
 def summarize_feed_result(content: bytes, content_type: str = "") -> dict[str, Any]:
-    """Return safe, UI-ready row errors from an eBay feed result file."""
+    """Return safe, UI-ready row errors from an eBay feed result file (CSV or XML)."""
     raw = content
     try:
         if raw[:2] == b"\x1f\x8b" or "gzip" in content_type.lower():
@@ -210,30 +350,39 @@ def summarize_feed_result(content: bytes, content_type: str = "") -> dict[str, A
     except (OSError, zipfile.BadZipFile) as exc:
         return {"error": "Unable to decode eBay's result file.", "details": str(exc)[:200]}
 
-    text = raw.decode("utf-8-sig", errors="replace")
+    text = raw.decode("utf-8-sig", errors="replace").strip()
+    if text.startswith("<") or "<?xml" in text[:50]:
+        xml_errors = _parse_xml_feed_errors(text)
+        return {
+            "format": "xml",
+            "errorCount": len(xml_errors),
+            "errors": xml_errors,
+            "rawPreview": text[:500],
+        }
+
     try:
         rows = list(csv.DictReader(io.StringIO(text)))
     except csv.Error:
         rows = []
     if not rows:
-        return {"errorCount": 0, "errors": [], "rawPreview": text[:500]}
+        return {"format": "csv", "errorCount": 0, "errors": [], "rawPreview": text[:500]}
 
     errors: list[dict[str, Any]] = []
     for row in rows:
         status = str(row.get("Status") or "").strip()
         code = str(row.get("ErrorCode") or row.get("Code") or "").strip()
         message = str(row.get("ErrorMessage") or row.get("Message") or "").strip()
-        if status.lower() == "failure" or code or message:
+        if status.lower() in {"failure", "error"} or code or message:
             errors.append({
-                "lineNumber": str(row.get("Line Number") or "").strip(),
+                "lineNumber": str(row.get("Line Number") or row.get("LineNumber") or "").strip(),
                 "action": str(row.get("Action") or "").strip(),
-                "status": status,
+                "status": status or "Failure",
                 "code": code,
                 "message": message,
                 "customLabel": str(row.get("CustomLabel") or row.get("Custom label (SKU)") or "").strip(),
                 "itemId": str(row.get("ItemID") or "").strip(),
             })
-    return {"errorCount": len(errors), "errors": errors, "rowCount": len(rows)}
+    return {"format": "csv", "errorCount": len(errors), "errors": errors, "rowCount": len(rows)}
 
 
 def get_feed_task_details(task_id: str, *, token: str | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
@@ -242,9 +391,13 @@ def get_feed_task_details(task_id: str, *, token: str | None = None, timeout: fl
     status = str(task.get("status") or "").upper()
     summary = task.get("uploadSummary") or {}
     failures = int(summary.get("failureCount") or 0)
-    if status in {"COMPLETED", "COMPLETED_WITH_ERROR"} and failures:
-        content, content_type, _ = get_feed_result_file(task_id, token=token, timeout=timeout)
-        task["resultDetails"] = summarize_feed_result(content, content_type)
+    if status in {"COMPLETED", "COMPLETED_WITH_ERROR", "FAILED"}:
+        try:
+            content, content_type, _ = get_feed_result_file(task_id, token=token, timeout=timeout)
+            task["resultDetails"] = summarize_feed_result(content, content_type)
+        except Exception as exc:
+            if failures:
+                task["resultDetails"] = {"error": str(exc), "errorCount": failures, "errors": []}
     return task
 
 

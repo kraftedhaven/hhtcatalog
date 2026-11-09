@@ -24,6 +24,9 @@
         startInventoryReanalysis,
         inventoryReanalysisStatus,
         createInventoryItem,
+        inventoryListBatchPhotos,
+        deleteInventoryItem,
+        updateInventoryItemPhotos,
     } from "$lib/api";
     import {
         formatBytes,
@@ -60,6 +63,12 @@
     let proposal = null;
     let reanalyzing = new Set();
 
+    // Photo gallery & manual grouping states
+    let batchPhotos = [];
+    let selectedPhotoIds = new Set();
+    let moveTargetItemId = "";
+    let mergeTargetItemId = "";
+
     // Category aspects state for inspecting item
     let categoryAspects = [];
     let categoryAspectsLoading = false;
@@ -71,6 +80,7 @@
 
     // Items and selection
     let items = [];
+    $: unassignedPhotos = batchPhotos.filter((p) => !p.itemId);
     let selectedItemIds = new Set();
     let inspectingItem = null;
     let inspectingItemId = "";
@@ -231,6 +241,7 @@
         selectedBatchId = batchId;
         batchLoading = true;
         selectedItemIds = new Set();
+        selectedPhotoIds = new Set();
         inspectingItem = null;
         inspectingItemId = "";
         try {
@@ -239,10 +250,250 @@
                 (await inventoryGetBatch(batchId));
             items = await inventoryListBatchItems(batchId);
             proposal = await latestInventoryGroupProposal(batchId).catch(() => null);
+            batchPhotos = await inventoryListBatchPhotos(batchId).catch(() => []);
         } catch (err) {
             globalError = err.message || "Failed to load batch items.";
         } finally {
             batchLoading = false;
+        }
+    }
+
+    async function reloadBatchData() {
+        if (!selectedBatchId) return;
+        try {
+            items = await inventoryListBatchItems(selectedBatchId);
+            batchPhotos = await inventoryListBatchPhotos(selectedBatchId).catch(() => []);
+            if (inspectingItemId) {
+                inspectingItem = items.find((it) => it.id === inspectingItemId) || null;
+            }
+        } catch (err) {
+            console.error("Failed to reload batch data", err);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Manual Photo Selection & Grouping Controls
+    // -----------------------------------------------------------------------
+    function toggleSelectPhoto(photoId) {
+        if (selectedPhotoIds.has(photoId)) {
+            selectedPhotoIds.delete(photoId);
+        } else {
+            selectedPhotoIds.add(photoId);
+        }
+        selectedPhotoIds = new Set(selectedPhotoIds);
+    }
+
+    function selectAllUnassignedPhotos() {
+        const unassigned = batchPhotos.filter((p) => !p.itemId);
+        if (selectedPhotoIds.size === unassigned.length && unassigned.length > 0) {
+            selectedPhotoIds = new Set();
+        } else {
+            selectedPhotoIds = new Set(unassigned.map((p) => p.id));
+        }
+    }
+
+    function clearPhotoSelection() {
+        selectedPhotoIds = new Set();
+    }
+
+    async function createItemFromSelectedPhotos() {
+        const photoIds = Array.from(selectedPhotoIds);
+        if (!photoIds.length || !selectedBatchId) {
+            globalError = "Select at least one photograph to create a new item.";
+            return;
+        }
+        actionLoading = true;
+        globalError = "";
+        try {
+            const newItem = await createInventoryItem(selectedBatchId, {
+                photoIds,
+                coverPhotoId: photoIds[0],
+                listing: { title: `Item (${photoIds.length} photos)` },
+            });
+            selectedPhotoIds = new Set();
+            await reloadBatchData();
+            globalStatus = `Created new item "${newItem.listing?.title || newItem.id.slice(0, 8)}" with ${photoIds.length} photo(s).`;
+        } catch (err) {
+            globalError = err.message || "Failed to create item from selected photos.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function moveSelectedPhotosToItem(targetItemId) {
+        const photoIds = Array.from(selectedPhotoIds);
+        if (!photoIds.length) {
+            globalError = "Select at least one photograph to move.";
+            return;
+        }
+        if (!targetItemId) {
+            globalError = "Choose a destination item.";
+            return;
+        }
+        const target = items.find((it) => it.id === targetItemId);
+        if (!target) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            const existingIds = (target.photos || []).map((p) => p.id);
+            const combinedIds = Array.from(new Set([...existingIds, ...photoIds]));
+            await updateInventoryItemPhotos(targetItemId, combinedIds, target.photos?.[0]?.id || combinedIds[0]);
+            selectedPhotoIds = new Set();
+            moveTargetItemId = "";
+            await reloadBatchData();
+            globalStatus = `Moved ${photoIds.length} photo(s) into item "${target.listing?.title || targetItemId.slice(0, 8)}".`;
+        } catch (err) {
+            globalError = err.message || "Failed to move photos.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function splitItemPhotos(sourceItem, photoIdsToSplit) {
+        if (!sourceItem || !photoIdsToSplit?.length) {
+            globalError = "Select photos inside this item to split out.";
+            return;
+        }
+        actionLoading = true;
+        globalError = "";
+        try {
+            const remaining = (sourceItem.photos || []).filter((p) => !photoIdsToSplit.includes(p.id)).map((p) => p.id);
+            await createInventoryItem(selectedBatchId, {
+                photoIds: photoIdsToSplit,
+                coverPhotoId: photoIdsToSplit[0],
+                listing: { title: `Split from ${sourceItem.listing?.title || 'Item'}` },
+            });
+            await updateInventoryItemPhotos(sourceItem.id, remaining, remaining[0] || null);
+            selectedPhotoIds = new Set();
+            await reloadBatchData();
+            globalStatus = `Split ${photoIdsToSplit.length} photo(s) into a new item group.`;
+        } catch (err) {
+            globalError = err.message || "Failed to split item.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function mergeItems(sourceItemId, targetItemId) {
+        if (!sourceItemId || !targetItemId || sourceItemId === targetItemId) {
+            globalError = "Choose a different item to merge into.";
+            return;
+        }
+        const source = items.find((it) => it.id === sourceItemId);
+        const target = items.find((it) => it.id === targetItemId);
+        if (!source || !target) return;
+        const confirmed = window.confirm(`Merge "${source.listing?.title || sourceItemId.slice(0, 8)}" into "${target.listing?.title || targetItemId.slice(0, 8)}"?\n\nAll photos will be combined into the target item. Original uploads are preserved.`);
+        if (!confirmed) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            const targetIds = (target.photos || []).map((p) => p.id);
+            const sourceIds = (source.photos || []).map((p) => p.id);
+            const combined = Array.from(new Set([...targetIds, ...sourceIds]));
+            await updateInventoryItemPhotos(targetItemId, combined, target.photos?.[0]?.id || combined[0]);
+            await deleteInventoryItem(sourceItemId);
+            mergeTargetItemId = "";
+            await reloadBatchData();
+            globalStatus = `Merged items successfully into "${target.listing?.title || targetItemId.slice(0, 8)}".`;
+        } catch (err) {
+            globalError = err.message || "Failed to merge items.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function setItemCoverPhoto(itemId, photoId) {
+        const item = items.find((it) => it.id === itemId);
+        if (!item) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            const photoIds = (item.photos || []).map((p) => p.id);
+            await updateInventoryItemPhotos(itemId, photoIds, photoId);
+            await reloadBatchData();
+            globalStatus = "Cover photograph updated.";
+        } catch (err) {
+            globalError = err.message || "Failed to set cover photo.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function reorderItemPhoto(itemId, photoId, direction) {
+        const item = items.find((it) => it.id === itemId);
+        if (!item) return;
+        const photos = [...(item.photos || [])];
+        const idx = photos.findIndex((p) => p.id === photoId);
+        if (idx === -1) return;
+        const targetIdx = idx + direction;
+        if (targetIdx < 0 || targetIdx >= photos.length) return;
+        const temp = photos[idx];
+        photos[idx] = photos[targetIdx];
+        photos[targetIdx] = temp;
+        const orderedIds = photos.map((p) => p.id);
+        const coverId = item.photos?.find((p) => p.isCover)?.id || orderedIds[0];
+        actionLoading = true;
+        globalError = "";
+        try {
+            await updateInventoryItemPhotos(itemId, orderedIds, coverId);
+            await reloadBatchData();
+            globalStatus = "Photograph order updated.";
+        } catch (err) {
+            globalError = err.message || "Failed to reorder photo.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function removePhotoFromItem(itemId, photoId) {
+        const item = items.find((it) => it.id === itemId);
+        if (!item) return;
+        const remainingIds = (item.photos || []).filter((p) => p.id !== photoId).map((p) => p.id);
+        actionLoading = true;
+        globalError = "";
+        try {
+            await updateInventoryItemPhotos(itemId, remainingIds, remainingIds[0] || null);
+            await reloadBatchData();
+            globalStatus = "Photograph returned to loose batch gallery. Original upload preserved.";
+        } catch (err) {
+            globalError = err.message || "Failed to remove photo from item.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function renameItem(itemId, newTitle) {
+        const trimmed = (newTitle || "").trim();
+        if (!trimmed) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            await inventoryPatchItem(itemId, { title: trimmed, confirmField: "title" });
+            await reloadBatchData();
+            globalStatus = "Item title updated.";
+        } catch (err) {
+            globalError = err.message || "Failed to rename item.";
+        } finally {
+            actionLoading = false;
+        }
+    }
+
+    async function deleteEmptyOrUnneededItem(itemId) {
+        const item = items.find((it) => it.id === itemId);
+        if (!item) return;
+        const confirmed = window.confirm(`Delete item group "${item.listing?.title || itemId.slice(0, 8)}"?\n\nAny photos assigned to this item will be safely returned to loose photos. No uploaded files are deleted.`);
+        if (!confirmed) return;
+        actionLoading = true;
+        globalError = "";
+        try {
+            await deleteInventoryItem(itemId);
+            if (inspectingItemId === itemId) closeItemInspector();
+            await reloadBatchData();
+            globalStatus = "Item group deleted. Photos returned to loose gallery.";
+        } catch (err) {
+            globalError = err.message || "Failed to delete item group.";
+        } finally {
+            actionLoading = false;
         }
     }
 
@@ -1143,8 +1394,8 @@
                 );
             }
 
-            // Refresh items (backend handles initial grouping or safely appends new item groups without touching existing items)
-            items = await inventoryListBatchItems(selectedBatchId);
+            // Refresh items and photos (backend handles initial grouping or safely appends new item groups without touching existing items)
+            await reloadBatchData();
             const newItemIds = items
                 .filter((item) => !existingItemIds.has(item.id))
                 .map((item) => item.id);
@@ -1660,7 +1911,9 @@
     <div class="instruction-bar">
         <div class="flex items-center gap-3">
             <span class="text-xs text-slate-600 font-medium">
-                {viewMode === "cards"
+                {viewMode === "gallery"
+                    ? "Photo Gallery & Manual Grouping · Select photos to create, split, merge, or reorder item groups. All uploads are preserved."
+                    : viewMode === "cards"
                     ? "Listing Cards · Visual review with live eBay readiness & 1-click pricing. Click any card for item specifics."
                     : "CSV Draft Verification Table · 11-column spreadsheet for verifying draft export values."}
             </span>
@@ -1668,6 +1921,15 @@
         <div class="flex items-center gap-3">
             <!-- View Mode Segmented Control -->
             <div class="view-mode-toggle">
+                <button
+                    type="button"
+                    class="view-toggle-btn"
+                    class:active={viewMode === "gallery"}
+                    on:click={() => (viewMode = "gallery")}
+                    title="Visual photo gallery and manual grouping controls"
+                >
+                    <span class="mr-1">🖼️</span> Photo Gallery & Groups
+                </button>
                 <button
                     type="button"
                     class="view-toggle-btn"
@@ -1720,7 +1982,311 @@
 
     <!-- Main Workspace Container with Cards Grid / Spreadsheet Table & Inspector -->
     <div class="spreadsheet-container">
-        {#if viewMode === "cards"}
+        {#if viewMode === "gallery"}
+            <!-- Photo Gallery & Manual Grouping Studio -->
+            <div class="gallery-studio-container p-4 overflow-y-auto flex-1 bg-slate-50">
+                <!-- Action Bar for Multi-photo Operations -->
+                <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-xs mb-4 flex flex-wrap items-center justify-between gap-3">
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Selection:</span>
+                        <span class="px-2 py-0.5 rounded-full text-xs font-bold {selectedPhotoIds.size > 0 ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 text-slate-600'}">
+                            {selectedPhotoIds.size} photo{selectedPhotoIds.size === 1 ? '' : 's'} selected
+                        </span>
+                        {#if selectedPhotoIds.size > 0}
+                            <button type="button" class="text-xs text-slate-500 hover:text-slate-800 underline ml-1" on:click={clearPhotoSelection}>
+                                Clear
+                            </button>
+                        {/if}
+                        <button type="button" class="text-xs text-blue-600 hover:text-blue-800 font-medium ml-2" on:click={selectAllUnassignedPhotos}>
+                            Select all loose photos
+                        </button>
+                    </div>
+
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <button
+                            type="button"
+                            class="action-btn-primary text-xs px-3 py-1.5"
+                            disabled={actionLoading || selectedPhotoIds.size === 0}
+                            on:click={createItemFromSelectedPhotos}
+                            title="Group selected photos into a brand new item"
+                        >
+                            + Create New Item from Selected ({selectedPhotoIds.size})
+                        </button>
+
+                        {#if items.length > 0}
+                            <div class="flex items-center gap-1">
+                                <select class="text-xs border rounded-md p-1.5 bg-white text-slate-700" bind:value={moveTargetItemId}>
+                                    <option value="">Move selected to...</option>
+                                    {#each items as it}
+                                        <option value={it.id}>{it.listing?.title ? it.listing.title.slice(0, 32) : it.id.slice(0, 8)} ({it.photoCount || (it.photos || []).length} photos)</option>
+                                    {/each}
+                                </select>
+                                <button
+                                    type="button"
+                                    class="action-btn-secondary text-xs px-3 py-1.5"
+                                    disabled={actionLoading || selectedPhotoIds.size === 0 || !moveTargetItemId}
+                                    on:click={() => moveSelectedPhotosToItem(moveTargetItemId)}
+                                    title="Move selected photos into chosen item"
+                                >
+                                    Move to Item
+                                </button>
+                            </div>
+                        {/if}
+                    </div>
+                </div>
+
+                <!-- Unassigned / Loose Photos Section -->
+                <div class="mb-6 bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
+                    <div class="flex items-center justify-between mb-3 border-b pb-2">
+                        <div>
+                            <h3 class="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                <span>📥 Loose / Unassigned Photos</span>
+                                <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                                    {unassignedPhotos.length}
+                                </span>
+                            </h3>
+                            <p class="text-xs text-slate-500">
+                                Photographs uploaded to this batch that are not yet assigned to an item group. Original uploads are always preserved.
+                            </p>
+                        </div>
+                    </div>
+
+                    {#if unassignedPhotos.length === 0}
+                        <div class="p-6 text-center text-slate-500 bg-slate-50 rounded-lg border border-dashed border-slate-200 text-xs">
+                            <span class="text-2xl block mb-1">✓</span>
+                            All uploaded photographs in this batch are assigned to item groups.
+                            <br />Upload more photos or click "Remove" on an item photo below to return it here.
+                        </div>
+                    {:else}
+                        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                            {#each unassignedPhotos as photo}
+                                <div
+                                    class="relative group rounded-lg border-2 p-1 bg-white cursor-pointer transition hover:shadow-md {selectedPhotoIds.has(photo.id) ? 'border-blue-500 bg-blue-50/30' : 'border-slate-200 hover:border-slate-300'}"
+                                    on:click={() => toggleSelectPhoto(photo.id)}
+                                >
+                                    <div class="aspect-square bg-slate-100 rounded overflow-hidden relative">
+                                        <img src={photo.previewUrl || photo.storageUrl} alt={photo.originalFilename} class="w-full h-full object-cover" loading="lazy" />
+                                        <div class="absolute top-1.5 left-1.5">
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedPhotoIds.has(photo.id)}
+                                                on:click|stopPropagation
+                                                on:change={() => toggleSelectPhoto(photo.id)}
+                                                class="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div class="mt-1 px-1">
+                                        <p class="text-[11px] font-medium text-slate-700 truncate" title={photo.originalFilename}>{photo.originalFilename}</p>
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+
+                <!-- Confirmed Item Groups Section -->
+                <div>
+                    <div class="flex items-center justify-between mb-3">
+                        <div>
+                            <h3 class="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                <span>📦 Item Groups</span>
+                                <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">
+                                    {filteredItems.length}
+                                </span>
+                            </h3>
+                            <p class="text-xs text-slate-500">
+                                Each item group represents one physical resale product and will become a Seller Hub draft.
+                            </p>
+                        </div>
+                    </div>
+
+                    {#if filteredItems.length === 0}
+                        <div class="p-8 text-center text-slate-500 bg-white rounded-xl border border-dashed border-slate-200">
+                            No item groups created yet. Select loose photos above and click "+ Create New Item from Selected".
+                        </div>
+                    {:else}
+                        <div class="space-y-4">
+                            {#each filteredItems as item (item.id)}
+                                {@const isItemSelected = selectedItemIds.has(item.id)}
+                                {@const itemPhotoIds = (item.photos || []).map((p) => p.id)}
+                                {@const selectedInsideItem = itemPhotoIds.filter((pid) => selectedPhotoIds.has(pid))}
+                                <div class="bg-white rounded-xl border border-slate-200 shadow-xs p-4 transition hover:border-slate-300">
+                                    <!-- Item Header -->
+                                    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3 mb-3">
+                                        <div class="flex items-center gap-2 flex-1 min-w-[240px]">
+                                            <span class="text-base">🏷️</span>
+                                            <input
+                                                type="text"
+                                                class="text-sm font-bold text-slate-900 border border-transparent hover:border-slate-300 focus:border-blue-500 focus:bg-white bg-slate-50/50 px-2 py-1 rounded-md flex-1 max-w-md transition"
+                                                value={item.listing?.title || ""}
+                                                placeholder="Enter item title..."
+                                                on:change={(e) => renameItem(item.id, e.target.value)}
+                                                title="Click to rename this item group"
+                                            />
+                                            <span class="text-xs font-semibold px-2 py-0.5 rounded-full {item.workflowStatus === 'approved' ? 'bg-emerald-100 text-emerald-800' : item.workflowStatus === 'needs_review' ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-700'}">
+                                                {item.workflowStatus || 'grouped'}
+                                            </span>
+                                            <span class="text-xs text-slate-500">
+                                                📷 {(item.photos || []).length} photo{(item.photos || []).length === 1 ? '' : 's'}
+                                            </span>
+                                            {#if item.listing?.price}
+                                                <span class="text-xs font-bold text-emerald-700 ml-1">
+                                                    ${Number(item.listing.price).toFixed(2)}
+                                                </span>
+                                            {/if}
+                                        </div>
+
+                                        <!-- Item Actions Toolbar -->
+                                        <div class="flex items-center gap-1.5 flex-wrap">
+                                            <button
+                                                type="button"
+                                                class="px-2.5 py-1 text-xs font-medium rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 transition"
+                                                on:click={() => openItemInspector(item)}
+                                                title="Open listing editor, specific details, and pricing evidence"
+                                            >
+                                                📑 Inspect & Edit
+                                            </button>
+
+                                            <button
+                                                type="button"
+                                                class="px-2.5 py-1 text-xs font-medium rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 transition"
+                                                disabled={actionLoading || !item.photos?.length}
+                                                on:click={() => analyzeWorkspaceItem(item.id)}
+                                                title="Run vision model to suggest attributes and price"
+                                            >
+                                                🔍 Analyze
+                                            </button>
+
+                                            {#if selectedInsideItem.length > 0 && selectedInsideItem.length < (item.photos || []).length}
+                                                <button
+                                                    type="button"
+                                                    class="px-2.5 py-1 text-xs font-medium rounded-md bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition"
+                                                    disabled={actionLoading}
+                                                    on:click={() => splitItemPhotos(item, selectedInsideItem)}
+                                                    title="Split checked photos in this item into a separate new item"
+                                                >
+                                                    ✂️ Split Out ({selectedInsideItem.length})
+                                                </button>
+                                            {/if}
+
+                                            <!-- Merge Dropdown -->
+                                            {#if items.length > 1}
+                                                <div class="relative inline-flex items-center">
+                                                    <select
+                                                        class="text-[11px] border rounded-md p-1 bg-white text-slate-600 max-w-[140px]"
+                                                        on:change={(e) => {
+                                                            if (e.target.value) {
+                                                                mergeItems(item.id, e.target.value);
+                                                                e.target.value = "";
+                                                            }
+                                                        }}
+                                                    >
+                                                        <option value="">Merge into...</option>
+                                                        {#each items.filter((other) => other.id !== item.id) as other}
+                                                            <option value={other.id}>{other.listing?.title ? other.listing.title.slice(0, 20) : other.id.slice(0, 8)}</option>
+                                                        {/each}
+                                                    </select>
+                                                </div>
+                                            {/if}
+
+                                            <button
+                                                type="button"
+                                                class="px-2 py-1 text-xs font-medium rounded-md text-rose-600 hover:bg-rose-50 transition"
+                                                disabled={actionLoading}
+                                                on:click={() => deleteEmptyOrUnneededItem(item.id)}
+                                                title="Delete this item group. Photos will return to the loose gallery."
+                                            >
+                                                🗑️
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <!-- Item Photos Grid -->
+                                    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                                        {#each item.photos || [] as photo, pIdx}
+                                            <div class="relative group rounded-lg border-2 p-1 bg-slate-50/50 transition hover:bg-white hover:shadow-sm {photo.isCover ? 'border-amber-400 bg-amber-50/20' : selectedPhotoIds.has(photo.id) ? 'border-blue-500 bg-blue-50/30' : 'border-slate-200 hover:border-slate-300'}">
+                                                <div class="aspect-square bg-slate-100 rounded overflow-hidden relative">
+                                                    <img src={photo.previewUrl || photo.storageUrl} alt={photo.originalFilename} class="w-full h-full object-cover" loading="lazy" />
+                                                    
+                                                    <!-- Photo Checkbox for Selection / Move / Split -->
+                                                    <div class="absolute top-1.5 left-1.5 z-10">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selectedPhotoIds.has(photo.id)}
+                                                            on:change={() => toggleSelectPhoto(photo.id)}
+                                                            class="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer"
+                                                            title="Select photo to move or split"
+                                                        />
+                                                    </div>
+
+                                                    <!-- Position Badge -->
+                                                    <span class="absolute bottom-1.5 left-1.5 bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">
+                                                        #{pIdx + 1}
+                                                    </span>
+
+                                                    {#if photo.isCover}
+                                                        <span class="absolute top-1.5 right-1.5 bg-amber-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded shadow-xs">
+                                                            ★ Cover
+                                                        </span>
+                                                    {/if}
+                                                </div>
+
+                                                <!-- Photo Controls -->
+                                                <div class="mt-1.5 flex items-center justify-between gap-1 text-[10px]">
+                                                    {#if !photo.isCover}
+                                                        <button
+                                                            type="button"
+                                                            class="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-700 hover:bg-amber-50 hover:text-amber-800 hover:border-amber-300 transition"
+                                                            on:click={() => setItemCoverPhoto(item.id, photo.id)}
+                                                            title="Set this photo as the primary cover photo for eBay"
+                                                        >
+                                                            ★ Cover
+                                                        </button>
+                                                    {:else}
+                                                        <span class="text-[10px] font-bold text-amber-700 px-1">Primary</span>
+                                                    {/if}
+
+                                                    <div class="flex items-center gap-0.5">
+                                                        <button
+                                                            type="button"
+                                                            class="px-1 py-0.5 rounded bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30"
+                                                            disabled={pIdx === 0 || actionLoading}
+                                                            on:click={() => reorderItemPhoto(item.id, photo.id, -1)}
+                                                            title="Move photo earlier"
+                                                        >
+                                                            ◀
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            class="px-1 py-0.5 rounded bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30"
+                                                            disabled={pIdx === (item.photos || []).length - 1 || actionLoading}
+                                                            on:click={() => reorderItemPhoto(item.id, photo.id, 1)}
+                                                            title="Move photo later"
+                                                        >
+                                                            ▶
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            class="px-1 py-0.5 rounded bg-white border border-rose-200 text-rose-600 hover:bg-rose-50"
+                                                            disabled={actionLoading}
+                                                            on:click={() => removePhotoFromItem(item.id, photo.id)}
+                                                            title="Remove photo from item (returns to loose gallery; upload is preserved)"
+                                                        >
+                                                            ✖
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        {/each}
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        {:else if viewMode === "cards"}
             <!-- MetaMuse-Style Listing Cards Grid -->
             <div class="cards-grid-container">
                 {#if batchLoading}
@@ -2172,6 +2738,15 @@
                                         on:click={() => openItemInspector(item)}
                                     >
                                         Edit Specifics ↗
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="card-action-btn-secondary"
+                                        on:click={() => reanalyzeItem(item)}
+                                        disabled={reanalyzing.has(item.id)}
+                                        title="Re-run AI analysis using stored photos without re-uploading"
+                                    >
+                                        {reanalyzing.has(item.id) ? 'Analyzing…' : 'Re-analyze stored photos'}
                                     </button>
 
                                     {#if item.workflowStatus === "approved"}
@@ -2702,6 +3277,14 @@
                                                 {statusInfo.text}
                                             </span>
                                         {/if}
+                                        <button
+                                            type="button"
+                                            class="text-[10px] text-slate-600 hover:text-slate-900 underline block mt-1"
+                                            on:click|stopPropagation={() => reanalyzeItem(item)}
+                                            disabled={reanalyzing.has(item.id)}
+                                        >
+                                            {reanalyzing.has(item.id) ? 'Analyzing…' : 'Re-analyze stored photos'}
+                                        </button>
                                     </td>
 
                                     <!-- Updated -->
@@ -2881,16 +3464,61 @@
                                     class="inspector-photo-card"
                                     class:is-cover={photo.isCover}
                                 >
-                                    <img
-                                        src={photo.previewUrl ||
-                                            photo.storageUrl}
-                                        alt={photo.originalFilename}
-                                        class="inspector-img"
-                                    />
-                                    {#if photo.isCover}
-                                        <span class="cover-tag">Cover</span>
-                                    {/if}
-                                    <span class="photo-pos">{pIdx + 1}</span>
+                                    <div class="relative">
+                                        <img
+                                            src={photo.previewUrl ||
+                                                photo.storageUrl}
+                                            alt={photo.originalFilename}
+                                            class="inspector-img"
+                                        />
+                                        {#if photo.isCover}
+                                            <span class="cover-tag">Cover</span>
+                                        {/if}
+                                        <span class="photo-pos">{pIdx + 1}</span>
+                                    </div>
+                                    <div class="flex items-center justify-between gap-1 mt-1 p-1 bg-slate-50 border-t text-[10px]">
+                                        {#if !photo.isCover}
+                                            <button
+                                                type="button"
+                                                class="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-700 hover:bg-amber-50 hover:text-amber-800 transition"
+                                                on:click={() => setItemCoverPhoto(inspectingItem.id, photo.id)}
+                                                title="Set as primary listing cover"
+                                            >
+                                                ★ Cover
+                                            </button>
+                                        {:else}
+                                            <span class="font-bold text-amber-700 px-1">Primary</span>
+                                        {/if}
+                                        <div class="flex items-center gap-0.5">
+                                            <button
+                                                type="button"
+                                                class="px-1 py-0.5 rounded bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30"
+                                                disabled={pIdx === 0 || actionLoading}
+                                                on:click={() => reorderItemPhoto(inspectingItem.id, photo.id, -1)}
+                                                title="Move photo earlier"
+                                            >
+                                                ◀
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="px-1 py-0.5 rounded bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30"
+                                                disabled={pIdx === (inspectingItem.photos || []).length - 1 || actionLoading}
+                                                on:click={() => reorderItemPhoto(inspectingItem.id, photo.id, 1)}
+                                                title="Move photo later"
+                                            >
+                                                ▶
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="px-1 py-0.5 rounded bg-white border border-rose-200 text-rose-600 hover:bg-rose-50"
+                                                disabled={actionLoading}
+                                                on:click={() => removePhotoFromItem(inspectingItem.id, photo.id)}
+                                                title="Remove photo from item (returns to loose batch gallery)"
+                                            >
+                                                ✖
+                                            </button>
+                                        </div>
+                                    </div>
                                 </div>
                             {/each}
                         </div>
@@ -2944,10 +3572,208 @@
                                   ? "Retry photo analysis & price"
                                   : "Analyze photos & estimate price"}
                         </button>
+                        <button
+                            type="button"
+                            class="action-btn-secondary w-full mt-2"
+                            on:click={() => reanalyzeItem(inspectingItem)}
+                            disabled={reanalyzing.has(inspectingItem.id)}
+                        >
+                            {reanalyzing.has(inspectingItem.id) ? 'Analyzing…' : 'Re-analyze stored photos'}
+                        </button>
                         <p class="text-xs text-slate-500 mt-2">
                             Runs the existing vision worker from Workspace. No
                             Analyze-tab upload is required.
                         </p>
+                    </div>
+
+                    <!-- Observed Physical Facts Section (Priority 2) -->
+                    <div class="inspector-section bg-slate-50/70 border border-slate-200 rounded-lg p-3">
+                        <div class="flex items-center justify-between mb-2">
+                            <h4 class="inspector-section-title mb-0 flex items-center gap-1.5 text-slate-800">
+                                <span>📋 Observed Physical Facts</span>
+                            </h4>
+                            <span class="text-[10px] px-2 py-0.5 rounded font-bold bg-slate-200 text-slate-700">
+                                Visible on Item
+                            </span>
+                        </div>
+                        <p class="text-[11px] text-slate-500 mb-2.5">
+                            Factual attributes seen directly on physical labels, markings, or rulers. Never inferred.
+                        </p>
+
+                        <!-- Visible Labels / OCR -->
+                        <div class="mb-2.5">
+                            <label class="block text-xs font-semibold text-slate-700 mb-0.5">
+                                Visible Labels & Markings (OCR)
+                            </label>
+                            <textarea
+                                class="w-full text-xs p-2 border rounded bg-white text-slate-800 font-mono"
+                                rows="2"
+                                placeholder="Extracted text from care labels, brand tags, RN/serial markings..."
+                                value={inspectingItem.listing?.labelOcr || inspectingItem.listing?.distinguishingFeatures || ""}
+                                on:input={(e) => {
+                                    handleInlineEdit(inspectingItem, "labelOcr", e.target.value);
+                                    handleInlineEdit(inspectingItem, "confirmField", "labelOcr");
+                                }}
+                            ></textarea>
+                        </div>
+
+                        <!-- Visible Materials & Construction -->
+                        <div class="mb-2.5">
+                            <label class="block text-xs font-semibold text-slate-700 mb-0.5">
+                                Visible Materials & Construction
+                            </label>
+                            <input
+                                type="text"
+                                class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                                placeholder="e.g. 100% Cotton, Heavyweight Denim, Brass Hardware..."
+                                value={inspectingItem.listing?.mat || inspectingItem.listing?.visibleMaterials || ""}
+                                on:input={(e) => {
+                                    handleInlineEdit(inspectingItem, "mat", e.target.value);
+                                    handleInlineEdit(inspectingItem, "confirmField", "mat");
+                                }}
+                            />
+                        </div>
+
+                        <!-- Measurements (Never invented) -->
+                        <div class="mb-2.5">
+                            <div class="flex items-center justify-between">
+                                <label class="block text-xs font-semibold text-slate-700 mb-0.5">
+                                    Physical Measurements
+                                </label>
+                                <span class="text-[10px] text-slate-400">Only from ruler or tag</span>
+                            </div>
+                            <input
+                                type="text"
+                                class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                                placeholder="e.g. Chest 22 in, Length 28 in (leave blank if not measured)"
+                                value={inspectingItem.listing?.measurements || ""}
+                                on:input={(e) => {
+                                    handleInlineEdit(inspectingItem, "measurements", e.target.value);
+                                    handleInlineEdit(inspectingItem, "confirmField", "measurements");
+                                }}
+                            />
+                            <p class="text-[10px] text-slate-400 mt-0.5">
+                                Measurements are strictly recorded when confirmed on a visible tag or ruler. Never guessed.
+                            </p>
+                        </div>
+
+                        <!-- Condition Notes -->
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-700 mb-0.5">
+                                Observed Condition & Flaws
+                            </label>
+                            <textarea
+                                class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                                rows="2"
+                                placeholder="Describe visible wear, stains, fading, pinholes, or pre-owned condition..."
+                                value={inspectingItem.listing?.cnote || ""}
+                                on:input={(e) => {
+                                    handleInlineEdit(inspectingItem, "cnote", e.target.value);
+                                    handleInlineEdit(inspectingItem, "confirmField", "cnote");
+                                }}
+                            ></textarea>
+                        </div>
+                    </div>
+
+                    <!-- AI Inferences Section (Priority 2) -->
+                    <div class="inspector-section bg-amber-50/40 border border-amber-200/80 rounded-lg p-3">
+                        <div class="flex items-center justify-between mb-2">
+                            <h4 class="inspector-section-title mb-0 flex items-center gap-1.5 text-amber-900">
+                                <span>🤖 AI Inferences (Advisory)</span>
+                            </h4>
+                            <span class="text-[10px] px-2 py-0.5 rounded font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                                Verify on Item
+                            </span>
+                        </div>
+                        <p class="text-[11px] text-slate-600 mb-2.5">
+                            Estimated attributes generated by AI analysis. Review and confirm against physical item.
+                        </p>
+
+                        <!-- Brand Inference -->
+                        <div class="mb-2.5">
+                            <div class="flex items-center justify-between mb-0.5">
+                                <label class="text-xs font-semibold text-slate-700">
+                                    Likely Brand / Maker
+                                </label>
+                                {#if inspectingItem.sellerConfirmed || inspectingItem.provenance?.brand?.sellerConfirmed}
+                                    <span class="text-[10px] text-emerald-700 font-bold">✓ Confirmed</span>
+                                {:else}
+                                    <button
+                                        type="button"
+                                        class="text-[10px] text-blue-600 font-bold hover:underline"
+                                        on:click={() => handleInlineEdit(inspectingItem, "confirmField", "brand")}
+                                    >
+                                        Confirm Brand
+                                    </button>
+                                {/if}
+                            </div>
+                            <input
+                                type="text"
+                                class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                                placeholder="e.g. Carhartt, Nike, Levi's..."
+                                value={inspectingItem.listing?.brand || ""}
+                                on:input={(e) => {
+                                    handleInlineEdit(inspectingItem, "brand", e.target.value);
+                                    handleInlineEdit(inspectingItem, "confirmField", "brand");
+                                }}
+                            />
+                        </div>
+
+                        <!-- Model & Type Inference -->
+                        <div class="grid grid-cols-2 gap-2 mb-2.5">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-700 mb-0.5">
+                                    Likely Model / Line
+                                </label>
+                                <input
+                                    type="text"
+                                    class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                                    placeholder="e.g. Detroit Jacket J97"
+                                    value={inspectingItem.listing?.model || ""}
+                                    on:input={(e) => handleInlineEdit(inspectingItem, "model", e.target.value)}
+                                />
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-700 mb-0.5">
+                                    Product Type
+                                </label>
+                                <input
+                                    type="text"
+                                    class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                                    placeholder="e.g. Workwear Jacket"
+                                    value={inspectingItem.listing?.type || ""}
+                                    on:input={(e) => handleInlineEdit(inspectingItem, "type", e.target.value)}
+                                />
+                            </div>
+                        </div>
+
+                        <!-- Era & Style Inference -->
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-700 mb-0.5">
+                                    Estimated Era / Style
+                                </label>
+                                <input
+                                    type="text"
+                                    class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                                    placeholder="e.g. 1990s, Y2K, Modern"
+                                    value={inspectingItem.listing?.era || inspectingItem.listing?.style || ""}
+                                    on:input={(e) => handleInlineEdit(inspectingItem, "style", e.target.value)}
+                                />
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-700 mb-0.5">
+                                    Department
+                                </label>
+                                <input
+                                    type="text"
+                                    class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                                    placeholder="e.g. Men, Women, Unisex"
+                                    value={inspectingItem.listing?.dept || ""}
+                                    on:input={(e) => handleInlineEdit(inspectingItem, "dept", e.target.value)}
+                                />
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Title & SKU Section -->
@@ -3042,171 +3868,131 @@
                         </div>
                     </div>
 
-                    <!-- Pricing & Visible Price Tiers (Requirement 8) -->
-                    <div class="inspector-section">
-                        <div class="flex items-center justify-between mb-1">
-                            <h4 class="inspector-section-title mb-0">
-                                Pricing & Tiers
+                    <!-- Marketplace Pricing Evidence Section (Priority 2) -->
+                    <div class="inspector-section bg-emerald-50/30 border border-emerald-200/80 rounded-lg p-3">
+                        <div class="flex items-center justify-between mb-1.5">
+                            <h4 class="inspector-section-title mb-0 flex items-center gap-1.5 text-emerald-950">
+                                <span>💰 Marketplace Pricing Evidence</span>
                             </h4>
                             {#if inspectingItem.sellerConfirmed || inspectingItem.provenance?.price?.sellerConfirmed}
-                                <span
-                                    class="text-[11px] px-2 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300"
-                                >
-                                    ✓ Confirmed
+                                <span class="text-[11px] px-2 py-0.5 rounded font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                    ✓ Price Confirmed
                                 </span>
                             {:else}
-                                <span
-                                    class="text-[11px] px-2 py-0.5 rounded font-semibold bg-amber-100 text-amber-800 border border-amber-300"
-                                >
+                                <span class="text-[11px] px-2 py-0.5 rounded font-bold bg-amber-100 text-amber-800 border border-amber-300">
                                     AI estimate — verify before approval
                                 </span>
                             {/if}
                         </div>
-                        <div class="flex items-center gap-2 mb-2">
+
+                        <!-- Data Sources Breakdown: Sold vs Active vs AI -->
+                        <div class="grid grid-cols-3 gap-2 mb-3 bg-white p-2.5 rounded-md border border-slate-200 text-center">
+                            <div class="p-1">
+                                <span class="text-[10px] uppercase font-bold text-slate-500 block">Verified Sold</span>
+                                <span class="text-xs font-bold text-slate-900 block mt-0.5">
+                                    {inspectingItem.listing?.soldPrice ? `$${Number(inspectingItem.listing.soldPrice).toFixed(2)}` : (inspectingItem.provenance?.price?.source === 'exact_used_sold' ? `$${Number(inspectingItem.listing?.price || 0).toFixed(2)}` : '--')}
+                                </span>
+                                <span class="text-[9px] text-slate-400">Actual sales</span>
+                            </div>
+                            <div class="p-1 border-x border-slate-100">
+                                <span class="text-[10px] uppercase font-bold text-slate-500 block">Active Comps</span>
+                                <span class="text-xs font-bold text-slate-900 block mt-0.5">
+                                    {inspectingItem.listing?.activeComparablePrice ? `$${Number(inspectingItem.listing.activeComparablePrice).toFixed(2)}` : '--'}
+                                </span>
+                                <span class="text-[9px] text-slate-400">Advisory asks</span>
+                            </div>
+                            <div class="p-1">
+                                <span class="text-[10px] uppercase font-bold text-slate-500 block">AI Estimate</span>
+                                <span class="text-xs font-bold text-slate-900 block mt-0.5">
+                                    {inspectingItem.balancedPrice ? `$${Number(inspectingItem.balancedPrice).toFixed(2)}` : (inspectingItem.listing?.price ? `$${Number(inspectingItem.listing.price).toFixed(2)}` : '--')}
+                                </span>
+                                <span class="text-[9px] text-slate-400">Algorithmic</span>
+                            </div>
+                        </div>
+
+                        {#if inspectingItem.provenance?.price?.evidence || inspectingItem.pricingTiers?.balanced?.reason}
+                            <p class="text-[11px] text-slate-600 mb-2 italic">
+                                ℹ {inspectingItem.provenance?.price?.evidence || inspectingItem.pricingTiers?.balanced?.reason}
+                            </p>
+                        {/if}
+
+                        <!-- Final Price Input & Quantity -->
+                        <div class="flex items-center gap-2 mb-2.5">
                             <div class="relative flex-1">
-                                <span
-                                    class="absolute left-2.5 top-2 text-slate-400 text-sm"
-                                    >$</span
-                                >
+                                <span class="absolute left-2.5 top-2 text-slate-400 text-sm">$</span>
                                 <input
                                     type="number"
                                     step="0.01"
                                     min="0.01"
-                                    class="w-full text-sm pl-6 pr-2 py-1.5 border rounded-md font-bold text-slate-900"
+                                    class="w-full text-sm pl-6 pr-2 py-1.5 border rounded-md font-bold text-slate-900 bg-white"
                                     placeholder="0.00"
                                     value={inspectingItem.listing?.price || ""}
                                     on:input={(e) => {
-                                        handleInlineEdit(
-                                            inspectingItem,
-                                            "price",
-                                            parseFloat(e.target.value) || 0,
-                                        );
-                                        handleInlineEdit(
-                                            inspectingItem,
-                                            "confirmField",
-                                            "price",
-                                        );
+                                        handleInlineEdit(inspectingItem, "price", parseFloat(e.target.value) || 0);
+                                        handleInlineEdit(inspectingItem, "confirmField", "price");
                                     }}
                                 />
                             </div>
                             <div class="w-24">
-                                <label
-                                    class="text-[10px] uppercase font-bold text-slate-500 block"
-                                >
+                                <label class="text-[10px] uppercase font-bold text-slate-500 block">
                                     Quantity
                                     <input
                                         type="number"
                                         min="1"
-                                        class="w-full text-xs p-1.5 border rounded text-slate-800 mt-0.5"
-                                        value={inspectingItem.listing
-                                            ?.quantity || 1}
-                                        on:input={(e) =>
-                                            handleInlineEdit(
-                                                inspectingItem,
-                                                "quantity",
-                                                parseInt(e.target.value, 10) ||
-                                                    1,
-                                            )}
+                                        class="w-full text-xs p-1.5 border rounded text-slate-800 bg-white mt-0.5"
+                                        value={inspectingItem.listing?.quantity || 1}
+                                        on:input={(e) => handleInlineEdit(inspectingItem, "quantity", parseInt(e.target.value, 10) || 1)}
                                     />
                                 </label>
                             </div>
                         </div>
+
+                        <!-- 1-Click Price Tier Buttons -->
                         <div class="price-tiers-inspector-grid">
                             <button
                                 type="button"
                                 class="price-tier-btn"
-                                title="Fast inventory turnover"
+                                title="Fast inventory turnover (85% of base)"
                                 on:click={() => {
-                                    const p =
-                                        inspectingItem.quickSalePrice ||
-                                        inspectingItem.pricingTiers?.quickSale
-                                            ?.price ||
-                                        inspectingItem.listing?.price;
+                                    const p = inspectingItem.quickSalePrice || inspectingItem.pricingTiers?.quickSale?.price || (inspectingItem.listing?.price ? (Number(inspectingItem.listing.price) * 0.85).toFixed(2) : null);
                                     if (p) {
-                                        handleInlineEdit(
-                                            inspectingItem,
-                                            "price",
-                                            parseFloat(p),
-                                        );
-                                        handleInlineEdit(
-                                            inspectingItem,
-                                            "confirmField",
-                                            "price",
-                                        );
+                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
+                                        handleInlineEdit(inspectingItem, "confirmField", "price");
                                     }
                                 }}
                             >
-                                <span class="tier-name">Quick Sale</span>
-                                <span class="tier-val"
-                                    >${inspectingItem.quickSalePrice ||
-                                        inspectingItem.pricingTiers?.quickSale
-                                            ?.price ||
-                                        "--"}</span
-                                >
+                                <span class="tier-name">Quick Sale (-15%)</span>
+                                <span class="tier-val">${inspectingItem.quickSalePrice || inspectingItem.pricingTiers?.quickSale?.price || (inspectingItem.listing?.price ? (Number(inspectingItem.listing.price) * 0.85).toFixed(2) : "--")}</span>
                             </button>
                             <button
                                 type="button"
                                 class="price-tier-btn"
                                 title="Balanced profit and velocity"
                                 on:click={() => {
-                                    const p =
-                                        inspectingItem.balancedPrice ||
-                                        inspectingItem.pricingTiers?.balanced
-                                            ?.price ||
-                                        inspectingItem.listing?.price;
+                                    const p = inspectingItem.balancedPrice || inspectingItem.pricingTiers?.balanced?.price || inspectingItem.listing?.price;
                                     if (p) {
-                                        handleInlineEdit(
-                                            inspectingItem,
-                                            "price",
-                                            parseFloat(p),
-                                        );
-                                        handleInlineEdit(
-                                            inspectingItem,
-                                            "confirmField",
-                                            "price",
-                                        );
+                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
+                                        handleInlineEdit(inspectingItem, "confirmField", "price");
                                     }
                                 }}
                             >
                                 <span class="tier-name">Balanced</span>
-                                <span class="tier-val"
-                                    >${inspectingItem.balancedPrice ||
-                                        inspectingItem.pricingTiers?.balanced
-                                            ?.price ||
-                                        "--"}</span
-                                >
+                                <span class="tier-val">${inspectingItem.balancedPrice || inspectingItem.pricingTiers?.balanced?.price || inspectingItem.listing?.price || "--"}</span>
                             </button>
                             <button
                                 type="button"
                                 class="price-tier-btn"
-                                title="Maximum margin"
+                                title="Maximum margin (+15% of base)"
                                 on:click={() => {
-                                    const p =
-                                        inspectingItem.premiumPrice ||
-                                        inspectingItem.pricingTiers?.premium
-                                            ?.price ||
-                                        inspectingItem.listing?.price;
+                                    const p = inspectingItem.premiumPrice || inspectingItem.pricingTiers?.premium?.price || (inspectingItem.listing?.price ? (Number(inspectingItem.listing.price) * 1.15).toFixed(2) : null);
                                     if (p) {
-                                        handleInlineEdit(
-                                            inspectingItem,
-                                            "price",
-                                            parseFloat(p),
-                                        );
-                                        handleInlineEdit(
-                                            inspectingItem,
-                                            "confirmField",
-                                            "price",
-                                        );
+                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
+                                        handleInlineEdit(inspectingItem, "confirmField", "price");
                                     }
                                 }}
                             >
-                                <span class="tier-name">Premium</span>
-                                <span class="tier-val"
-                                    >${inspectingItem.premiumPrice ||
-                                        inspectingItem.pricingTiers?.premium
-                                            ?.price ||
-                                        "--"}</span
-                                >
+                                <span class="tier-name">Premium (+15%)</span>
+                                <span class="tier-val">${inspectingItem.premiumPrice || inspectingItem.pricingTiers?.premium?.price || (inspectingItem.listing?.price ? (Number(inspectingItem.listing.price) * 1.15).toFixed(2) : "--")}</span>
                             </button>
                         </div>
                     </div>
@@ -4151,7 +4937,7 @@
                     {:else if isUploading}
                         Uploading & Grouping...
                     {:else}
-                        Create Groups ({uploadFiles.length} photos)
+                        Analyze &amp; create item from {uploadFiles.length} photo{uploadFiles.length === 1 ? '' : 's'}
                     {/if}
                 </button>
             </div>

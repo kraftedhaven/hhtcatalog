@@ -1066,11 +1066,20 @@ def inventory_batch_export_draft_csv(batch_id):
     )
 
 
-@app.route("/api/inventory/batches/<batch_id>/photos", methods=["POST"])
+@app.route("/api/inventory/batches/<batch_id>/photos", methods=["GET", "POST"])
 def inventory_batch_photos(batch_id):
     seller_id = getattr(g, "seller_id", None)
     if not seller_id:
         return jsonify({"error": "Seller authentication is required."}), 401
+
+    if request.method == "GET":
+        try:
+            photos = inventory_workspace.list_batch_photos(batch_id, str(seller_id))
+            return jsonify({"result": photos, "photos": photos})
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
     
     files = request.files.getlist("files") or request.files.getlist("file")
     photos_to_register = []
@@ -1204,11 +1213,19 @@ def inventory_batch_analyze(batch_id):
         return jsonify({"error": str(exc)}), 400
 
 
-@app.route("/api/inventory/items/<item_id>", methods=["GET", "PATCH"])
+@app.route("/api/inventory/items/<item_id>", methods=["GET", "PATCH", "DELETE"])
 def inventory_item_detail(item_id):
     seller_id = getattr(g, "seller_id", None)
     if not seller_id:
         return jsonify({"error": "Seller authentication is required."}), 401
+    if request.method == "DELETE":
+        try:
+            res = inventory_workspace.delete_item(item_id, str(seller_id))
+            return jsonify({"result": res, "deleted": True})
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
     if request.method == "PATCH":
         patch_data = request.get_json(silent=True) or {}
         try:

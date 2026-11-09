@@ -20,6 +20,19 @@ test('persisted inventory workspace exposes the required durable workflow contro
         'Suggest groups',
         'duplicate pair',
         'Re-analyze stored photos',
+        'Photo Gallery & Groups',
+        'Loose / Unassigned Photos',
+        'Item Groups',
+        'Observed Physical Facts',
+        'AI Inferences (Advisory)',
+        'Marketplace Pricing Evidence',
+        'setItemCoverPhoto',
+        'reorderItemPhoto',
+        'removePhotoFromItem',
+        'createItemFromSelectedPhotos',
+        'moveSelectedPhotosToItem',
+        'splitItemPhotos',
+        'mergeItems',
     ]) {
         assert.ok(component.includes(marker), `missing workspace marker: ${marker}`);
     }
@@ -31,6 +44,8 @@ test('inventory API contract includes seller-scoped persistence operations', () 
         'registerInventoryPhotos',
         'createInventoryItem',
         'updateInventoryItemPhotos',
+        'deleteInventoryItem',
+        'inventoryListBatchPhotos',
         'approveInventoryItem',
         'revokeInventoryItemApproval',
         'proposeInventoryGroups',
@@ -39,3 +54,4 @@ test('inventory API contract includes seller-scoped persistence operations', () 
         assert.ok(api.includes(marker), `missing API marker: ${marker}`);
     }
 });
+

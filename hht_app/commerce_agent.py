@@ -1485,7 +1485,10 @@ def run_job(job_id: str) -> dict[str, Any] | None:
                 listing["provenance"] = _listing_provenance(listing)
                 first_pass_seconds = round(time.monotonic() - first_pass_started_at, 3)
                 listing["analysisTimings"] = {"firstPassSeconds": first_pass_seconds, "auditSeconds": None}
-                _update_job(job_id, "running", 65, {"listing": listing, "auditStatus": "running", "cacheHit": cached_listing is not None}, "")
+                running_result = {"listing": listing, "auditStatus": "running", "cacheHit": cached_listing is not None}
+                if workspace_item_id:
+                    running_result["workspaceItemId"] = workspace_item_id
+                _update_job(job_id, "running", 65, running_result, "")
             except Exception:
                 audit_future.cancel()
                 audit_pool.shutdown(wait=False, cancel_futures=True)
@@ -1584,6 +1587,7 @@ def run_job(job_id: str) -> dict[str, Any] | None:
             or ""
         ).strip()
         if kind == "listing_analysis" and workspace_item_id and isinstance(result, dict):
+            result.setdefault("workspaceItemId", workspace_item_id)
             try:
                 from .inventory_workspace import prepopulate_item_from_analysis
                 prepopulate_item_from_analysis(
@@ -1639,6 +1643,8 @@ def run_job(job_id: str) -> dict[str, Any] | None:
                         )
             except Exception:
                 logger.exception("Workspace item failure state update failed")
+        if workspace_item_id and isinstance(details, dict):
+            details.setdefault("workspaceItemId", workspace_item_id)
         _update_job(job_id, "failed", 100, details, message)
         return active_import_job(job_id)
 

@@ -263,3 +263,155 @@ class CategoryAspectsValidationTests(unittest.TestCase):
             self.assertEqual(invalid_res["status"], "invalid_value")
             self.assertTrue(len(invalid_res["invalidValues"]) > 0)
             self.assertEqual(invalid_res["invalidValues"][0]["aspect"], "Brand")
+
+
+class FeedApiOfflineTrackingTests(unittest.TestCase):
+    def test_summarize_feed_result_with_csv_errors(self):
+        from hht_app.ebay_feed import summarize_feed_result
+        csv_content = (
+            "Line Number,Action,Status,ErrorCode,ErrorMessage,CustomLabel,ItemID\n"
+            '1,Draft,Failure,21919301,"Required item specific Brand is missing.",ITEM-001,\n'
+            '2,Draft,Success,,,ITEM-002,123456\n'
+        ).encode("utf-8")
+        summary = summarize_feed_result(csv_content, "text/csv")
+        self.assertEqual(summary["format"], "csv")
+        self.assertEqual(summary["errorCount"], 1)
+        self.assertEqual(summary["errors"][0]["code"], "21919301")
+        self.assertEqual(summary["errors"][0]["customLabel"], "ITEM-001")
+
+    def test_summarize_feed_result_with_xml_errors(self):
+        from hht_app.ebay_feed import summarize_feed_result
+        xml_content = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<BulkDataExchangeResponses>\n'
+            '  <Responses>\n'
+            '    <Response>\n'
+            '      <Status>Failure</Status>\n'
+            '      <Errors>\n'
+            '        <Error>\n'
+            '          <Code>BAF.Error.5</Code>\n'
+            '          <SeverityCode>Error</SeverityCode>\n'
+            '          <ShortMessage>Header is missing or invalid</ShortMessage>\n'
+            '          <LongMessage>The file header row is invalid or missing required columns.</LongMessage>\n'
+            '        </Error>\n'
+            '      </Errors>\n'
+            '    </Response>\n'
+            '  </Responses>\n'
+            '</BulkDataExchangeResponses>'
+        ).encode("utf-8")
+        summary = summarize_feed_result(xml_content, "application/xml")
+        self.assertEqual(summary["format"], "xml")
+        self.assertEqual(summary["errorCount"], 1)
+        self.assertEqual(summary["errors"][0]["code"], "BAF.Error.5")
+        self.assertIn("The file header row is invalid", summary["errors"][0]["message"])
+
+    def test_summarize_feed_result_with_compressed_gzip_xml(self):
+        import gzip
+        from hht_app.ebay_feed import summarize_feed_result
+        xml_text = (
+            '<FeedProcessingResult>\n'
+            '  <Error>\n'
+            '    <Code>21916585</Code>\n'
+            '    <Message>Duplicate custom label detected</Message>\n'
+            '    <CustomLabel>HHT-12345</CustomLabel>\n'
+            '  </Error>\n'
+            '</FeedProcessingResult>'
+        )
+        compressed = gzip.compress(xml_text.encode("utf-8"))
+        summary = summarize_feed_result(compressed, "application/gzip")
+        self.assertEqual(summary["format"], "xml")
+        self.assertEqual(summary["errorCount"], 1)
+        self.assertEqual(summary["errors"][0]["code"], "21916585")
+        self.assertEqual(summary["errors"][0]["customLabel"], "HHT-12345")
+
+    def test_validate_upload_bytes_strictly_enforces_draft_and_blocks_live_actions(self):
+        from hht_app.ebay_feed import _validate_upload_bytes, EbayFeedError
+        # Valid draft CSV bytes pass
+        valid_csv = (
+            "#INFO,Version=0.0.2\n"
+            "Action,Custom label (SKU),Category ID,Title,Price\n"
+            "Draft,SKU-001,93427,Sample Nike Shoes,49.99\n"
+        ).encode("utf-8")
+        _validate_upload_bytes(valid_csv)
+
+        # Live publishing action "Add" is strictly rejected
+        invalid_csv = (
+            "#INFO,Version=0.0.2\n"
+            "Action,Custom label (SKU),Category ID,Title,Price\n"
+            "Add,SKU-001,93427,Sample Nike Shoes,49.99\n"
+        ).encode("utf-8")
+        with self.assertRaises(EbayFeedError) as ctx:
+            _validate_upload_bytes(invalid_csv)
+        self.assertIn("unauthorized action 'Add'", str(ctx.exception))
+
+        # Action "Publish" is strictly rejected
+        publish_csv = (
+            "Action,Custom label (SKU),Category ID,Title,Price\n"
+            "Publish,SKU-001,93427,Sample Nike Shoes,49.99\n"
+        ).encode("utf-8")
+        with self.assertRaises(EbayFeedError) as ctx:
+            _validate_upload_bytes(publish_csv)
+        self.assertIn("unauthorized action 'Publish'", str(ctx.exception))
+
+    def test_get_item_submission_status_distinguishes_in_process_from_terminal(self):
+        import uuid
+        seller_id = f"test-seller-{uuid.uuid4()}"
+        batch = inventory_workspace.create_batch(seller_id)
+        photos = inventory_workspace.register_photos(batch["id"], seller_id, [{"previewUrl": "https://example.com/p.jpg"}])
+        item = inventory_workspace.create_item(batch["id"], seller_id, {
+            "photoIds": [photos[0]["id"]],
+            "listing": {"title": "Test Tracking Item", "price": "29.99", "cat": "93427", "sku": "SKU-TRACK-1"},
+        })
+        now = inventory_workspace._now_iso()
+        sub_id = str(uuid.uuid4())
+        task_id = f"task-async-{uuid.uuid4()}"
+        with inventory_workspace.connect() as db:
+            db.execute(
+                "INSERT INTO inventory_submissions(id, item_id, seller_id, batch_id, feed_task_id, status, result_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'submitted', '{}', ?, ?)",
+                (sub_id, item["id"], seller_id, batch["id"], task_id, now, now),
+            )
+
+        mock_in_process_details = {
+            "taskId": task_id,
+            "status": "IN_PROCESS",
+            "uploadSummary": {"failureCount": 0, "successCount": 0},
+        }
+        with mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value=mock_in_process_details):
+            status_res = inventory_workspace.get_item_submission_status(item["id"], seller_id)
+
+        self.assertEqual(status_res["status"], "processing")
+        self.assertEqual(status_res["itemWorkflowStatus"], "draft_submitted")
+
+    def test_get_item_submission_status_handles_partial_failure(self):
+        import uuid
+        seller_id = f"test-seller-{uuid.uuid4()}"
+        batch = inventory_workspace.create_batch(seller_id)
+        photos = inventory_workspace.register_photos(batch["id"], seller_id, [{"previewUrl": "https://example.com/p.jpg"}])
+        item = inventory_workspace.create_item(batch["id"], seller_id, {
+            "photoIds": [photos[0]["id"]],
+            "listing": {"title": "Test Partial Failure", "price": "29.99", "cat": "93427", "sku": "SKU-FAIL-1"},
+        })
+        now = inventory_workspace._now_iso()
+        sub_id = str(uuid.uuid4())
+        task_id = f"task-partial-{uuid.uuid4()}"
+        with inventory_workspace.connect() as db:
+            db.execute(
+                "INSERT INTO inventory_submissions(id, item_id, seller_id, batch_id, feed_task_id, status, result_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'submitted', '{}', ?, ?)",
+                (sub_id, item["id"], seller_id, batch["id"], task_id, now, now),
+            )
+
+        mock_partial_details = {
+            "taskId": task_id,
+            "status": "COMPLETED",
+            "uploadSummary": {"failureCount": 1, "successCount": 2},
+            "resultDetails": {
+                "format": "csv",
+                "errorCount": 1,
+                "errors": [{"code": "21919301", "message": "Brand missing", "customLabel": "SKU-FAIL-1"}],
+            },
+        }
+        with mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value=mock_partial_details):
+            status_res = inventory_workspace.get_item_submission_status(item["id"], seller_id)
+
+        self.assertEqual(status_res["status"], "completed_with_errors")
+        self.assertEqual(status_res["itemWorkflowStatus"], "draft_failed")
