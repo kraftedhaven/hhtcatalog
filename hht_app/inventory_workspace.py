@@ -1511,8 +1511,22 @@ def submit_approved_drafts(
                 "Only explicitly approved items can reach the Seller Hub draft feed."
             )
         listing = dict(item["listing"])
-        # Ensure reviewAcknowledged is True for draft feed validation
-        listing["reviewAcknowledged"] = True
+        photo_urls = [_photo_image_url(p) for p in item.get("photos", []) if _photo_image_url(p)]
+        if photo_urls:
+            listing["pic"] = " ".join(photo_urls)
+            listing["coverUrl"] = item.get("coverThumbnail") or photo_urls[0]
+            listing["photos"] = item["photos"]
+            listing["photoAssets"] = item["photos"]
+            listing["photoCount"] = len(photo_urls)
+
+        # Retrieve and validate genuine persisted human-review / approval state. Do not hardcode True.
+        if bool(item.get("sellerConfirmed")):
+            listing["reviewAcknowledged"] = True
+        elif bool(listing.get("reviewAcknowledged")):
+            listing["reviewAcknowledged"] = True
+        else:
+            listing["reviewAcknowledged"] = False
+
         items_to_submit.append((item, listing))
 
     # Existing draft feed validation & upload
@@ -1845,9 +1859,68 @@ def create_item(batch_id: str, seller_id: str, payload: dict[str, Any], actor: s
         )
         if photo_ids:
             _assign_photos_to_item(db, batch_id, seller_id, item_id, photo_ids, cover_photo_id, now)
+        _sync_item_photos_to_listing(db, item_id, seller_id, now)
         db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, batch_id, seller_id))
 
     return get_item(item_id, seller_id)
+
+
+def _photo_image_url(photo: dict[str, Any]) -> str:
+    """Extract authoritative image URL from a photo dict supporting both API camelCase and DB snake_case."""
+    return str(
+        photo.get("storageUrl")
+        or photo.get("storage_url")
+        or photo.get("previewUrl")
+        or photo.get("preview_url")
+        or photo.get("url")
+        or ""
+    ).strip()
+
+
+def _sync_item_photos_to_listing(db: Any, item_id: str, seller_id: str, now: str) -> dict[str, Any]:
+    """Synchronize an item's listing_json (pic, coverUrl, photoCount) and validation with inventory_item_photos."""
+    photo_rows = db.execute(
+        """SELECT * FROM inventory_item_photos
+           WHERE item_id = ?
+           ORDER BY position ASC, created_at ASC""",
+        (item_id,),
+    ).fetchall()
+
+    urls = []
+    cover_url = ""
+    for p in photo_rows:
+        u = str(p["storage_url"] or p["preview_url"] or "").strip()
+        if u:
+            urls.append(u)
+            if bool(p["is_cover"]) and not cover_url:
+                cover_url = u
+
+    if not cover_url and urls:
+        cover_url = urls[0]
+
+    item_row = db.execute(
+        "SELECT listing_json, provenance_json FROM inventory_items WHERE id = ? AND seller_id = ?",
+        (item_id, seller_id),
+    ).fetchone()
+    if not item_row:
+        return {}
+
+    listing = _decode(item_row["listing_json"], {})
+    provenance = _decode(item_row["provenance_json"], {})
+
+    listing["pic"] = " ".join(urls)
+    listing["coverUrl"] = cover_url
+    listing["photoCount"] = len(urls)
+
+    validation = check_listing_rules(listing, len(urls), provenance)
+
+    db.execute(
+        """UPDATE inventory_items
+           SET listing_json = ?, validation_json = ?, updated_at = ?
+           WHERE id = ? AND seller_id = ?""",
+        (_json(listing), _json(validation), now, item_id, seller_id),
+    )
+    return listing
 
 
 def _assign_photos_to_item(
@@ -1877,11 +1950,14 @@ def update_item_photos(item_id: str, seller_id: str, photo_ids: list[str], cover
     """Reassign or reorder photos assigned to an item."""
     if not seller_id:
         raise ValueError("Seller ownership is required.")
+    if not photo_ids:
+        raise ValueError("An inventory item must contain at least one photo. To remove all photos, delete the item group.")
     init_db()
     item = get_item(item_id, seller_id)
     now = _now_iso()
     with connect() as db:
         _assign_photos_to_item(db, item["batchId"], seller_id, item_id, [str(p) for p in photo_ids], cover_photo_id, now)
+        _sync_item_photos_to_listing(db, item_id, seller_id, now)
         db.execute("UPDATE inventory_items SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, item_id, seller_id))
     return get_item(item_id, seller_id)
 
@@ -1900,23 +1976,125 @@ def update_item(item_id: str, seller_id: str, fields: dict[str, Any], actor: str
     return patch_item(item_id, seller_id, fields)
 
 
-def delete_item(item_id: str, seller_id: str) -> dict[str, Any]:
+def delete_item(item_id: str, seller_id: str, allow_destructive: bool = False) -> dict[str, Any]:
     """Delete an item from a batch while preserving all uploaded photos in the batch."""
     if not seller_id:
         raise ValueError("Seller ownership is required.")
     init_db()
-    item = get_item(item_id, seller_id)
-    if item["workflowStatus"] in ("draft_submitted", "draft_created"):
-        raise ValueError("Cannot delete an item with an active eBay draft submission.")
-    now = _now_iso()
     with connect() as db:
+        row = db.execute(
+            "SELECT workflow_status, batch_id, seller_confirmed, seller_confirmed_json FROM inventory_items WHERE id = ? AND seller_id = ?",
+            (item_id, seller_id),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"Item {item_id} not found.")
+
+        status = str(row["workflow_status"] or "")
+        batch_id = str(row["batch_id"])
+
+        if status in ("draft_submitted", "draft_created"):
+            raise ValueError("Cannot delete an item with an active eBay draft submission.")
+        if status in ("analysis_queued", "analysis_running"):
+            raise ValueError("Cannot delete an item while background AI analysis is running.")
+        if status == "approved" and not allow_destructive:
+            raise ValueError("Item is marked 'approved'. Explicit confirmation (allow_destructive=True) is required to delete an approved item.")
+
+        has_confirmed = False
+        if bool(row["seller_confirmed"]):
+            has_confirmed = True
+        c_dict = _decode(row["seller_confirmed_json"] if row else "{}", {})
+        if any(bool(v) for v in c_dict.values()):
+            has_confirmed = True
+
+        if has_confirmed and not allow_destructive:
+            raise ValueError("Item contains seller-confirmed fields. Explicit confirmation (allow_destructive=True) is required to delete it.")
+
+        now = _now_iso()
         db.execute(
             "UPDATE inventory_item_photos SET item_id = NULL, is_cover = ? WHERE item_id = ? AND batch_id = ?",
-            (False, item_id, item["batchId"]),
+            (False, item_id, batch_id),
         )
         db.execute("DELETE FROM inventory_items WHERE id = ? AND seller_id = ?", (item_id, seller_id))
-        db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, item["batchId"], seller_id))
-    return {"deleted": True, "itemId": item_id, "batchId": item["batchId"]}
+        db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, batch_id, seller_id))
+
+    return {"deleted": True, "itemId": item_id, "batchId": batch_id}
+
+
+def merge_items(source_item_id: str, target_item_id: str, seller_id: str, allow_destructive: bool = False) -> dict[str, Any]:
+    """Atomically merge source_item into target_item, transferring all photos and deleting source item."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    if not source_item_id or not target_item_id:
+        raise ValueError("Both source and target item IDs are required.")
+    if source_item_id == target_item_id:
+        raise ValueError("Cannot merge an item into itself.")
+
+    init_db()
+    with connect() as db:
+        s_row = db.execute(
+            "SELECT workflow_status, batch_id, seller_confirmed, seller_confirmed_json FROM inventory_items WHERE id = ? AND seller_id = ?",
+            (source_item_id, seller_id),
+        ).fetchone()
+        if not s_row:
+            raise KeyError(f"Source item {source_item_id} not found.")
+
+        t_row = db.execute(
+            "SELECT workflow_status, batch_id, seller_confirmed, seller_confirmed_json FROM inventory_items WHERE id = ? AND seller_id = ?",
+            (target_item_id, seller_id),
+        ).fetchone()
+        if not t_row:
+            raise KeyError(f"Target item {target_item_id} not found.")
+
+        if str(s_row["batch_id"]) != str(t_row["batch_id"]):
+            raise ValueError("Cannot merge items from different batches.")
+
+        s_status = str(s_row["workflow_status"] or "")
+        t_status = str(t_row["workflow_status"] or "")
+
+        if s_status in ("draft_submitted", "draft_created") or t_status in ("draft_submitted", "draft_created"):
+            raise ValueError("Cannot merge items with active eBay draft submissions.")
+        if s_status in ("analysis_queued", "analysis_running") or t_status in ("analysis_queued", "analysis_running"):
+            raise ValueError("Cannot merge items while background AI analysis is running.")
+
+        source_has_confirmed = False
+        if bool(s_row["seller_confirmed"]):
+            source_has_confirmed = True
+        c_dict = _decode(s_row["seller_confirmed_json"] if s_row else "{}", {})
+        if any(bool(v) for v in c_dict.values()):
+            source_has_confirmed = True
+
+        if (s_status == "approved" or source_has_confirmed) and not allow_destructive:
+            raise ValueError("Source item contains approved listing data or seller-confirmed fields. Explicit confirmation (allow_destructive=True) is required to merge and discard its listing.")
+
+        batch_id = str(s_row["batch_id"])
+        now = _now_iso()
+
+        # Get target item's current max position
+        pos_row = db.execute("SELECT COALESCE(MAX(position), -1) AS max_pos FROM inventory_item_photos WHERE item_id = ?", (target_item_id,)).fetchone()
+        start_pos = (int(pos_row["max_pos"]) if pos_row else -1) + 1
+
+        # Reassign all source photos to target
+        source_photos = db.execute(
+            "SELECT id FROM inventory_item_photos WHERE item_id = ? ORDER BY position ASC, created_at ASC",
+            (source_item_id,),
+        ).fetchall()
+
+        for offset, sp in enumerate(source_photos):
+            db.execute(
+                "UPDATE inventory_item_photos SET item_id = ?, position = ?, is_cover = ? WHERE id = ?",
+                (target_item_id, start_pos + offset, False, sp["id"]),
+            )
+
+        # Delete the emptied source item record
+        db.execute("DELETE FROM inventory_items WHERE id = ? AND seller_id = ?", (source_item_id, seller_id))
+
+        # Synchronize target item's listing_json (pic, coverUrl, photoCount, validation)
+        _sync_item_photos_to_listing(db, target_item_id, seller_id, now)
+
+        # Update batch timestamp
+        db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, batch_id, seller_id))
+
+    return get_item(target_item_id, seller_id)
 
 
 def list_batch_photos(batch_id: str, seller_id: str) -> list[dict[str, Any]]:

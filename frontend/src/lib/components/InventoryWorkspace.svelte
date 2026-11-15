@@ -26,6 +26,7 @@
         createInventoryItem,
         inventoryListBatchPhotos,
         deleteInventoryItem,
+        inventoryMergeItems,
         updateInventoryItemPhotos,
     } from "$lib/api";
     import {
@@ -354,6 +355,10 @@
             globalError = "Select photos inside this item to split out.";
             return;
         }
+        if (photoIdsToSplit.length >= (sourceItem.photos || []).length) {
+            globalError = "Cannot split all photos out of an item. At least one photo must remain in the original item. To create a new item from all photos, move them or delete this group.";
+            return;
+        }
         actionLoading = true;
         globalError = "";
         try {
@@ -382,16 +387,18 @@
         const source = items.find((it) => it.id === sourceItemId);
         const target = items.find((it) => it.id === targetItemId);
         if (!source || !target) return;
-        const confirmed = window.confirm(`Merge "${source.listing?.title || sourceItemId.slice(0, 8)}" into "${target.listing?.title || targetItemId.slice(0, 8)}"?\n\nAll photos will be combined into the target item. Original uploads are preserved.`);
+
+        const isDestructive = source.workflowStatus === "approved" || Boolean(source.sellerConfirmed);
+        const confirmMsg = isDestructive
+            ? `WARNING: "${source.listing?.title || sourceItemId.slice(0, 8)}" is marked approved or contains seller-confirmed listing fields.\n\nMerging will transfer all photos into "${target.listing?.title || targetItemId.slice(0, 8)}" and delete the source listing data.\n\nAre you sure you want to proceed?`
+            : `Merge "${source.listing?.title || sourceItemId.slice(0, 8)}" into "${target.listing?.title || targetItemId.slice(0, 8)}"?\n\nAll photos will be combined into the target item. Original uploads are preserved.`;
+
+        const confirmed = window.confirm(confirmMsg);
         if (!confirmed) return;
         actionLoading = true;
         globalError = "";
         try {
-            const targetIds = (target.photos || []).map((p) => p.id);
-            const sourceIds = (source.photos || []).map((p) => p.id);
-            const combined = Array.from(new Set([...targetIds, ...sourceIds]));
-            await updateInventoryItemPhotos(targetItemId, combined, target.photos?.[0]?.id || combined[0]);
-            await deleteInventoryItem(sourceItemId);
+            await inventoryMergeItems(targetItemId, sourceItemId, isDestructive);
             mergeTargetItemId = "";
             await reloadBatchData();
             globalStatus = `Merged items successfully into "${target.listing?.title || targetItemId.slice(0, 8)}".`;
@@ -481,12 +488,16 @@
     async function deleteEmptyOrUnneededItem(itemId) {
         const item = items.find((it) => it.id === itemId);
         if (!item) return;
-        const confirmed = window.confirm(`Delete item group "${item.listing?.title || itemId.slice(0, 8)}"?\n\nAny photos assigned to this item will be safely returned to loose photos. No uploaded files are deleted.`);
+        const isDestructive = item.workflowStatus === "approved" || Boolean(item.sellerConfirmed);
+        const confirmMsg = isDestructive
+            ? `WARNING: Item "${item.listing?.title || itemId.slice(0, 8)}" is marked approved or has seller-confirmed listing fields.\n\nDeleting this item group will discard its listing draft and return its photos to loose unassigned photos.\n\nAre you sure you want to proceed?`
+            : `Delete item group "${item.listing?.title || itemId.slice(0, 8)}"?\n\nAny photos assigned to this item will be safely returned to loose photos. No uploaded files are deleted.`;
+        const confirmed = window.confirm(confirmMsg);
         if (!confirmed) return;
         actionLoading = true;
         globalError = "";
         try {
-            await deleteInventoryItem(itemId);
+            await deleteInventoryItem(itemId, isDestructive);
             if (inspectingItemId === itemId) closeItemInspector();
             await reloadBatchData();
             globalStatus = "Item group deleted. Photos returned to loose gallery.";

@@ -45,6 +45,7 @@ test('inventory API contract includes seller-scoped persistence operations', () 
         'createInventoryItem',
         'updateInventoryItemPhotos',
         'deleteInventoryItem',
+        'inventoryMergeItems',
         'inventoryListBatchPhotos',
         'approveInventoryItem',
         'revokeInventoryItemApproval',

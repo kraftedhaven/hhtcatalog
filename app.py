@@ -1219,13 +1219,18 @@ def inventory_item_detail(item_id):
     if not seller_id:
         return jsonify({"error": "Seller authentication is required."}), 401
     if request.method == "DELETE":
+        allow_destructive = request.args.get("allowDestructive", "").lower() in ("true", "1")
+        if not allow_destructive:
+            data = request.get_json(silent=True) or {}
+            allow_destructive = bool(data.get("allowDestructive"))
         try:
-            res = inventory_workspace.delete_item(item_id, str(seller_id))
+            res = inventory_workspace.delete_item(item_id, str(seller_id), allow_destructive=allow_destructive)
             return jsonify({"result": res, "deleted": True})
         except KeyError as exc:
             return jsonify({"error": str(exc)}), 404
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            status = 409 if "Explicit confirmation" in str(exc) else 400
+            return jsonify({"error": str(exc)}), status
     if request.method == "PATCH":
         patch_data = request.get_json(silent=True) or {}
         try:
@@ -1257,6 +1262,24 @@ def inventory_item_photos_update(item_id):
         return jsonify({"result": item, "item": item})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/<target_item_id>/merge", methods=["POST"])
+def inventory_item_merge(target_item_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    source_item_id = str(body.get("sourceItemId") or "")
+    allow_destructive = bool(body.get("allowDestructive"))
+    try:
+        merged = inventory_workspace.merge_items(source_item_id, target_item_id, str(seller_id), allow_destructive=allow_destructive)
+        return jsonify({"result": merged, "item": merged})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        status = 409 if "Explicit confirmation" in str(exc) else 400
+        return jsonify({"error": str(exc)}), status
 
 
 @app.route("/api/inventory/items/<item_id>/research", methods=["POST"])

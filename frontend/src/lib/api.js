@@ -431,9 +431,20 @@ export async function inventoryListBatchPhotos(batchId) {
     return body.result || body.photos || [];
 }
 
-export async function deleteInventoryItem(itemId) {
-    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}`, {
+export async function deleteInventoryItem(itemId, allowDestructive = false) {
+    const qs = allowDestructive ? '?allowDestructive=true' : '';
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(itemId)}${qs}`, {
         method: 'DELETE',
+    });
+    const body = await parseResponse(res);
+    return body.result || body;
+}
+
+export async function inventoryMergeItems(targetItemId, sourceItemId, allowDestructive = false) {
+    const res = await authenticatedFetch(`${baseUrl()}/api/inventory/items/${encodeURIComponent(targetItemId)}/merge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceItemId, allowDestructive }),
     });
     const body = await parseResponse(res);
     return body.result || body;

@@ -1064,6 +1064,190 @@ class InventoryWorkspaceTests(unittest.TestCase):
             final_photos = client.get(f"/api/inventory/batches/{batch_id}/photos").get_json()["result"]
             self.assertEqual(len(final_photos), 2)
 
+    def test_grouped_item_populates_listing_photos_and_metadata(self):
+        """Requirement: create_item() immediately populates pic, coverUrl, photoCount in listing_json."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Photos Sync Batch", grouping_mode="manual")
+        photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "front.jpg", "previewUrl": "https://example.com/front.jpg", "storageUrl": "https://example.com/front_high.jpg"},
+            {"filename": "back.jpg", "previewUrl": "https://example.com/back.jpg", "storageUrl": "https://example.com/back_high.jpg"},
+        ])
+        item = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [photos[0]["id"], photos[1]["id"]],
+            "coverPhotoId": photos[0]["id"],
+            "listing": {"title": "Wool Sweater"},
+        })
+        listing = item["listing"]
+        self.assertEqual(listing["photoCount"], 2)
+        self.assertEqual(listing["coverUrl"], "https://example.com/front_high.jpg")
+        self.assertIn("https://example.com/front_high.jpg", listing["pic"])
+        self.assertIn("https://example.com/back_high.jpg", listing["pic"])
+
+    def test_photo_mutation_synchronizes_listing_metadata(self):
+        """Requirement: update_item_photos synchronizes pic, coverUrl, and photoCount."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Mutation Sync Batch", grouping_mode="manual")
+        photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "p1.jpg", "previewUrl": "https://example.com/p1.jpg", "storageUrl": "https://example.com/p1.jpg"},
+            {"filename": "p2.jpg", "previewUrl": "https://example.com/p2.jpg", "storageUrl": "https://example.com/p2.jpg"},
+            {"filename": "p3.jpg", "previewUrl": "https://example.com/p3.jpg", "storageUrl": "https://example.com/p3.jpg"},
+        ])
+        p_ids = [p["id"] for p in photos]
+        item = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [p_ids[0], p_ids[1]],
+            "coverPhotoId": p_ids[0],
+            "listing": {"title": "Jacket"},
+        })
+        self.assertEqual(item["listing"]["photoCount"], 2)
+
+        # 1. Change cover photo to p2
+        updated = inventory_workspace.update_item_photos(item["id"], self.seller_id, [p_ids[0], p_ids[1]], cover_photo_id=p_ids[1])
+        self.assertEqual(updated["listing"]["coverUrl"], "https://example.com/p2.jpg")
+
+        # 2. Add p3 and reorder: [p3, p1, p2]
+        updated2 = inventory_workspace.update_item_photos(item["id"], self.seller_id, [p_ids[2], p_ids[0], p_ids[1]], cover_photo_id=p_ids[2])
+        self.assertEqual(updated2["listing"]["photoCount"], 3)
+        self.assertEqual(updated2["listing"]["coverUrl"], "https://example.com/p3.jpg")
+        self.assertTrue(updated2["listing"]["pic"].startswith("https://example.com/p3.jpg"))
+
+        # 3. Disallow empty photo list (prevents leaving zombie empty item)
+        with self.assertRaises(ValueError) as ctx:
+            inventory_workspace.update_item_photos(item["id"], self.seller_id, [])
+        self.assertIn("at least one photo", str(ctx.exception))
+
+    def test_csv_export_contains_correct_image_urls(self):
+        """Requirement: CSV export contains the authoritative image URLs from inventory_item_photos."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="CSV Export Test Batch", grouping_mode="manual")
+        photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "shoe_1.jpg", "previewUrl": "https://example.com/shoe_1.jpg", "storageUrl": "https://example.com/shoe_1.jpg"},
+            {"filename": "shoe_2.jpg", "previewUrl": "https://example.com/shoe_2.jpg", "storageUrl": "https://example.com/shoe_2.jpg"},
+        ])
+        item = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [photos[0]["id"], photos[1]["id"]],
+            "listing": {
+                "title": "Cole Haan Vintage Oxford Shoes",
+                "price": "49.99",
+                "cat": "93427",
+                "size": "10",
+                "brand": "Cole Haan",
+                "sku": "OXFORD-01",
+            },
+        })
+        # Approve item
+        inventory_workspace.approve_items([item["id"]], self.seller_id)
+
+        # Export CSV
+        csv_text = inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], self.seller_id)
+        self.assertIn("https://example.com/shoe_1.jpg", csv_text)
+        self.assertIn("https://example.com/shoe_2.jpg", csv_text)
+
+    def test_deletion_safeguards_approved_and_seller_confirmed_and_in_flight(self):
+        """Requirement: delete_item protects approved, confirmed, and in-flight analysis items."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Safeguards Batch", grouping_mode="manual")
+        photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "item.jpg", "previewUrl": "https://example.com/item.jpg", "storageUrl": "https://example.com/item.jpg"},
+        ])
+        item = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [photos[0]["id"]],
+            "listing": {"title": "Coat", "price": "75.00", "cat": "57988", "size": "L"},
+        })
+
+        # 1. In-flight analysis guard
+        with inventory_workspace.connect() as db:
+            db.execute("UPDATE inventory_items SET workflow_status = 'analysis_running' WHERE id = ?", (item["id"],))
+        with self.assertRaises(ValueError) as ctx:
+            inventory_workspace.delete_item(item["id"], self.seller_id)
+        self.assertIn("while background AI analysis is running", str(ctx.exception))
+
+        # 2. Approved item guard
+        with inventory_workspace.connect() as db:
+            db.execute("UPDATE inventory_items SET workflow_status = 'approved' WHERE id = ?", (item["id"],))
+        with self.assertRaises(ValueError) as ctx:
+            inventory_workspace.delete_item(item["id"], self.seller_id)
+        self.assertIn("Explicit confirmation (allow_destructive=True) is required", str(ctx.exception))
+
+        # 3. Seller-confirmed fields guard
+        with inventory_workspace.connect() as db:
+            db.execute("UPDATE inventory_items SET workflow_status = 'needs_review', seller_confirmed_json = ? WHERE id = ?", (inventory_workspace._json({"title": "Confirmed Coat"}), item["id"]))
+        with self.assertRaises(ValueError) as ctx:
+            inventory_workspace.delete_item(item["id"], self.seller_id)
+        self.assertIn("contains seller-confirmed fields", str(ctx.exception))
+
+        # 4. Explicit allow_destructive=True succeeds
+        res = inventory_workspace.delete_item(item["id"], self.seller_id, allow_destructive=True)
+        self.assertTrue(res["deleted"])
+
+    def test_atomic_merge_and_destructive_safeguards_and_rollback(self):
+        """Requirement: merge_items is atomic, requires destructive authorization, and rolls back on failure."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Merge Batch", grouping_mode="manual")
+        photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "source1.jpg", "previewUrl": "https://example.com/s1.jpg", "storageUrl": "https://example.com/s1.jpg"},
+            {"filename": "target1.jpg", "previewUrl": "https://example.com/t1.jpg", "storageUrl": "https://example.com/t1.jpg"},
+        ])
+        source = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [photos[0]["id"]],
+            "listing": {"title": "Source Item", "price": "10.00", "cat": "111", "size": "M"},
+        })
+        target = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [photos[1]["id"]],
+            "listing": {"title": "Target Item", "price": "20.00", "cat": "111", "size": "M"},
+        })
+
+        # 1. Block destructive merge of approved source item without authorization
+        with inventory_workspace.connect() as db:
+            db.execute("UPDATE inventory_items SET workflow_status = 'approved' WHERE id = ?", (source["id"],))
+        with self.assertRaises(ValueError) as ctx:
+            inventory_workspace.merge_items(source["id"], target["id"], self.seller_id, allow_destructive=False)
+        self.assertIn("Explicit confirmation (allow_destructive=True) is required", str(ctx.exception))
+
+        # 2. Simulated failure inside transaction rolls back completely
+        with mock.patch("hht_app.inventory_workspace._sync_item_photos_to_listing", side_effect=RuntimeError("Simulated DB failure")):
+            with self.assertRaises(RuntimeError):
+                inventory_workspace.merge_items(source["id"], target["id"], self.seller_id, allow_destructive=True)
+
+        # Verify rollback: source item still exists and still owns its photo!
+        source_check = inventory_workspace.get_item(source["id"], self.seller_id)
+        self.assertEqual(source_check["photoCount"], 1)
+        self.assertEqual(source_check["photos"][0]["id"], photos[0]["id"])
+        target_check = inventory_workspace.get_item(target["id"], self.seller_id)
+        self.assertEqual(target_check["photoCount"], 1)
+
+        # 3. Successful atomic merge with allow_destructive=True
+        merged = inventory_workspace.merge_items(source["id"], target["id"], self.seller_id, allow_destructive=True)
+        self.assertEqual(merged["photoCount"], 2)
+        self.assertEqual(merged["listing"]["photoCount"], 2)
+        self.assertIn("https://example.com/s1.jpg", merged["listing"]["pic"])
+        self.assertIn("https://example.com/t1.jpg", merged["listing"]["pic"])
+
+        # Source item is deleted
+        with self.assertRaises(KeyError):
+            inventory_workspace.get_item(source["id"], self.seller_id)
+
+    def test_flask_merge_route(self):
+        """API endpoint: POST /api/inventory/items/<target_id>/merge."""
+        client = hht_app.app.test_client()
+
+        def authenticate():
+            from flask import g
+            g.supabase_user = {"sub": self.auth_user_id}
+
+        with mock.patch("app.authenticate_request", side_effect=authenticate), \
+             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+
+            batch = inventory_workspace.create_batch(self.seller_id, name="Route Merge Batch", grouping_mode="manual")
+            photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+                {"filename": "r1.jpg", "previewUrl": "https://example.com/r1.jpg"},
+                {"filename": "r2.jpg", "previewUrl": "https://example.com/r2.jpg"},
+            ])
+            item1 = inventory_workspace.create_item(batch["id"], self.seller_id, {"photoIds": [photos[0]["id"]]})
+            item2 = inventory_workspace.create_item(batch["id"], self.seller_id, {"photoIds": [photos[1]["id"]]})
+
+            # Merge item1 into item2 via HTTP POST
+            res = client.post(f"/api/inventory/items/{item2['id']}/merge", json={
+                "sourceItemId": item1["id"],
+                "allowDestructive": True,
+            })
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.get_json()["result"]["photoCount"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
