@@ -56,6 +56,11 @@ jobs:
           if ! command -v psql >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y postgresql-client
           fi
+          psql "$TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          SQL
           for f in $(ls supabase/migrations/*.sql | sort); do
             echo "Applying migration: $f"
             psql "$TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -f "$f"

@@ -2015,7 +2015,10 @@ def submit_approved_drafts(
     submissions = _finalize_confirmed_submissions(items_to_submit, sub_ids_by_item, seller_id, feed_task_id, feed_result)
     return {
         "feedTaskId": feed_task_id,
+        "taskId": feed_task_id,
         "submittedCount": len(items_to_submit),
+        "itemCount": len(items_to_submit),
+        "status": "submitted",
         "submissions": submissions,
         "feedResult": feed_result,
         "submissionStage": STAGE_UPLOAD_CONFIRMED,
@@ -2056,23 +2059,51 @@ def _determine_partial_task_item_failed(
     return failure_count > 0
 
 
-def _resolve_completed_task_outcomes(
+def _resolve_partial_task_outcome(
     item_id: str,
-    enriched: dict[str, Any],
-    failure_count: int,
-    success_count: int,
-    error_count: int,
-    row_errors: list[dict[str, Any]],
+    current_status: str,
+    task_details: dict[str, Any],
     db: Any,
     row: Any = None,
 ) -> tuple[str, str, str | None, dict[str, Any]]:
+    upload_summary = task_details.get("uploadSummary") or {}
+    result_details = task_details.get("resultDetails") or {}
+    failure_count = int(upload_summary.get("failureCount") or 0)
+    row_errors = result_details.get("errors") or []
+    error_count = int(result_details.get("errorCount") or len(row_errors))
+    enriched = dict(task_details)
+
+    if (failure_count > 0 or error_count > 0) and not row_errors:
+        # Result file rows were unavailable; keep outcome unresolved so polling retries.
+        enriched["itemOutcome"] = "unresolved"
+        next_sub = "ambiguous" if current_status == "ambiguous" else "processing"
+        next_item = "ambiguous_submission" if current_status == "ambiguous" else "draft_submitted"
+        return next_sub, next_item, None, enriched
+
+    is_item_failed = _determine_partial_task_item_failed(item_id, row_errors, failure_count, db, row=row)
+    enriched["itemOutcome"] = "failed" if is_item_failed else "completed"
+    return "completed_with_errors", ("draft_failed" if is_item_failed else "draft_result_available"), STAGE_COMPLETED, enriched
+
+
+def _resolve_completed_task_outcomes(
+    item_id: str,
+    current_status: str,
+    task_details: dict[str, Any],
+    db: Any,
+    row: Any = None,
+) -> tuple[str, str, str | None, dict[str, Any]]:
+    upload_summary = task_details.get("uploadSummary") or {}
+    result_details = task_details.get("resultDetails") or {}
+    failure_count = int(upload_summary.get("failureCount") or 0)
+    success_count = int(upload_summary.get("successCount") or 0)
+    error_count = int(result_details.get("errorCount") or len(result_details.get("errors") or []))
+    enriched = dict(task_details)
+
     if failure_count == 0 and error_count == 0:
         enriched["itemOutcome"] = "completed"
         return "completed", "draft_result_available", STAGE_COMPLETED, enriched
     if success_count > 0:
-        is_item_failed = _determine_partial_task_item_failed(item_id, row_errors, failure_count, db, row=row)
-        enriched["itemOutcome"] = "failed" if is_item_failed else "completed"
-        return "completed_with_errors", ("draft_failed" if is_item_failed else "draft_result_available"), STAGE_COMPLETED, enriched
+        return _resolve_partial_task_outcome(item_id, current_status, enriched, db, row=row)
     enriched["itemOutcome"] = "failed"
     return "failed", "draft_failed", STAGE_COMPLETED, enriched
 
@@ -2081,24 +2112,12 @@ def _resolve_feed_task_outcomes(
     item_id: str, current_status: str, task_details: dict[str, Any], db: Any, row: Any = None
 ) -> tuple[str, str, str | None, dict[str, Any]]:
     task_status = str(task_details.get("status") or "").upper()
-    upload_summary = task_details.get("uploadSummary") or {}
-    result_details = task_details.get("resultDetails") or {}
-    row_errors = result_details.get("errors") or []
     enriched = dict(task_details)
 
     if task_status in {"QUEUED", "IN_PROCESS", "COMPILING"}:
         return "processing", "draft_submitted", None, enriched
     if task_status in {"COMPLETED", "SUCCESS"}:
-        return _resolve_completed_task_outcomes(
-            item_id,
-            enriched,
-            int(upload_summary.get("failureCount") or 0),
-            int(upload_summary.get("successCount") or 0),
-            int(result_details.get("errorCount") or len(row_errors)),
-            row_errors,
-            db,
-            row=row,
-        )
+        return _resolve_completed_task_outcomes(item_id, current_status, enriched, db, row=row)
     if task_status in {"FAILED", "COMPLETED_WITH_ERROR", "ERROR"}:
         enriched["itemOutcome"] = "failed"
         return "failed", "draft_failed", STAGE_COMPLETED, enriched
@@ -2204,6 +2223,27 @@ def _apply_manual_reconciliation(
     }
 
 
+def _verify_reconcile_task_override(
+    row: Any, seller_id: str, task_override: str, db: Any
+) -> str:
+    existing_task = str(row["feed_task_id"] or "")
+    if not task_override:
+        return existing_task
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", task_override):
+        raise ValueError("Valid eBay feed task ID is required.")
+    if existing_task and not existing_task.startswith("pending:") and task_override != existing_task:
+        raise ValueError("Cannot replace an already-recorded eBay feed task ID.")
+    owners = db.execute(
+        "SELECT seller_id FROM inventory_submissions WHERE feed_task_id = ?",
+        (task_override,),
+    ).fetchall()
+    if any(str(owner["seller_id"]) != str(seller_id) for owner in owners):
+        raise PermissionError("You do not have access to this feed task.")
+    if not owners:
+        raise PermissionError("Feed task ID is not associated with your seller account.")
+    return task_override
+
+
 def reconcile_item_submission(
     item_id: str,
     seller_id: str,
@@ -2228,12 +2268,12 @@ def reconcile_item_submission(
         ).fetchone()
         if not row:
             raise KeyError(f"No submission attempt found for item {item_id}.")
-        if task_override:
+        effective_task = _verify_reconcile_task_override(row, seller_id, task_override, db)
+        if task_override and effective_task != str(row["feed_task_id"] or ""):
             db.execute(
                 "UPDATE inventory_submissions SET feed_task_id = ?, updated_at = ? WHERE id = ?",
-                (task_override, now, row["id"]),
+                (effective_task, now, row["id"]),
             )
-        effective_task = task_override or str(row["feed_task_id"] or "")
         if mode != "poll":
             return _apply_manual_reconciliation(row, item_id, seller_id, mode, effective_task, now, db)
         if not effective_task or effective_task.startswith("pending:"):
@@ -3163,6 +3203,27 @@ def sync_persisted_reanalysis(item_id: str, seller_id: str) -> dict[str, Any]:
 
 
 
+def _extract_legacy_photo_entries(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    urls: list[str] = []
+    for key in ("photoAssets", "photos"):
+        val = raw.get(key)
+        if not isinstance(val, list):
+            continue
+        for entry in val:
+            url = _photo_image_url(entry) if isinstance(entry, dict) else str(entry or "").strip()
+            if url and url not in urls:
+                urls.append(url)
+    for field in ("pic", "coverUrl"):
+        raw_pic = str(raw.get(field) or "").strip()
+        for part in re.split(r"[\s|]+", raw_pic) if raw_pic else ():
+            if part.startswith("http") and part not in urls:
+                urls.append(part)
+    return [
+        {"filename": f"legacy_photo_{idx}.jpg", "previewUrl": url, "storageUrl": url}
+        for idx, url in enumerate(urls[:24], start=1)
+    ]
+
+
 def import_legacy_queue_to_batch(
     queue_items: list[dict[str, Any]], seller_id: str, batch_name: str = ""
 ) -> dict[str, Any]:
@@ -3183,8 +3244,14 @@ def import_legacy_queue_to_batch(
         if not isinstance(raw, dict):
             continue
         listing = dict(raw)
-        item = create_item(batch["id"], seller_id, {"listing": listing, "sellerConfirmed": {}})
-        created_items.append(item)
+        photo_entries = _extract_legacy_photo_entries(raw)
+        reg_photos = register_batch_photos(batch["id"], seller_id, photo_entries) if photo_entries else []
+        payload: dict[str, Any] = {
+            "listing": listing,
+            "sellerConfirmed": {},
+            "photoIds": [p["id"] for p in reg_photos],
+        }
+        created_items.append(create_item(batch["id"], seller_id, payload))
 
     return {
         "batch": batch,

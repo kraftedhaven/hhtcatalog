@@ -307,9 +307,15 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
         self.assertIn("Vintage Wool Coat L", csv_out)
 
     def test_legacy_queue_transition_creates_persisted_unapproved_items(self):
-        """Legacy queue dictionaries transition safely into persisted batch in 'needs_review' status."""
+        """Legacy queue dictionaries transition safely into persisted batch in 'needs_review' status with photos."""
         queue = [
-            {"title": "Legacy Item 1", "price": "19.99", "cat": "57988", "size": "M"},
+            {
+                "title": "Legacy Item 1",
+                "price": "19.99",
+                "cat": "57988",
+                "size": "M",
+                "pic": "https://example.com/legacy1.jpg|https://example.com/legacy2.jpg",
+            },
             {"title": "Legacy Item 2", "price": "29.99", "cat": "57988", "size": "L"},
         ]
         res = inventory_workspace.import_legacy_queue_to_batch(queue, self.seller_a, batch_name="Legacy Transition")
@@ -318,6 +324,8 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
 
         items = inventory_workspace.list_batch_items(batch_id, self.seller_a)
         self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["photoCount"], 2)
+        self.assertIn("https://example.com/legacy1.jpg", items[0]["listing"]["pic"])
         for it in items:
             self.assertEqual(it["workflowStatus"], "needs_review")
             self.assertFalse(it["sellerConfirmed"])
@@ -369,6 +377,8 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
         with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "task-retry-2"}) as upload:
             res = inventory_workspace.submit_approved_drafts([err_item["id"]], self.seller_a)
             self.assertEqual(res["feedTaskId"], "task-retry-2")
+            self.assertEqual(res["taskId"], "task-retry-2")
+            self.assertEqual(res["itemCount"], 1)
             upload.assert_called_once()
 
         with self.assertRaises(ValueError):
@@ -453,6 +463,52 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
                 "listing": {"title": "Bad Bool"},
             })
         self.assertIn("boolean", str(bool_ctx.exception).lower())
+
+    def test_partial_feed_without_error_rows_stays_unresolved(self):
+        """Missing error rows on a partial feed must not mark items succeeded prematurely."""
+        _, item = self._create_approved_item(self.seller_a, title="Unresolved Row Coat")
+        with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "task-missing-err"}):
+            inventory_workspace.submit_approved_drafts([item["id"]], self.seller_a)
+
+        unresolved = {
+            "taskId": "task-missing-err",
+            "status": "COMPLETED",
+            "uploadSummary": {"successCount": 1, "failureCount": 1},
+            "resultDetails": {"errorCount": 1, "errors": []},
+        }
+        with mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value=unresolved):
+            status = inventory_workspace.get_item_submission_status(item["id"], self.seller_a)
+        self.assertEqual(status["status"], "processing")
+        self.assertEqual(status["itemWorkflowStatus"], "draft_submitted")
+        self.assertEqual(inventory_workspace.get_item(item["id"], self.seller_a)["workflowStatus"], "draft_submitted")
+
+    def test_reconcile_rejects_cross_seller_task_override(self):
+        """A seller cannot hijack another seller's feedTaskId via submission reconciliation."""
+        _, item_a = self._create_approved_item(self.seller_a, title="Seller A Coat")
+        _, item_b = self._create_approved_item(self.seller_b, title="Seller B Coat")
+        with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "task-owner-a"}):
+            inventory_workspace.submit_approved_drafts([item_a["id"]], self.seller_a)
+
+        with commerce_agent.connect() as db:
+            db.execute(
+                """INSERT INTO inventory_submissions(
+                    id, item_id, seller_id, batch_id, feed_task_id, status, submission_stage, idempotency_key, result_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'ambiguous', 'validating', 'idem-b-1', '{}', ?, ?)""",
+                (str(uuid.uuid4()), item_b["id"], self.seller_b, item_b["batchId"], "pending:b1", commerce_agent.utc_now(), commerce_agent.utc_now()),
+            )
+
+        def auth_seller_b():
+            from flask import g
+            g.supabase_user = {"sub": self.user_b}
+
+        with mock.patch("app.authenticate_request", side_effect=auth_seller_b), \
+             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_b, "auth_user_id": self.user_b}):
+            res = self.client.post(
+                f"/api/inventory/items/{item_b['id']}/submission/reconcile",
+                json={"resolution": "poll", "feedTaskId": "task-owner-a"},
+            )
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(inventory_workspace.get_item_submission_status(item_b["id"], self.seller_b)["feedTaskId"], "pending:b1")
 
 
 if __name__ == "__main__":

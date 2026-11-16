@@ -1535,6 +1535,8 @@ def inventory_item_submission_reconcile(item_id):
         return jsonify({"result": result})
     except KeyError as exc:
         return jsonify({"error": str(exc)}), 404
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except EbayFeedError as exc:

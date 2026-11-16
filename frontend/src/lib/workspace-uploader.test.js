@@ -57,3 +57,30 @@ test('successful upload returns refreshed persisted items and completed chunks',
     assert.deepEqual(result.completedChunkIndexes, [0, 1]);
     assert.equal(result.totalChunks, 2);
 });
+
+test('partial upload preserves recovery metadata when follow-up refresh fails', async () => {
+    const files = [mockFile('one.jpg'), mockFile('two.jpg'), mockFile('three.jpg')];
+
+    await assert.rejects(
+        uploadBatchChunks({
+            batchId: 'batch-3',
+            files,
+            groupingMode: '1',
+            prepareBatch: async (chunk) => ({ files: chunk }),
+            uploadChunk: async (_chunk, index) => {
+                if (index === 1) throw new Error('chunk 1 timeout');
+            },
+            listBatchItems: async () => {
+                throw new Error('network down during refresh');
+            },
+        }),
+        (error) => {
+            assert.equal(error.message, 'chunk 1 timeout');
+            assert.deepEqual(error.uploadRecovery.completedChunkIndexes, [0]);
+            assert.equal(error.uploadRecovery.failedChunkIndex, 1);
+            assert.equal(error.uploadRecovery.refreshError, 'network down during refresh');
+            assert.deepEqual(error.uploadRecovery.remainingFiles.map((file) => file.name), ['two.jpg', 'three.jpg']);
+            return true;
+        },
+    );
+});

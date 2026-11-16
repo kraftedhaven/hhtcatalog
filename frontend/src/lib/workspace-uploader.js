@@ -6,6 +6,18 @@ function validateUploadHandlers({ prepareBatch, uploadChunk, listBatchItems }) {
     if (typeof listBatchItems !== 'function') throw new TypeError('listBatchItems is required');
 }
 
+function buildUploadRecovery({ batchId, completedChunkIndexes, preparedChunkCount, chunks }) {
+    const done = completedChunkIndexes.length;
+    return {
+        batchId,
+        completedChunkIndexes: [...completedChunkIndexes],
+        failedChunkIndex: done < chunks.length ? done : null,
+        preparedChunkCount,
+        totalChunks: chunks.length,
+        remainingFiles: chunks.slice(done).flat(),
+    };
+}
+
 async function uploadSinglePreparedChunk({
     chunk,
     index,
@@ -26,10 +38,36 @@ async function uploadSinglePreparedChunk({
     await uploadChunk(prepared.files, index, totalChunks, prepared);
 }
 
+async function refreshItemsSafely({
+    batchId,
+    listBatchItems,
+    completedChunkIndexes,
+    state,
+    chunks,
+    priorError,
+}) {
+    const recovery = buildUploadRecovery({
+        batchId,
+        completedChunkIndexes,
+        preparedChunkCount: state.preparedChunkCount,
+        chunks,
+    });
+    try {
+        return await listBatchItems(batchId);
+    } catch (refreshError) {
+        if (priorError) {
+            priorError.uploadRecovery.refreshError = refreshError?.message || 'Batch refresh failed';
+            throw priorError;
+        }
+        refreshError.uploadRecovery = { ...recovery, refreshFailed: true };
+        throw refreshError;
+    }
+}
+
 /**
  * Upload photo chunks sequentially and always refresh persisted items after
- * success or partial failure. The caller can use the returned items to expose
- * already-uploaded work and offer retry without duplicating prior chunks.
+ * success or partial failure. Preserves uploadRecovery metadata even if the
+ * follow-up refresh request also fails.
  */
 export async function uploadBatchChunks({
     batchId,
@@ -42,11 +80,10 @@ export async function uploadBatchChunks({
     onPrepared,
 }) {
     validateUploadHandlers({ prepareBatch, uploadChunk, listBatchItems });
-
     const chunks = partitionUploadChunks(files, groupingMode);
     const completedChunkIndexes = [];
     const state = { preparedChunkCount: 0 };
-    let refreshedItems = [];
+    let priorError = null;
 
     try {
         for (let index = 0; index < chunks.length; index += 1) {
@@ -63,20 +100,24 @@ export async function uploadBatchChunks({
             completedChunkIndexes.push(index);
         }
     } catch (error) {
-        error.uploadRecovery = {
+        error.uploadRecovery = buildUploadRecovery({
             batchId,
-            completedChunkIndexes: [...completedChunkIndexes],
-            failedChunkIndex: completedChunkIndexes.length,
+            completedChunkIndexes,
             preparedChunkCount: state.preparedChunkCount,
-            totalChunks: chunks.length,
-            remainingFiles: chunks.slice(completedChunkIndexes.length).flat(),
-        };
-        throw error;
-    } finally {
-        // This runs even when compression or a later upload fails. Any items
-        // created by earlier chunks remain visible and retryable.
-        refreshedItems = await listBatchItems(batchId);
+            chunks,
+        });
+        priorError = error;
     }
+
+    const refreshedItems = await refreshItemsSafely({
+        batchId,
+        listBatchItems,
+        completedChunkIndexes,
+        state,
+        chunks,
+        priorError,
+    });
+    if (priorError) throw priorError;
 
     return {
         items: refreshedItems,
