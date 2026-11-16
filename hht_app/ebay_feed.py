@@ -10,12 +10,20 @@ import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
 import requests
 
 from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_pricing import DEFAULT_MARKETPLACE_ID
+from .photo_url_validator import (
+    PHOTO_URL_TIMEOUT_SECONDS,
+    PHOTO_VALIDATION_MAX_BYTES,
+    PRIVATE_IP_NETWORKS,
+    PhotoCheckContext,
+    is_image_magic_header,
+    is_private_hostname,
+    validate_single_image_url,
+)
 from .schema import deduplicate_draft_items, draft_photo_urls, export_ebay_draft_csv
 
 
@@ -25,7 +33,7 @@ DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_SELLER_HUB_DRAFT_FEED_TYPE = "FX_LISTING"
 SELLER_HUB_SCHEMA_VERSION = "1.0"
 DEFAULT_MIN_DRAFT_UPLOAD_ITEMS = 3
-PHOTO_URL_TIMEOUT_SECONDS = 5.0
+_PRIVATE_NETWORKS = PRIVATE_IP_NETWORKS
 
 
 def _min_draft_upload_items() -> int:
@@ -60,53 +68,30 @@ class EbayFeedError(RuntimeError):
         return body
 
 
-def _validate_upload_bytes(data: bytes) -> None:
-    """Ensure the uploaded bytes are exactly valid UTF-8 eBay draft CSV with no live actions."""
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise EbayFeedError(400, "invalid_csv", "Draft CSV upload payload must be valid UTF-8.", operation="validate_upload_bytes") from exc
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        raise EbayFeedError(400, "invalid_csv", "Draft CSV upload payload is empty.", operation="validate_upload_bytes")
-
-    reader = csv.reader(io.StringIO(text))
+def _parse_draft_csv_rows(text: str) -> tuple[list[str], list[list[str]]]:
     header_row: list[str] = []
     data_rows: list[list[str]] = []
-
-    for row in reader:
-        if not row:
+    for row in csv.reader(io.StringIO(text)):
+        if not row or row[0].strip().startswith("#INFO"):
             continue
-        first = row[0].strip()
-        if first.startswith("#INFO"):
-            continue
-        elif not header_row:
+        if not header_row:
             header_row = [c.strip() for c in row]
         else:
             data_rows.append(row)
+    return header_row, data_rows
 
-    if not header_row:
-        raise EbayFeedError(400, "invalid_csv", "Draft CSV missing column headers.", operation="validate_upload_bytes")
 
-    action_idx = -1
-    for idx, col in enumerate(header_row):
-        if col.lower().startswith("action"):
-            action_idx = idx
-            break
-
+def _assert_draft_actions_only(header_row: list[str], data_rows: list[list[str]]) -> None:
+    action_idx = next((idx for idx, col in enumerate(header_row) if col.lower().startswith("action")), -1)
     if action_idx == -1:
         raise EbayFeedError(400, "invalid_csv", "Draft CSV missing Action header.", operation="validate_upload_bytes")
-
     if not data_rows:
         raise EbayFeedError(400, "invalid_csv", "Draft CSV contains no item rows.", operation="validate_upload_bytes")
-
-    live_actions = {"add", "revise", "relist", "end", "publish", "verifyadd"}
     for r_idx, d_row in enumerate(data_rows, start=1):
         if action_idx >= len(d_row):
             raise EbayFeedError(400, "invalid_csv", f"Row {r_idx} missing Action value.", operation="validate_upload_bytes")
         val = d_row[action_idx].strip()
-        if val.lower() in live_actions or val.lower() != "draft":
+        if val.lower() != "draft":
             raise EbayFeedError(
                 400,
                 "invalid_csv",
@@ -115,12 +100,21 @@ def _validate_upload_bytes(data: bytes) -> None:
             )
 
 
-def upload_seller_hub_draft_csv(
-    items: list[dict[str, Any]],
-    timeout: float = DEFAULT_TIMEOUT_SECONDS,
-    template_text: str | None = None,
-    category_metadata_map: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def _validate_upload_bytes(data: bytes) -> None:
+    """Ensure the uploaded bytes are exactly valid UTF-8 eBay draft CSV with no live actions."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EbayFeedError(400, "invalid_csv", "Draft CSV upload payload must be valid UTF-8.", operation="validate_upload_bytes") from exc
+    if not text.strip():
+        raise EbayFeedError(400, "invalid_csv", "Draft CSV upload payload is empty.", operation="validate_upload_bytes")
+    header_row, data_rows = _parse_draft_csv_rows(text)
+    if not header_row:
+        raise EbayFeedError(400, "invalid_csv", "Draft CSV missing column headers.", operation="validate_upload_bytes")
+    _assert_draft_actions_only(header_row, data_rows)
+
+
+def _prepare_unique_draft_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not isinstance(items, list) or not items:
         raise EbayFeedError(400, "invalid_request", "Queue must include at least one reviewed item.", operation="create_task")
     unique_items = deduplicate_draft_items(items)
@@ -135,8 +129,14 @@ def upload_seller_hub_draft_csv(
         )
     if _environment() == "sandbox":
         raise EbayFeedError(503, "configuration", f"Seller Hub {_draft_feed_type()} feed uploads are production-only; eBay does not support this Seller Hub upload flow in sandbox.", operation="create_task")
-    validate_draft_photo_urls(unique_items)
+    return unique_items
 
+
+def _render_validated_draft_csv_bytes(
+    unique_items: list[dict[str, Any]],
+    template_text: str | None,
+    category_metadata_map: dict[str, Any] | None,
+) -> bytes:
     from .seller_hub_draft_template import export_seller_hub_draft_csv, DraftExportValidationError
     try:
         csv_text = export_seller_hub_draft_csv(
@@ -146,15 +146,50 @@ def upload_seller_hub_draft_csv(
         raise EbayFeedError(400, "validation_failed", str(exc), operation="generate_draft_csv") from exc
     except ValueError as exc:
         raise EbayFeedError(400, "invalid_request", str(exc), operation="generate_draft_csv") from exc
-
     payload_bytes = csv_text.encode("utf-8")
     _validate_upload_bytes(payload_bytes)
+    return payload_bytes
+
+
+def _notify_stage_callback(callback: Any, task_id: str) -> None:
+    if callable(callback):
+        callback(task_id)
+
+
+def _fetch_task_summary_safe(task_id: str, token: str, timeout: float) -> dict[str, Any]:
+    try:
+        return get_feed_task(task_id, token=token, timeout=timeout)
+    except Exception as exc:
+        # Upload succeeded and was confirmed. An error querying task status (e.g. 404,
+        # 500, timeout) must not mark the upload as failed or lose the task ID.
+        return {"taskId": task_id, "status": "SUBMITTED", "uploadConfirmed": True, "taskPollError": str(exc)}
+
+
+def upload_seller_hub_draft_csv(
+    items: list[dict[str, Any]],
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    template_text: str | None = None,
+    category_metadata_map: dict[str, Any] | None = None,
+    *,
+    on_task_created: Any = None,
+    on_upload_sent: Any = None,
+    on_upload_confirmed: Any = None,
+) -> dict[str, Any]:
+    unique_items = _prepare_unique_draft_items(items)
+    validate_draft_photo_urls(unique_items)
+    payload_bytes = _render_validated_draft_csv_bytes(unique_items, template_text, category_metadata_map)
 
     token = _seller_token(timeout)
     task_id = _create_task(token, timeout)
+    _notify_stage_callback(on_task_created, task_id)
+
     filename = f"hht_seller_hub_drafts_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+    _notify_stage_callback(on_upload_sent, task_id)
+
     upload = _upload_file(token, task_id, filename, payload_bytes, timeout)
-    task = get_feed_task(task_id, token=token, timeout=timeout)
+    _notify_stage_callback(on_upload_confirmed, task_id)
+    task = _fetch_task_summary_safe(task_id, token, timeout)
+
     return {
         "status": "submitted",
         "provider": "ebay_feed",
@@ -181,51 +216,28 @@ def validate_draft_photo_urls(items: list[dict[str, Any]], timeout: float = PHOT
             _validate_image_url(url, index, timeout)
 
 
+def _is_private_address(hostname: str) -> bool:
+    """Return True if any resolved address for hostname is private/loopback."""
+    return is_private_hostname(hostname, _PRIVATE_NETWORKS)
+
+
 def _validate_image_url(url: str, item_index: int, timeout: float) -> None:
-    parsed = urlparse(url)
-    if parsed.scheme.lower() != "https" or not parsed.netloc:
-        raise EbayFeedError(
-            400,
-            "seller_review_required",
-            f"Seller Hub draft photo review required: item {item_index} has a photo URL that is not HTTPS.",
-            operation="validate_photo_url",
-        )
-    try:
-        response = requests.get(url, stream=True, timeout=timeout)
-    except requests.Timeout as exc:
-        raise EbayFeedError(
-            400,
-            "seller_review_required",
-            f"Seller Hub draft photo review required: item {item_index} has an unreachable photo URL.",
-            operation="validate_photo_url",
-        ) from exc
-    except requests.RequestException as exc:
-        raise EbayFeedError(
-            400,
-            "seller_review_required",
-            f"Seller Hub draft photo review required: item {item_index} has an unreachable photo URL.",
-            operation="validate_photo_url",
-        ) from exc
-    try:
-        content_type = response.headers.get("Content-Type", "") if hasattr(response, "headers") else ""
-        if response.status_code != 200:
-            raise EbayFeedError(
-                400,
-                "seller_review_required",
-                f"Seller Hub draft photo review required: item {item_index} has a photo URL that did not return HTTP 200.",
-                operation="validate_photo_url",
-            )
-        if not content_type.lower().startswith("image/"):
-            raise EbayFeedError(
-                400,
-                "seller_review_required",
-                f"Seller Hub draft photo review required: item {item_index} has a photo URL that is not an image.",
-                operation="validate_photo_url",
-            )
-    finally:
-        close = getattr(response, "close", None)
-        if callable(close):
-            close()
+    validate_single_image_url(
+        url,
+        PhotoCheckContext(
+            item_index=item_index,
+            timeout=timeout,
+            get_fn=requests.get,
+            is_private_fn=_is_private_address,
+            max_bytes=PHOTO_VALIDATION_MAX_BYTES,
+            networks=_PRIVATE_NETWORKS,
+        ),
+    )
+
+
+def _is_image_header(data: bytes) -> bool:
+    """Check magic bytes for common image formats."""
+    return is_image_magic_header(data)
 
 
 def get_feed_task(task_id: str, *, token: str | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:

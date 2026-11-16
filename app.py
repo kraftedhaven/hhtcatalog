@@ -50,31 +50,55 @@ CORS(
 PUBLIC_AUTH_PATHS = {"/", "/health", "/api/ebay/oauth/start", "/api/ebay/oauth/callback"}
 
 
+def _strict_json_bool(value: Any, field: str = "allowDestructive") -> bool:
+    """Accept only JSON booleans for destructive authorization fields."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a JSON boolean.")
+    return value
+
+
 def ebay_drafts_enabled() -> bool:
     return os.environ.get("EBAY_DRAFTS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
+_SELLER_AUTH_EXACT_PATHS = frozenset({
+    "/bulk-analyze",
+    "/api/nvidia/analyze/start",
+    "/api/photos",
+    "/api/commerce/rotation/approve",
+    "/api/commerce/recommendations/bulk-approve",
+    "/api/ebay/drafts",
+    "/api/ebay/draft-feed",
+    "/api/ebay/oauth/probe-scopes",
+})
+_SELLER_AUTH_PREFIXES = (
+    "/api/analysis/",
+    "/api/commerce/",
+    "/api/catalog/",
+    "/api/inventory/",
+    "/api/photos/",
+    "/api/ebay/feed/",
+    "/api/ebay/offers/",
+)
+
+
+def _is_mutating_commerce_route(path: str, method: str) -> bool:
+    if path.startswith("/api/commerce/actions/") and path.endswith(("/apply", "/rollback")):
+        return True
+    return path.startswith("/api/commerce/recommendations/") and method == "POST"
+
+
 def _requires_seller_auth() -> bool:
     path = request.path
-    if path in {"/bulk-analyze", "/api/nvidia/analyze/start"} or path.startswith("/api/analysis/"):
-        return True
-    if path.startswith(("/api/commerce/", "/api/catalog/", "/api/inventory/")) :
-        return True
-    if path.startswith("/api/photos/") or path == "/api/photos":
-        return True
     # Publishing is intentionally not implemented; its permanent 404 leaks no
     # seller data and cannot reach an eBay mutation function.
     if path.startswith("/api/ebay/offers/") and path.endswith("/publish"):
         return False
-    if path in {"/api/commerce/rotation/approve", "/api/commerce/recommendations/bulk-approve", "/api/ebay/drafts", "/api/ebay/draft-feed"}:
+    if path in _SELLER_AUTH_EXACT_PATHS or path.startswith(_SELLER_AUTH_PREFIXES):
         return True
-    if path == "/api/ebay/oauth/probe-scopes":
-        return True
-    if path.startswith("/api/commerce/actions/") and path.endswith(("/apply", "/rollback")):
-        return True
-    if path.startswith("/api/commerce/recommendations/") and request.method == "POST":
-        return True
-    return path.startswith("/api/ebay/offers/")
+    return _is_mutating_commerce_route(path, request.method)
 
 
 @app.before_request
@@ -612,21 +636,42 @@ def ebay_category_aspects(category_id):
     return jsonify({"result": category_aspects(category_id)})
 
 
-@app.route("/api/ebay/drafts", methods=["POST"])
-def ebay_drafts():
-    if not commerce_agent.ebay_mutations_enabled():
-        return jsonify({"error": "eBay listing mutations are disabled pending controlled-pilot authorization."}), 403
-    body = request.get_json(silent=True) or {}
+def _submit_single_persisted_draft(item_id: str, seller_id: str):
+    try:
+        result = inventory_workspace.submit_approved_drafts([item_id], seller_id)
+        return jsonify({"result": result})
+    except (ValueError, PermissionError) as exc:
+        msg_low = str(exc).lower()
+        is_forbidden = any(kw in msg_low for kw in ("disabled", "permission", "proof", "scope"))
+        return jsonify({"error": str(exc)}), (403 if is_forbidden else 400)
+    except EbayFeedError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
+
+
+def _create_manual_ebay_draft(body: dict[str, Any]):
     item = body.get("item") or body.get("listing") or body
     if not isinstance(item, dict):
         return jsonify({"error": "Request body must include an item object."}), 400
     if item.get("reviewAcknowledged") is not True:
         return jsonify({"error": "Review the item's Needs review list in HHT before creating an eBay draft."}), 400
     try:
-        result = create_ebay_draft(item)
+        return jsonify({"result": create_ebay_draft(item)})
     except EbayDraftError as exc:
         return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
-    return jsonify({"result": result})
+
+
+@app.route("/api/ebay/drafts", methods=["POST"])
+def ebay_drafts():
+    if not commerce_agent.ebay_mutations_enabled():
+        return jsonify({"error": "eBay listing mutations are disabled pending controlled-pilot authorization."}), 403
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    item_id = body.get("itemId")
+    if item_id:
+        return _submit_single_persisted_draft(str(item_id), str(seller_id))
+    return _create_manual_ebay_draft(body)
 
 
 @app.route("/api/ebay/offers/<offer_id>", methods=["PUT"])
@@ -641,43 +686,64 @@ def ebay_offer_publish_removed(_removed):
     return jsonify({"error": "Not found"}), 404
 
 
+def _is_valid_item_id_list(item_ids: Any) -> bool:
+    if not isinstance(item_ids, list) or not item_ids:
+        return False
+    return all(isinstance(value, str) for value in item_ids)
+
+
+def _handle_legacy_draft_feed_queue(body: dict[str, Any], seller_id: str):
+    raw_items = body.get("items") or body.get("queue")
+    if isinstance(raw_items, list) and raw_items:
+        transition = inventory_workspace.import_legacy_queue_to_batch(raw_items, seller_id)
+        return jsonify({
+            "error": "Draft submission requires persisted itemIds; caller-supplied listing dictionaries are not accepted. Queue items have been safely imported into a persisted batch. Review and approve before submitting.",
+            "transition": transition,
+        }), 400
+    return jsonify({"error": "Draft submission requires persisted itemIds; caller-supplied listing dictionaries are not accepted."}), 400
+
+
 @app.route("/api/ebay/draft-feed", methods=["POST"])
 def ebay_draft_feed():
     if not ebay_drafts_enabled():
         return jsonify({"error": "Seller Hub draft feed submissions are disabled pending controlled-pilot authorization."}), 403
-    # Seller Hub draft-feed submission is intentionally separate from live
-    # listing mutations. It creates unpublished draft-processing jobs; the
-    # live mutation flag must not block or enable this approval-only
-    # FX_LISTING workflow.
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
     body = request.get_json(silent=True) or {}
-    items = body.get("items") or body.get("queue") or []
-    if not isinstance(items, list):
-        return jsonify({"error": "Request body must include an items array."}), 400
-    scope_status = commerce_agent.ebay_scope_status()
-    if scope_status.get("grantedScopesStatus") != "verified":
-        return jsonify({
-            "error": "Seller Hub draft submission requires verified eBay OAuth scope proofs. Reauthorize eBay, then run the scope probe before submitting drafts.",
-            "grantedScopesStatus": scope_status.get("grantedScopesStatus", "unknown"),
-            "requiresReauthorization": True,
-        }), 403
-    if any(not isinstance(item, dict) or item.get("reviewAcknowledged") is not True for item in items):
-        return jsonify({"error": "Review and acknowledge every item's Needs review list in HHT before sending Seller Hub drafts."}), 400
-    for index, item in enumerate(items):
-        image_urls = [url for url in re.split(r"[\s,]+", str(item.get("pic") or "").strip()) if url.startswith("https://")]
-        taxonomy = commerce_agent.validate_listing(item, timeout=3.0)
-        check = commerce_agent.check_listing_rules(item, len(image_urls), taxonomy)
-        blocking = [finding for finding in check["findings"] if finding["rule"] != "taxonomy_unverified"]
-        if blocking:
-            return jsonify({"error": f"Queue item {index + 1} failed the listing review checks.", "needsReview": blocking}), 400
+    item_ids = body.get("itemIds")
+    if not _is_valid_item_id_list(item_ids):
+        return _handle_legacy_draft_feed_queue(body, str(seller_id))
     try:
-        result = upload_seller_hub_draft_csv(items)
+        result = inventory_workspace.submit_approved_drafts(item_ids, str(seller_id))
+        return jsonify({"result": result})
     except EbayFeedError as exc:
         return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
-    return jsonify({"result": result})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 409
+
+
+def _verify_feed_task_access(task_id: str):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return None, (jsonify({"error": "Authentication is required."}), 401)
+    with commerce_agent.connect() as db:
+        row = db.execute(
+            "SELECT seller_id FROM inventory_submissions WHERE feed_task_id = ? LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    if not row:
+        return None, (jsonify({"error": "Feed task not found."}), 404)
+    if str(row["seller_id"]) != str(seller_id):
+        return None, (jsonify({"error": "You do not have access to this feed task."}), 403)
+    return str(seller_id), None
 
 
 @app.route("/api/ebay/feed/tasks/<task_id>", methods=["GET"])
 def ebay_feed_task(task_id):
+    _, err = _verify_feed_task_access(task_id)
+    if err is not None:
+        return err
     try:
         result = get_feed_task_details(task_id)
     except EbayFeedError as exc:
@@ -687,6 +753,9 @@ def ebay_feed_task(task_id):
 
 @app.route("/api/ebay/feed/tasks/<task_id>/result", methods=["GET"])
 def ebay_feed_result(task_id):
+    _, err = _verify_feed_task_access(task_id)
+    if err is not None:
+        return err
     try:
         content, content_type, filename = get_feed_result_file(task_id)
     except EbayFeedError as exc:
@@ -1159,7 +1228,10 @@ def inventory_batch_grouping(batch_id):
     body = request.get_json(silent=True) or {}
     mode = body.get("mode", "auto")
     custom_groups = body.get("customGroups")
-    force = bool(body.get("force", False))
+    try:
+        force = _strict_json_bool(body.get("force"), "force")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     try:
         items = inventory_workspace.apply_photo_grouping(
             batch_id, str(seller_id), mode=mode, custom_groups=custom_groups, force=force
@@ -1178,18 +1250,27 @@ def inventory_batch_grouping(batch_id):
         return jsonify({"error": err_msg}), 400
 
 
+def _create_inventory_batch_item(batch_id: str, seller_id: str):
+    body = request.get_json(silent=True) or {}
+    if "allowDestructive" in body:
+        try:
+            _strict_json_bool(body.get("allowDestructive"), "allowDestructive")
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+    try:
+        item = inventory_workspace.create_item(batch_id, seller_id, body)
+        return jsonify({"result": item, "item": item}), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/inventory/batches/<batch_id>/items", methods=["GET", "POST"])
 def inventory_batch_items(batch_id):
     seller_id = getattr(g, "seller_id", None)
     if not seller_id:
         return jsonify({"error": "Seller authentication is required."}), 401
     if request.method == "POST":
-        body = request.get_json(silent=True) or {}
-        try:
-            item = inventory_workspace.create_item(batch_id, str(seller_id), body)
-            return jsonify({"result": item, "item": item}), 201
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+        return _create_inventory_batch_item(batch_id, str(seller_id))
     try:
         items = inventory_workspace.list_batch_items(batch_id, str(seller_id))
         return jsonify({"result": items, "items": items})
@@ -1213,33 +1294,51 @@ def inventory_batch_analyze(batch_id):
         return jsonify({"error": str(exc)}), 400
 
 
+def _destructive_conflict_status(exc: ValueError) -> int:
+    msg = str(exc)
+    if "Explicit confirmation" in msg or "allow_destructive" in msg.lower():
+        return 409
+    return 400
+
+
+def _delete_inventory_item(item_id: str, seller_id: str):
+    data = request.get_json(silent=True) or {}
+    if "allowDestructive" in data:
+        try:
+            allow_destructive = _strict_json_bool(data.get("allowDestructive"), "allowDestructive")
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+    else:
+        allow_destructive = request.args.get("allowDestructive", "").lower() in ("true", "1")
+    try:
+        res = inventory_workspace.delete_item(item_id, seller_id, allow_destructive=allow_destructive)
+        return jsonify({"result": res, "deleted": True})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), _destructive_conflict_status(exc)
+
+
+def _patch_inventory_item(item_id: str, seller_id: str):
+    patch_data = request.get_json(silent=True) or {}
+    try:
+        item = inventory_workspace.patch_item(item_id, seller_id, patch_data)
+        return jsonify({"result": item})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/inventory/items/<item_id>", methods=["GET", "PATCH", "DELETE"])
 def inventory_item_detail(item_id):
     seller_id = getattr(g, "seller_id", None)
     if not seller_id:
         return jsonify({"error": "Seller authentication is required."}), 401
     if request.method == "DELETE":
-        allow_destructive = request.args.get("allowDestructive", "").lower() in ("true", "1")
-        if not allow_destructive:
-            data = request.get_json(silent=True) or {}
-            allow_destructive = bool(data.get("allowDestructive"))
-        try:
-            res = inventory_workspace.delete_item(item_id, str(seller_id), allow_destructive=allow_destructive)
-            return jsonify({"result": res, "deleted": True})
-        except KeyError as exc:
-            return jsonify({"error": str(exc)}), 404
-        except ValueError as exc:
-            status = 409 if "Explicit confirmation" in str(exc) else 400
-            return jsonify({"error": str(exc)}), status
+        return _delete_inventory_item(item_id, str(seller_id))
     if request.method == "PATCH":
-        patch_data = request.get_json(silent=True) or {}
-        try:
-            item = inventory_workspace.patch_item(item_id, str(seller_id), patch_data)
-            return jsonify({"result": item})
-        except KeyError as exc:
-            return jsonify({"error": str(exc)}), 404
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+        return _patch_inventory_item(item_id, str(seller_id))
     try:
         item = inventory_workspace.get_item(item_id, str(seller_id))
         return jsonify({"result": item})
@@ -1256,12 +1355,16 @@ def inventory_item_photos_update(item_id):
         return jsonify({"error": "Seller authentication is required."}), 401
     body = request.get_json(silent=True) or {}
     try:
+        allow_destructive = _strict_json_bool(body.get("allowDestructive"), "allowDestructive")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    try:
         item = inventory_workspace.update_item_photos(
-            item_id, str(seller_id), body.get("photoIds") or [], body.get("coverPhotoId")
+            item_id, str(seller_id), body.get("photoIds") or [], body.get("coverPhotoId"), allow_destructive=allow_destructive
         )
         return jsonify({"result": item, "item": item})
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        return jsonify({"error": str(exc)}), _destructive_conflict_status(exc)
 
 
 @app.route("/api/inventory/items/<target_item_id>/merge", methods=["POST"])
@@ -1271,15 +1374,17 @@ def inventory_item_merge(target_item_id):
         return jsonify({"error": "Seller authentication is required."}), 401
     body = request.get_json(silent=True) or {}
     source_item_id = str(body.get("sourceItemId") or "")
-    allow_destructive = bool(body.get("allowDestructive"))
+    try:
+        allow_destructive = _strict_json_bool(body.get("allowDestructive"), "allowDestructive")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     try:
         merged = inventory_workspace.merge_items(source_item_id, target_item_id, str(seller_id), allow_destructive=allow_destructive)
         return jsonify({"result": merged, "item": merged})
     except KeyError as exc:
         return jsonify({"error": str(exc)}), 404
     except ValueError as exc:
-        status = 409 if "Explicit confirmation" in str(exc) else 400
-        return jsonify({"error": str(exc)}), status
+        return jsonify({"error": str(exc)}), _destructive_conflict_status(exc)
 
 
 @app.route("/api/inventory/items/<item_id>/research", methods=["POST"])
@@ -1412,6 +1517,30 @@ def inventory_item_submission(item_id):
         return jsonify({"error": str(exc)}), 404
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/inventory/items/<item_id>/submission/reconcile", methods=["POST"])
+def inventory_item_submission_reconcile(item_id):
+    seller_id = getattr(g, "seller_id", None)
+    if not seller_id:
+        return jsonify({"error": "Seller authentication is required."}), 401
+    body = request.get_json(silent=True) or {}
+    try:
+        result = inventory_workspace.reconcile_item_submission(
+            item_id,
+            str(seller_id),
+            resolution=str(body.get("resolution") or "poll"),
+            feed_task_id=str(body.get("feedTaskId") or ""),
+        )
+        return jsonify({"result": result})
+    except KeyError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except EbayFeedError as exc:
+        return jsonify({"error": exc.safe_message, "provider_errors": [exc.to_public()]}), exc.status_code
 
 
 @app.errorhandler(413)

@@ -167,11 +167,15 @@ export async function updateEbayOffer(offerId, item) {
 }
 
 export async function sendDraftFeed(items) {
+    const itemIds = items.map((item) => item.inventoryItemId).filter(Boolean);
+    if (itemIds.length !== items.length) {
+        throw new Error('Only persisted, seller-approved inventory items can be submitted to Seller Hub drafts.');
+    }
     return retryWithBackoff(async () => {
         const res = await authenticatedFetch(`${baseUrl()}/api/ebay/draft-feed`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ items: items.map((item) => normalizeClientItem(item)) })
+            body: JSON.stringify({ itemIds })
         });
         const body = await parseResponse(res);
         return body.result || body;

@@ -40,7 +40,7 @@ from .ebay_feed import (
     validate_draft_photo_urls,
 )
 from .market_metrics import pricing_recommendation, sold_price_summary
-from .schema import fit_title, normalize_listing
+from .schema import _draft_sku, fit_title, normalize_listing
 from .title_optimizer import optimize_title
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,8 @@ WORKFLOW_STATES = (
     "needs_review",
     "ready_for_approval",
     "approved",
+    "claiming",              # submission started; task ID not yet persisted
+    "ambiguous_submission",  # upload sent but outcome uncertain; block retry
     "draft_submitted",
     "draft_result_available",
     "draft_failed",
@@ -105,6 +107,142 @@ def _decode(val: Any, fallback: Any = None) -> Any:
         return json.loads(str(val))
     except (ValueError, TypeError):
         return fallback
+
+
+def _content_hash(listing: dict) -> str:
+    """Stable SHA-256 hash of the listing dict for approval binding."""
+    canonical = json.dumps(listing, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _canonical_content_hash(listing: dict[str, Any], photos: list[dict[str, Any]]) -> str:
+    """Hash the exact listing and ordered persisted photo content approved by a seller."""
+    payload = {
+        "listing": listing if isinstance(listing, dict) else {},
+        "photos": [
+            {
+                "id": str(photo.get("id") or ""),
+                "url": str(_photo_image_url(photo) or ""),
+                "position": int(photo.get("position") or 0),
+                "isCover": bool(photo.get("isCover")),
+            }
+            for photo in photos
+        ],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+# States that block content mutations (listing edits, photo changes)
+_MUTATION_BLOCKED_STATES = frozenset({
+    "draft_submitted",
+    "draft_created",
+    "claiming",
+    "submitted",
+    "processing",
+    "ambiguous",
+    "ambiguous_submission",
+})
+
+
+def _invalidate_approval(db: Any, item_id: str, seller_id: str, now: str) -> None:
+    """Invalidate approval whenever the approved listing content or photos change."""
+    row = db.execute(
+        "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
+        (item_id, seller_id),
+    ).fetchone()
+    if not row or str(row["workflow_status"] or "") not in {"approved", "ready_for_approval"}:
+        return
+    db.execute(
+        """UPDATE inventory_items
+           SET workflow_status = 'needs_review',
+               seller_confirmed = ?,
+               approval_content_hash = '',
+               approved_content_hash = NULL,
+               approved_at = NULL,
+               approved_by = '',
+               updated_at = ?
+           WHERE id = ? AND seller_id = ?
+             AND workflow_status IN ('approved', 'ready_for_approval')""",
+        (False, now, item_id, seller_id),
+    )
+
+
+# States that invalidate approval when content changes
+_APPROVAL_REQUIRED_STATES = frozenset({"approved"})
+
+
+def _has_active_or_ambiguous_submission(db: Any, item_id: str, seller_id: str | None = None) -> dict[str, Any] | None:
+    """Return active or ambiguous submission row for item_id if one exists."""
+    if seller_id:
+        row = db.execute(
+            """SELECT id, status, submission_stage, feed_task_id FROM inventory_submissions
+               WHERE item_id = ? AND seller_id = ?
+                 AND status IN ('claiming', 'submitted', 'processing', 'ambiguous')
+               ORDER BY created_at DESC LIMIT 1""",
+            (item_id, seller_id),
+        ).fetchone()
+    else:
+        row = db.execute(
+            """SELECT id, status, submission_stage, feed_task_id FROM inventory_submissions
+               WHERE item_id = ?
+                 AND status IN ('claiming', 'submitted', 'processing', 'ambiguous')
+               ORDER BY created_at DESC LIMIT 1""",
+            (item_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _assert_mutable(item_id: str, status: str, context: str = "edit", db: Any = None) -> None:
+    """Raise ValueError if the item is in a state or has a submission blocking mutations."""
+    if status in _MUTATION_BLOCKED_STATES:
+        raise ValueError(
+            f"Cannot {context} item {item_id}: it is in state '{status}' with an active "
+            "or ambiguous eBay draft submission. Reconcile or complete the submission before making changes."
+        )
+    if db is not None:
+        sql = (
+            "SELECT workflow_status FROM inventory_items WHERE id = ? FOR UPDATE"
+            if bool(getattr(db, "postgres", False))
+            else "SELECT workflow_status FROM inventory_items WHERE id = ?"
+        )
+        row = db.execute(sql, (item_id,)).fetchone()
+        live_status = str(row["workflow_status"] or "") if row else ""
+        if live_status in _MUTATION_BLOCKED_STATES:
+            raise ValueError(
+                f"Cannot {context} item {item_id}: it is in state '{live_status}' with an active "
+                "or ambiguous eBay draft submission. Reconcile or complete the submission before making changes."
+            )
+        sub = _has_active_or_ambiguous_submission(db, item_id)
+        if sub:
+            raise ValueError(
+                f"Cannot {context} item {item_id}: it has an active or ambiguous eBay draft submission "
+                f"(status='{sub.get('status')}', stage='{sub.get('submission_stage')}'). "
+                "Reconcile or complete the submission before making changes."
+            )
+
+
+def _require_rowcount(cur: Any, item_id: str, action: str) -> None:
+    if getattr(cur, "rowcount", None) == 0:
+        raise ValueError(
+            f"Cannot {action} item {item_id}: it has an active or ambiguous eBay draft submission "
+            "(or was modified concurrently)."
+        )
+
+
+def seller_owns_feed_task(task_id: str, seller_id: str) -> bool:
+    """Return True if the feed task belongs to the given seller."""
+    if not task_id or not seller_id:
+        return False
+    init_db()
+    with connect() as db:
+        row = db.execute(
+            "SELECT 1 FROM inventory_submissions WHERE feed_task_id = ? AND seller_id = ? LIMIT 1",
+            (str(task_id), str(seller_id)),
+        ).fetchone()
+        return row is not None
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +620,8 @@ def apply_photo_grouping(
             "SELECT * FROM inventory_items WHERE batch_id = ?",
             (batch_id,),
         ).fetchall()
+        for existing_row in existing_items_rows:
+            _assert_mutable(str(existing_row["id"]), str(existing_row["workflow_status"] or ""), "regroup", db=db)
         available_existing_items = {str(it["id"]): dict(it) for it in existing_items_rows}
 
         # Determine groupings
@@ -546,13 +686,18 @@ def apply_photo_grouping(
                         existing_listing["notes"] = (notes + " Group flagged: duplicate photo filenames detected.").strip()
 
                 validation = check_listing_rules(existing_listing, len(group), {})
-
-                db.execute(
+                matched_status = str(matched_item.get("workflow_status") or "")
+                cur = db.execute(
                     """UPDATE inventory_items
                        SET listing_json = ?, validation_json = ?, updated_at = ?
-                       WHERE id = ?""",
-                    (_json(existing_listing), _json(validation), now, item_id),
+                       WHERE id = ? AND workflow_status = ?""",
+                    (_json(existing_listing), _json(validation), now, item_id, matched_status),
                 )
+                _require_rowcount(cur, item_id, "regroup")
+                old_photo_ids = [str(p["id"]) for p in photo_records if str(p.get("item_id") or "") == item_id]
+                new_photo_ids = [str(p["id"]) for p in group]
+                if old_photo_ids != new_photo_ids:
+                    _invalidate_approval(db, item_id, seller_id, now)
             else:
                 item_id = str(uuid.uuid4())
                 initial_listing = {
@@ -614,9 +759,14 @@ def apply_photo_grouping(
             created_items.append(item_id)
 
         # Remove orphaned items that no longer have any photos assigned
-        for old_id in available_existing_items:
+        for old_id, old_item in available_existing_items.items():
             if old_id not in used_item_ids:
-                db.execute("DELETE FROM inventory_items WHERE id = ?", (old_id,))
+                old_status = str(old_item.get("workflow_status") or "")
+                cur = db.execute(
+                    "DELETE FROM inventory_items WHERE id = ? AND workflow_status = ?",
+                    (old_id, old_status),
+                )
+                _require_rowcount(cur, old_id, "regroup")
 
     return list_batch_items(batch_id, seller_id)
 
@@ -784,6 +934,9 @@ def list_batch_items(batch_id: str, seller_id: str) -> list[dict[str, Any]]:
                 "titleCandidates": title_candidates,
                 "analysisJobId": str(r["analysis_job_id"] or ""),
                 "sellerConfirmed": bool(r["seller_confirmed"]),
+                "approvalContentHash": str(r["approval_content_hash"] or r["approved_content_hash"] or ""),
+                "approvedAt": str(r["approved_at"]) if r["approved_at"] else None,
+                "approvedBy": str(r["approved_by"] or ""),
                 "photos": item_photos,
                 "photoCount": len(item_photos),
                 "coverThumbnail": cover_photo["previewUrl"] if cover_photo else "",
@@ -844,6 +997,9 @@ def get_item(item_id: str, seller_id: str) -> dict[str, Any]:
             "titleCandidates": _decode(row["title_candidates_json"], {}),
             "analysisJobId": str(row["analysis_job_id"] or ""),
             "sellerConfirmed": bool(row["seller_confirmed"]),
+            "approvalContentHash": str(row["approval_content_hash"] or row["approved_content_hash"] or ""),
+            "approvedAt": str(row["approved_at"]) if row["approved_at"] else None,
+            "approvedBy": str(row["approved_by"] or ""),
             "photos": photos,
             "photoCount": len(photos),
             "coverThumbnail": cover_photo["previewUrl"] if cover_photo else "",
@@ -855,6 +1011,63 @@ def get_item(item_id: str, seller_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Patching Editable Fields & Provenance Tracking
 # ---------------------------------------------------------------------------
+
+def _execute_patch_item_update(
+    db: Any,
+    item_id: str,
+    seller_id: str,
+    listing: dict[str, Any],
+    provenance: dict[str, Any],
+    validation: dict[str, Any],
+    new_status: str,
+    modified_fields: set[str],
+    clear_approval: bool,
+    now: str,
+) -> None:
+    live_row = db.execute(
+        "SELECT workflow_status, approval_content_hash FROM inventory_items WHERE id = ? AND seller_id = ?",
+        (item_id, seller_id),
+    ).fetchone()
+    if not live_row:
+        raise KeyError(f"Item {item_id} not found.")
+    live_status = str(live_row["workflow_status"] or "")
+    live_hash = str(live_row["approval_content_hash"] or "")
+    _assert_mutable(item_id, live_status, "edit", db=db)
+
+    if live_status == "approved" and modified_fields:
+        new_status = "needs_review"
+        clear_approval = True
+
+    if clear_approval:
+        cur = db.execute(
+            """UPDATE inventory_items
+               SET listing_json = ?, provenance_json = ?, validation_json = ?,
+                   workflow_status = ?, seller_confirmed = ?,
+                   approval_content_hash = '', approved_content_hash = NULL,
+                   approved_at = NULL, approved_by = '', updated_at = ?
+               WHERE id = ? AND seller_id = ? AND workflow_status = ? AND approval_content_hash = ?""",
+            (
+                _json(listing), _json(provenance), _json(validation),
+                new_status, False, now, item_id, seller_id, live_status, live_hash,
+            ),
+        )
+    else:
+        cur = db.execute(
+            """UPDATE inventory_items
+               SET listing_json = ?, provenance_json = ?, validation_json = ?,
+                   workflow_status = ?, updated_at = ?
+               WHERE id = ? AND seller_id = ? AND workflow_status = ? AND approval_content_hash = ?""",
+            (
+                _json(listing), _json(provenance), _json(validation),
+                new_status, now, item_id, seller_id, live_status, live_hash,
+            ),
+        )
+    if getattr(cur, "rowcount", None) == 0:
+        raise ValueError(
+            f"Cannot edit item {item_id}: it has an active or ambiguous eBay draft submission "
+            "(or was modified concurrently). Reconcile or complete the submission before making changes."
+        )
+
 
 def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     """Patch editable item fields with seller provenance tracking and auto re-validation."""
@@ -965,7 +1178,11 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
         provenance.get(f, {}).get("sellerConfirmed") is True for f in ("title", "price")
     )
     
+    # Block mutations on submitted/claiming items
+    _assert_mutable(item_id, current_status, "edit")
+
     new_status = current_status
+    approval_hash_update = []
     if current_status not in {"draft_submitted", "draft_result_available"}:
         if is_valid and has_required and all_confirmed:
             if current_status in {"needs_review", "grouped", "analysis_running"}:
@@ -974,22 +1191,16 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
             if current_status in {"ready_for_approval", "approved"}:
                 new_status = "needs_review"
 
+    # If item was approved and content changed, revoke approval and clear hash
+    if current_status == "approved" and modified_fields:
+        new_status = "needs_review"
+        approval_hash_update = [None]  # sentinel: clear approval hashes
+
     now = _now_iso()
     with connect() as db:
-        db.execute(
-            """UPDATE inventory_items
-               SET listing_json = ?, provenance_json = ?, validation_json = ?,
-                   workflow_status = ?, updated_at = ?
-               WHERE id = ? AND seller_id = ?""",
-            (
-                _json(listing),
-                _json(provenance),
-                _json(validation),
-                new_status,
-                now,
-                item_id,
-                seller_id,
-            ),
+        _execute_patch_item_update(
+            db, item_id, seller_id, listing, provenance, validation,
+            new_status, modified_fields, bool(approval_hash_update), now,
         )
 
     return get_item(item_id, seller_id)
@@ -998,6 +1209,42 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
 # ---------------------------------------------------------------------------
 # Validation & Approval Gating
 # ---------------------------------------------------------------------------
+
+def _select_live_workflow_status(db: Any, item_id: str, seller_id: str, fallback: str) -> str:
+    sql = (
+        "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ? FOR UPDATE"
+        if bool(getattr(db, "postgres", False))
+        else "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?"
+    )
+    row = db.execute(sql, (item_id, seller_id)).fetchone()
+    return str(row["workflow_status"] or "") if row else fallback
+
+
+def _persist_item_validation(
+    db: Any,
+    item_id: str,
+    seller_id: str,
+    validation: dict[str, Any],
+    candidate_status: str,
+    current_status: str,
+    preserved_states: frozenset[str],
+    now: str,
+) -> str:
+    live_status = current_status
+    for _ in range(2):
+        live_status = _select_live_workflow_status(db, item_id, seller_id, live_status)
+        final_status = live_status if live_status in preserved_states else candidate_status
+        cur = db.execute(
+            """UPDATE inventory_items
+               SET validation_json = ?, workflow_status = ?, updated_at = ?
+               WHERE id = ? AND seller_id = ? AND workflow_status = ?""",
+            (_json(validation), final_status, now, item_id, seller_id, live_status),
+        )
+        if getattr(cur, "rowcount", None) != 0:
+            return final_status
+    _require_rowcount(cur, item_id, "validate")
+    return final_status
+
 
 def validate_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
     """Run validation checks on selected items and update their validation states."""
@@ -1017,14 +1264,13 @@ def validate_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
             item["provenance"].get(f, {}).get("sellerConfirmed") is True for f in ("title", "price")
         )
 
+        preserved_states = _MUTATION_BLOCKED_STATES | frozenset({"draft_result_available"})
         current_status = item["workflowStatus"]
         new_status = current_status
         blocking = [f for f in validation.get("findings", []) if f.get("rule") != "taxonomy_unverified"]
         is_valid = len(blocking) == 0
 
-        current_status = item["workflowStatus"]
-        new_status = current_status
-        if current_status not in {"draft_submitted", "draft_result_available"}:
+        if current_status not in preserved_states:
             if is_valid and has_required and all_confirmed:
                 new_status = "ready_for_approval"
             else:
@@ -1032,11 +1278,8 @@ def validate_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
 
         now = _now_iso()
         with connect() as db:
-            db.execute(
-                """UPDATE inventory_items
-                   SET validation_json = ?, workflow_status = ?, updated_at = ?
-                   WHERE id = ? AND seller_id = ?""",
-                (_json(validation), new_status, now, item_id, seller_id),
+            new_status = _persist_item_validation(
+                db, item_id, seller_id, validation, new_status, current_status, preserved_states, now
             )
         results.append({
             "itemId": item_id,
@@ -1056,7 +1299,9 @@ def approve_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
 
     for item_id in item_ids:
         item = get_item(item_id, seller_id)
+        _assert_mutable(item_id, item["workflowStatus"], "approve")
         listing = item["listing"]
+        photos = item.get("photos") or []
         photo_count = item["photoCount"]
         validation = item["validation"]
         if not validation or "findings" not in validation:
@@ -1074,14 +1319,31 @@ def approve_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
             })
             continue
 
+        content_hash = _content_hash(listing)
+        canonical_hash = _canonical_content_hash(listing, photos)
         now = _now_iso()
         with connect() as db:
-            db.execute(
+            live_row = db.execute(
+                "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
+                (item_id, seller_id),
+            ).fetchone()
+            if not live_row:
+                raise KeyError(f"Item {item_id} not found.")
+            live_status = str(live_row["workflow_status"] or "")
+            _assert_mutable(item_id, live_status, "approve", db=db)
+            cur = db.execute(
                 """UPDATE inventory_items
-                   SET workflow_status = 'approved', seller_confirmed = ?, updated_at = ?
-                   WHERE id = ? AND seller_id = ?""",
-                (True, now, item_id, seller_id),
+                   SET workflow_status = 'approved', seller_confirmed = ?,
+                       approval_content_hash = ?, approved_content_hash = ?,
+                       approved_at = ?, approved_by = ?, updated_at = ?
+                   WHERE id = ? AND seller_id = ? AND workflow_status = ?""",
+                (True, canonical_hash, content_hash, now, seller_id, now, item_id, seller_id, live_status),
             )
+            if getattr(cur, "rowcount", None) == 0:
+                raise ValueError(
+                    f"Cannot approve item {item_id}: it has an active or ambiguous eBay draft submission "
+                    "(or was modified concurrently)."
+                )
         approved.append(item_id)
 
     return {
@@ -1493,98 +1755,493 @@ def start_workspace_analysis(
 # Submission of Approved Drafts through Seller Hub Draft Feed
 # ---------------------------------------------------------------------------
 
-def submit_approved_drafts(
-    item_ids: list[str], seller_id: str
-) -> dict[str, Any]:
-    """Submit only explicitly approved items through the existing Seller Hub draft-feed route."""
+# Submission operation stages — used in inventory_submissions.submission_stage
+# to classify exactly how far a submission progressed before any failure.
+STAGE_VALIDATING   = "validating"    # pre-flight checks only, nothing sent
+STAGE_TASK_CREATED = "task_created"  # POST /task succeeded; task ID persisted
+STAGE_UPLOAD_SENT  = "upload_sent"   # file bytes sent; outcome uncertain
+STAGE_UPLOAD_CONFIRMED = "upload_confirmed"  # 2xx from upload endpoint
+STAGE_COMPLETED    = "completed"     # terminal task status confirmed by eBay
+
+# States that must block a new submission attempt for a given item
+_ACTIVE_SUBMISSION_STAGES = frozenset({
+    STAGE_TASK_CREATED,
+    STAGE_UPLOAD_SENT,
+    STAGE_UPLOAD_CONFIRMED,
+})
+
+
+def _partial_submission_can_retry(row: Any, item_id: str, seller_id: str, db: Any) -> bool:
+    """Allow retry after 'completed_with_errors' only if this item failed rather than succeeded."""
+    result = _decode(row["result_json"], {})
+    outcome = str(result.get("itemOutcome") or "")
+    if outcome == "failed":
+        return True
+    if outcome == "completed":
+        return False
+    item_row = db.execute(
+        "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
+        (item_id, seller_id),
+    ).fetchone()
+    return bool(item_row and str(item_row["workflow_status"] or "") != "draft_result_available")
+
+
+def _check_duplicate_submission(item_id: str, seller_id: str, db: Any) -> None:
+    """Raise if there is already an active or ambiguous submission for this item."""
+    row = db.execute(
+        """SELECT id, submission_stage, status, result_json FROM inventory_submissions
+           WHERE item_id = ? AND seller_id = ?
+             AND status NOT IN ('failed', 'cancelled', 'completed')
+           ORDER BY created_at DESC LIMIT 1""",
+        (item_id, seller_id),
+    ).fetchone()
+    if not row:
+        return
+    status = str(row["status"] or "")
+    if status == "completed_with_errors" and _partial_submission_can_retry(row, item_id, seller_id, db):
+        return
+    stage = str(row["submission_stage"] or "")
+    if stage in _ACTIVE_SUBMISSION_STAGES or status in ("claiming", "submitted", "processing", "ambiguous", "completed_with_errors"):
+        raise ValueError(
+            f"Item {item_id} already has an active or ambiguous submission (stage={stage!r}, status={status!r}). "
+            "Check the existing task status before retrying. "
+            "If the task ID is unknown, use the reconcile endpoint to search eBay for recent tasks."
+        )
+
+
+def _assert_submission_authorized(item_ids: list[str], seller_id: str) -> None:
+    """Enforce ownership, deployment flags, and verified OAuth scope proofs."""
     if not seller_id:
         raise ValueError("Seller ownership is required.")
     if not item_ids:
         raise ValueError("No items selected for submission.")
+    if os.environ.get("EBAY_DRAFTS_ENABLED", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise ValueError("Seller Hub draft submissions are disabled pending controlled-pilot authorization.")
+    from .commerce_agent import ebay_mutations_enabled
 
-    items_to_submit = []
-    for item_id in item_ids:
-        item = get_item(item_id, seller_id)
-        if item["workflowStatus"] != "approved":
-            raise ValueError(
-                f"Item {item_id} is in status '{item['workflowStatus']}' and cannot be submitted. "
-                "Only explicitly approved items can reach the Seller Hub draft feed."
-            )
-        listing = dict(item["listing"])
-        photo_urls = [_photo_image_url(p) for p in item.get("photos", []) if _photo_image_url(p)]
-        if photo_urls:
-            listing["pic"] = " ".join(photo_urls)
-            listing["coverUrl"] = item.get("coverThumbnail") or photo_urls[0]
-            listing["photos"] = item["photos"]
-            listing["photoAssets"] = item["photos"]
-            listing["photoCount"] = len(photo_urls)
+    if not ebay_mutations_enabled():
+        raise ValueError("External eBay draft writes are disabled while EBAY_MUTATIONS_ENABLED is false.")
+    scope_status = ebay_scope_status()
+    if scope_status.get("grantedScopesStatus") != "verified":
+        raise ValueError(
+            "Seller Hub draft submission requires verified eBay OAuth scope proofs. "
+            "Reauthorize eBay, then run the scope probe before submitting drafts."
+        )
 
-        # Retrieve and validate genuine persisted human-review / approval state. Do not hardcode True.
-        if bool(item.get("sellerConfirmed")):
-            listing["reviewAcknowledged"] = True
-        elif bool(listing.get("reviewAcknowledged")):
-            listing["reviewAcknowledged"] = True
-        else:
-            listing["reviewAcknowledged"] = False
 
-        items_to_submit.append((item, listing))
+def _build_submission_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    import copy
 
-    # Existing draft feed validation & upload
-    listings = [l for _, l in items_to_submit]
+    listing = dict(item["listing"])
+    photo_urls = [_photo_image_url(p) for p in item.get("photos", []) if _photo_image_url(p)]
+    if photo_urls:
+        listing["pic"] = " ".join(photo_urls)
+        listing["coverUrl"] = item.get("coverThumbnail") or photo_urls[0]
+        listing["photos"] = item["photos"]
+        listing["photoAssets"] = item["photos"]
+        listing["photoCount"] = len(photo_urls)
+    acknowledged = bool(item.get("sellerConfirmed")) or bool(listing.get("reviewAcknowledged"))
+    listing["reviewAcknowledged"] = acknowledged
+    return copy.deepcopy(listing)
+
+
+def _prepare_submission_item(
+    item: dict[str, Any], seller_id: str, db: Any
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    item_id = item["id"]
+    _check_duplicate_submission(item_id, seller_id, db)
+    if item["workflowStatus"] in _MUTATION_BLOCKED_STATES:
+        raise ValueError(
+            f"Item {item_id} already has an active or ambiguous draft submission "
+            f"(status={item['workflowStatus']!r}) and cannot be submitted again."
+        )
+    if item["workflowStatus"] != "approved":
+        raise ValueError(
+            f"Item {item_id} is in status '{item['workflowStatus']}' and cannot be submitted. "
+            "Only explicitly approved items can reach the Seller Hub draft feed."
+        )
+    stored_hash = _get_approved_content_hash(item_id, seller_id, db)
+    current_hash = _content_hash(item["listing"])
+    canonical_hash = _canonical_content_hash(item["listing"], item.get("photos") or [])
+    approval_hash = str(item.get("approvalContentHash") or "")
+    hash_mismatch = (stored_hash and stored_hash != current_hash)
+    if not approval_hash or approval_hash != canonical_hash or hash_mismatch:
+        raise ValueError(
+            f"Item {item_id} content has changed since it was approved "
+            f"(approved hash {(approval_hash or stored_hash)[:12]}…). "
+            "Re-approve the item after reviewing the changes."
+        )
+    return item, _build_submission_snapshot(item)
+
+
+def _acquire_item_claim(
+    item: dict[str, Any], listing_snapshot: dict[str, Any], seller_id: str, now: str, db: Any
+) -> str:
+    _check_duplicate_submission(item["id"], seller_id, db)
+    sub_id = str(uuid.uuid4())
+    checked_hash = str(item.get("approvalContentHash") or "")
+    seed_hash = checked_hash or _content_hash(item["listing"])
+    idempotency_key = hashlib.sha256(f"{seller_id}:{item['id']}:{seed_hash}".encode("utf-8")).hexdigest()
+    cur = db.execute(
+        """UPDATE inventory_items
+           SET workflow_status = 'claiming', updated_at = ?
+           WHERE id = ? AND workflow_status = 'approved' AND seller_id = ?
+             AND approval_content_hash = ?""",
+        (now, item["id"], seller_id, checked_hash),
+    )
+    rowcount = getattr(cur, "rowcount", None)
+    if rowcount is not None and rowcount == 0:
+        raise ValueError(
+            f"Item {item['id']} already has an active or ambiguous draft submission "
+            "(or its approved content changed concurrently). Check existing status before retrying."
+        )
     try:
-        feed_result = upload_seller_hub_draft_csv(listings)
-    except EbayFeedError as exc:
-        now = _now_iso()
-        with connect() as db:
-            for item, _ in items_to_submit:
-                db.execute(
-                    """UPDATE inventory_items
-                       SET workflow_status = 'draft_failed', updated_at = ?
-                       WHERE id = ? AND seller_id = ?""",
-                    (now, item["id"], seller_id),
-                )
+        db.execute(
+            """INSERT INTO inventory_submissions(
+                id, item_id, seller_id, batch_id, feed_task_id,
+                status, submission_stage, idempotency_key, listing_snapshot, result_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'claiming', ?, ?, ?, ?, ?, ?)""",
+            (
+                sub_id,
+                item["id"],
+                seller_id,
+                item["batchId"],
+                f"pending:{idempotency_key[:48]}",
+                STAGE_VALIDATING,
+                idempotency_key,
+                _json(listing_snapshot),
+                _json({"snapshot": listing_snapshot, "stage": STAGE_VALIDATING, "idempotencyKey": idempotency_key}),
+                now,
+                now,
+            ),
+        )
+    except Exception as exc:
+        msg_low = str(exc).lower()
+        if any(tok in msg_low for tok in ("unique", "duplicate", "constraint", "integrity")):
+            raise ValueError(
+                f"Item {item['id']} already has an active or ambiguous draft submission. "
+                "Reconcile its existing task before retrying."
+            ) from exc
         raise
+    return sub_id
 
-    feed_task_id = str(feed_result.get("taskId") or "")
-    now = _now_iso()
 
-    submissions = []
+def _update_submissions_stage(
+    items_to_submit: list[tuple[dict[str, Any], dict[str, Any]]],
+    sub_ids_by_item: dict[str, str],
+    task_id: str,
+    stage: str,
+    status: str | None = None,
+) -> None:
+    now_ts = _now_iso()
     with connect() as db:
         for item, _ in items_to_submit:
-            sub_id = str(uuid.uuid4())
+            sub_id = sub_ids_by_item.get(item["id"])
+            if not sub_id:
+                continue
+            if stage == STAGE_TASK_CREATED:
+                db.execute(
+                    """UPDATE inventory_submissions
+                       SET feed_task_id = ?, submission_stage = ?, status = 'submitted', updated_at = ?
+                       WHERE id = ?""",
+                    (task_id, stage, now_ts, sub_id),
+                )
+            elif status is not None:
+                db.execute(
+                    """UPDATE inventory_submissions
+                       SET submission_stage = ?, status = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (stage, status, now_ts, sub_id),
+                )
+            else:
+                db.execute(
+                    """UPDATE inventory_submissions
+                       SET submission_stage = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (stage, now_ts, sub_id),
+                )
+
+
+def _classify_feed_error(exc: EbayFeedError) -> tuple[str, str, str]:
+    fail_op = exc.operation or "unknown"
+    is_ambiguous = fail_op in ("upload_file", "get_task") or bool(getattr(exc, "task_id", None))
+    sub_status = "ambiguous" if is_ambiguous else "failed"
+    item_status = "ambiguous_submission" if is_ambiguous else "draft_failed"
+    if fail_op == "upload_file":
+        stage = STAGE_UPLOAD_SENT
+    elif fail_op == "get_task":
+        stage = STAGE_UPLOAD_CONFIRMED
+    else:
+        stage = STAGE_VALIDATING
+    return sub_status, item_status, stage
+
+
+def _mark_submissions_outcome(
+    items_to_submit: list[tuple[dict[str, Any], dict[str, Any]]],
+    sub_ids_by_item: dict[str, str],
+    seller_id: str,
+    sub_status: str,
+    item_status: str,
+    result_payload: dict[str, Any],
+    stage: str | None = None,
+) -> None:
+    err_now = _now_iso()
+    encoded_result = _json(result_payload)
+    with connect() as db:
+        for item, _ in items_to_submit:
+            sub_id = sub_ids_by_item.get(item["id"], "")
+            if sub_id and stage is not None:
+                db.execute(
+                    """UPDATE inventory_submissions
+                       SET status = ?, submission_stage = ?, result_json = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (sub_status, stage, encoded_result, err_now, sub_id),
+                )
+            elif sub_id:
+                db.execute(
+                    """UPDATE inventory_submissions
+                       SET status = ?, result_json = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (sub_status, encoded_result, err_now, sub_id),
+                )
             db.execute(
-                """INSERT INTO inventory_submissions(
-                    id, item_id, seller_id, batch_id, feed_task_id, status, result_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'submitted', ?, ?, ?)""",
-                (
-                    sub_id,
-                    item["id"],
-                    seller_id,
-                    item["batchId"],
-                    feed_task_id,
-                    _json(feed_result),
-                    now,
-                    now,
-                ),
+                """UPDATE inventory_items
+                   SET workflow_status = ?, updated_at = ?
+                   WHERE id = ? AND seller_id = ? AND workflow_status = 'claiming'""",
+                (item_status, err_now, item["id"], seller_id),
+            )
+
+
+def _finalize_confirmed_submissions(
+    items_to_submit: list[tuple[dict[str, Any], dict[str, Any]]],
+    sub_ids_by_item: dict[str, str],
+    seller_id: str,
+    feed_task_id: str,
+    feed_result: dict[str, Any],
+) -> list[str]:
+    now2 = _now_iso()
+    submissions: list[str] = []
+    encoded_result = _json(feed_result)
+    with connect() as db:
+        for item, _ in items_to_submit:
+            sub_id = sub_ids_by_item.get(item["id"], "")
+            db.execute(
+                """UPDATE inventory_submissions
+                   SET feed_task_id = ?, status = 'submitted', submission_stage = ?,
+                       result_json = ?, updated_at = ?
+                   WHERE id = ?""",
+                (feed_task_id, STAGE_UPLOAD_CONFIRMED, encoded_result, now2, sub_id),
             )
             db.execute(
                 """UPDATE inventory_items
                    SET workflow_status = 'draft_submitted', updated_at = ?
-                   WHERE id = ? AND seller_id = ?""",
-                (now, item["id"], seller_id),
+                   WHERE id = ? AND seller_id = ? AND workflow_status = 'claiming'""",
+                (now2, item["id"], seller_id),
             )
             submissions.append(sub_id)
+    return submissions
 
+
+def submit_approved_drafts(
+    item_ids: list[str], seller_id: str
+) -> dict[str, Any]:
+    """Submit only explicitly approved items through the centralized Seller Hub draft-feed service."""
+    _assert_submission_authorized(item_ids, seller_id)
+    now = _now_iso()
+    prefetched_items = [get_item(item_id, seller_id) for item_id in item_ids]
+    items_to_submit: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    sub_ids_by_item: dict[str, str] = {}
+
+    with connect() as db:
+        for item in prefetched_items:
+            items_to_submit.append(_prepare_submission_item(item, seller_id, db))
+        for item, listing_snapshot in items_to_submit:
+            sub_ids_by_item[item["id"]] = _acquire_item_claim(item, listing_snapshot, seller_id, now, db)
+
+    listings = [listing for _, listing in items_to_submit]
+    try:
+        feed_result = upload_seller_hub_draft_csv(
+            listings,
+            on_task_created=lambda tid: _update_submissions_stage(items_to_submit, sub_ids_by_item, tid, STAGE_TASK_CREATED),
+            on_upload_sent=lambda tid: _update_submissions_stage(items_to_submit, sub_ids_by_item, tid, STAGE_UPLOAD_SENT),
+            on_upload_confirmed=lambda tid: _update_submissions_stage(items_to_submit, sub_ids_by_item, tid, STAGE_UPLOAD_CONFIRMED, status="submitted"),
+        )
+    except EbayFeedError as exc:
+        sub_status, item_status, persist_stage = _classify_feed_error(exc)
+        payload = {"error": exc.safe_message, "operation": exc.operation, "status": sub_status}
+        _mark_submissions_outcome(items_to_submit, sub_ids_by_item, seller_id, sub_status, item_status, payload, stage=persist_stage)
+        raise
+    except Exception as exc:
+        payload = {"status": "ambiguous", "message": f"Submission outcome could not be confirmed: {type(exc).__name__}"}
+        _mark_submissions_outcome(items_to_submit, sub_ids_by_item, seller_id, "ambiguous", "ambiguous_submission", payload)
+        raise
+
+    feed_task_id = str(feed_result.get("taskId") or "")
+    if not feed_task_id:
+        payload = {"status": "ambiguous", "message": "eBay Feed API did not return a task ID."}
+        _mark_submissions_outcome(items_to_submit, sub_ids_by_item, seller_id, "ambiguous", "ambiguous_submission", payload)
+        raise EbayFeedError(502, "malformed_json", "eBay Feed API did not return a task ID.", operation="create_task")
+
+    submissions = _finalize_confirmed_submissions(items_to_submit, sub_ids_by_item, seller_id, feed_task_id, feed_result)
     return {
         "feedTaskId": feed_task_id,
+        "taskId": feed_task_id,
         "submittedCount": len(items_to_submit),
+        "itemCount": len(items_to_submit),
+        "status": "submitted",
         "submissions": submissions,
         "feedResult": feed_result,
+        "submissionStage": STAGE_UPLOAD_CONFIRMED,
+        "uploadStatus": str(feed_result.get("uploadStatus") or "accepted"),
+    }
+
+
+def _get_approved_content_hash(item_id: str, seller_id: str, db: Any) -> str:
+    """Return the approved_content_hash for an item, or empty string if column missing."""
+    try:
+        row = db.execute(
+            "SELECT approved_content_hash FROM inventory_items WHERE id = ? AND seller_id = ?",
+            (item_id, seller_id),
+        ).fetchone()
+        if row:
+            return str(row["approved_content_hash"] or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _effective_submission_sku(row: Any, item_id: str, db: Any) -> str:
+    snapshot = _decode(row["listing_snapshot"], {}) if row and "listing_snapshot" in row.keys() else {}
+    if not snapshot:
+        item_rec = db.execute("SELECT id, listing_json FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+        snapshot = _decode(item_rec["listing_json"], {}) if item_rec else {}
+    if not snapshot:
+        return ""
+    return _draft_sku(snapshot, normalize_listing(snapshot))
+
+
+def _has_unlabeled_partial_errors(row_errors: list[dict[str, Any]], failure_count: int, error_count: int) -> bool:
+    if not row_errors:
+        return failure_count > 0 or error_count > 0
+    return any(not str(err.get("customLabel") or "").strip() for err in row_errors)
+
+
+def _resolve_partial_task_outcome(
+    item_id: str,
+    current_status: str,
+    task_details: dict[str, Any],
+    db: Any,
+    row: Any = None,
+) -> tuple[str, str, str | None, dict[str, Any]]:
+    upload_summary = task_details.get("uploadSummary") or {}
+    result_details = task_details.get("resultDetails") or {}
+    failure_count = int(upload_summary.get("failureCount") or 0)
+    row_errors = result_details.get("errors") or []
+    error_count = int(result_details.get("errorCount") or len(row_errors))
+    enriched = dict(task_details)
+
+    sku = _effective_submission_sku(row, item_id, db)
+    matched_failure = bool(sku) and any(str(err.get("customLabel") or "").strip() == sku for err in row_errors)
+    if matched_failure:
+        enriched["itemOutcome"] = "failed"
+        return "completed_with_errors", "draft_failed", STAGE_COMPLETED, enriched
+
+    if not sku or _has_unlabeled_partial_errors(row_errors, failure_count, error_count):
+        # Unmatched or missing error-row labels cannot prove per-item success; keep unresolved.
+        enriched["itemOutcome"] = "unresolved"
+        next_sub = "ambiguous" if current_status == "ambiguous" else "processing"
+        next_item = "ambiguous_submission" if current_status == "ambiguous" else "draft_submitted"
+        return next_sub, next_item, None, enriched
+
+    enriched["itemOutcome"] = "completed"
+    return "completed_with_errors", "draft_result_available", STAGE_COMPLETED, enriched
+
+
+def _resolve_completed_task_outcomes(
+    item_id: str,
+    current_status: str,
+    task_details: dict[str, Any],
+    db: Any,
+    row: Any = None,
+) -> tuple[str, str, str | None, dict[str, Any]]:
+    upload_summary = task_details.get("uploadSummary") or {}
+    result_details = task_details.get("resultDetails") or {}
+    failure_count = int(upload_summary.get("failureCount") or 0)
+    success_count = int(upload_summary.get("successCount") or 0)
+    error_count = int(result_details.get("errorCount") or len(result_details.get("errors") or []))
+    enriched = dict(task_details)
+
+    if failure_count == 0 and error_count == 0:
+        enriched["itemOutcome"] = "completed"
+        return "completed", "draft_result_available", STAGE_COMPLETED, enriched
+    if success_count > 0:
+        return _resolve_partial_task_outcome(item_id, current_status, enriched, db, row=row)
+    enriched["itemOutcome"] = "failed"
+    return "failed", "draft_failed", STAGE_COMPLETED, enriched
+
+
+def _resolve_feed_task_outcomes(
+    item_id: str, current_status: str, task_details: dict[str, Any], db: Any, row: Any = None
+) -> tuple[str, str, str | None, dict[str, Any]]:
+    task_status = str(task_details.get("status") or "").upper()
+    enriched = dict(task_details)
+
+    if task_status in {"QUEUED", "IN_PROCESS", "COMPILING"}:
+        return "processing", "draft_submitted", None, enriched
+    if task_status in {"COMPLETED", "SUCCESS"}:
+        return _resolve_completed_task_outcomes(item_id, current_status, enriched, db, row=row)
+    if task_status in {"FAILED", "COMPLETED_WITH_ERROR", "ERROR"}:
+        enriched["itemOutcome"] = "failed"
+        return "failed", "draft_failed", STAGE_COMPLETED, enriched
+    return current_status, ("ambiguous_submission" if current_status == "ambiguous" else "draft_submitted"), None, enriched
+
+
+def _refresh_submission_row(row: Any, item_id: str, db: Any) -> dict[str, Any] | None:
+    feed_task_id = str(row["feed_task_id"] or "")
+    current_status = str(row["status"] or "")
+    if not feed_task_id or feed_task_id.startswith("pending:"):
+        return None
+    try:
+        task_details = get_feed_task_details(feed_task_id)
+    except Exception as exc:
+        logger.warning("Failed to refresh feed task %s: %s", feed_task_id, exc)
+        return None
+
+    new_sub_status, new_item_status, new_stage, enriched = _resolve_feed_task_outcomes(
+        item_id, current_status, task_details, db, row=row
+    )
+    now = _now_iso()
+    if new_stage is not None:
+        db.execute(
+            """UPDATE inventory_submissions
+               SET status = ?, submission_stage = ?, result_json = ?, updated_at = ?
+               WHERE id = ?""",
+            (new_sub_status, new_stage, _json(enriched), now, row["id"]),
+        )
+    else:
+        db.execute(
+            """UPDATE inventory_submissions
+               SET status = ?, result_json = ?, updated_at = ?
+               WHERE id = ?""",
+            (new_sub_status, _json(enriched), now, row["id"]),
+        )
+    db.execute(
+        """UPDATE inventory_items
+           SET workflow_status = ?, updated_at = ?
+           WHERE id = ?""",
+        (new_item_status, now, item_id),
+    )
+    return {
+        "submissionId": str(row["id"]),
+        "feedTaskId": feed_task_id,
+        "status": new_sub_status,
+        "itemWorkflowStatus": new_item_status,
+        "details": enriched,
     }
 
 
 def get_item_submission_status(item_id: str, seller_id: str) -> dict[str, Any]:
-    """Retrieve actual per-item submission results from eBay feed task."""
+    """Retrieve and refresh per-item submission results from eBay feed task."""
     if not seller_id:
         raise ValueError("Seller ownership is required.")
     init_db()
@@ -1595,81 +2252,146 @@ def get_item_submission_status(item_id: str, seller_id: str) -> dict[str, Any]:
                ORDER BY created_at DESC LIMIT 1""",
             (item_id, seller_id),
         ).fetchone()
-
         if not row:
             return {"status": "none", "message": "No submission attempt recorded for this item."}
-
-        feed_task_id = str(row["feed_task_id"])
         current_status = str(row["status"])
-        result = _decode(row["result_json"], {})
-
-        # If submitted, check task status from eBay
-        if current_status in {"submitted", "processing"}:
-            try:
-                task_details = get_feed_task_details(feed_task_id)
-                task_status = str(task_details.get("status") or "").upper()
-                upload_summary = task_details.get("uploadSummary") or {}
-                failure_count = int(upload_summary.get("failureCount") or 0)
-                success_count = int(upload_summary.get("successCount") or 0)
-                result_details = task_details.get("resultDetails") or {}
-                row_errors = result_details.get("errors") or []
-                error_count = int(result_details.get("errorCount") or len(row_errors))
-                now = _now_iso()
-
-                if task_status in {"QUEUED", "IN_PROCESS", "COMPILING"}:
-                    new_sub_status = "processing"
-                    new_item_status = "draft_submitted"
-                elif task_status in {"COMPLETED", "SUCCESS"}:
-                    if failure_count == 0 and error_count == 0:
-                        new_sub_status = "completed"
-                        new_item_status = "draft_result_available"
-                    elif success_count > 0:
-                        new_sub_status = "completed_with_errors"
-                        item_rec = db.execute("SELECT id, listing_json FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
-                        sku = ""
-                        if item_rec:
-                            listing = _decode(item_rec["listing_json"], {})
-                            sku = str(listing.get("sku") or "")
-                        is_item_failed = any(err.get("customLabel") == sku for err in row_errors) if sku else (failure_count > 0)
-                        new_item_status = "draft_failed" if is_item_failed else "draft_result_available"
-                    else:
-                        new_sub_status = "failed"
-                        new_item_status = "draft_failed"
-                elif task_status in {"FAILED", "COMPLETED_WITH_ERROR", "ERROR"}:
-                    new_sub_status = "failed"
-                    new_item_status = "draft_failed"
-                else:
-                    new_sub_status = current_status
-                    new_item_status = "draft_submitted"
-
-                db.execute(
-                    """UPDATE inventory_submissions
-                       SET status = ?, result_json = ?, updated_at = ?
-                       WHERE id = ?""",
-                    (new_sub_status, _json(task_details), now, row["id"]),
-                )
-                db.execute(
-                    """UPDATE inventory_items
-                       SET workflow_status = ?, updated_at = ?
-                       WHERE id = ?""",
-                    (new_item_status, now, item_id),
-                )
-                return {
-                    "submissionId": str(row["id"]),
-                    "feedTaskId": feed_task_id,
-                    "status": new_sub_status,
-                    "itemWorkflowStatus": new_item_status,
-                    "details": task_details,
-                }
-            except Exception as exc:
-                logger.warning("Failed to refresh feed task %s: %s", feed_task_id, exc)
-
+        if current_status in {"submitted", "processing", "ambiguous"}:
+            refreshed = _refresh_submission_row(row, item_id, db)
+            if refreshed is not None:
+                return refreshed
         return {
             "submissionId": str(row["id"]),
-            "feedTaskId": feed_task_id,
+            "feedTaskId": str(row["feed_task_id"]),
             "status": current_status,
-            "details": result,
+            "details": _decode(row["result_json"], {}),
         }
+
+
+def _apply_manual_reconciliation(
+    row: Any, item_id: str, seller_id: str, mode: str, effective_task: str, now: str, db: Any
+) -> dict[str, Any]:
+    target_sub = "cancelled" if mode == "cancelled" else ("completed" if mode == "confirm_succeeded" else "failed")
+    target_item = "draft_result_available" if mode == "confirm_succeeded" else "draft_failed"
+    prior_result = _decode(row["result_json"], {})
+    prior_result["reconciledResolution"] = mode
+    prior_result["itemOutcome"] = "completed" if mode == "confirm_succeeded" else "failed"
+    db.execute(
+        """UPDATE inventory_submissions
+           SET status = ?, submission_stage = ?, result_json = ?, updated_at = ?
+           WHERE id = ?""",
+        (target_sub, STAGE_COMPLETED, _json(prior_result), now, row["id"]),
+    )
+    db.execute(
+        "UPDATE inventory_items SET workflow_status = ?, updated_at = ? WHERE id = ? AND seller_id = ?",
+        (target_item, now, item_id, seller_id),
+    )
+    return {
+        "submissionId": str(row["id"]),
+        "feedTaskId": effective_task,
+        "status": target_sub,
+        "itemWorkflowStatus": target_item,
+        "reconciled": True,
+        "details": prior_result,
+    }
+
+
+def _verify_reconcile_task_override(
+    row: Any, seller_id: str, task_override: str, db: Any
+) -> str:
+    existing_task = str(row["feed_task_id"] or "")
+    if not task_override:
+        return existing_task
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", task_override):
+        raise ValueError("Valid eBay feed task ID is required.")
+    if existing_task and not existing_task.startswith("pending:") and task_override != existing_task:
+        raise ValueError("Cannot replace an already-recorded eBay feed task ID.")
+    owners = db.execute(
+        "SELECT seller_id FROM inventory_submissions WHERE feed_task_id = ?",
+        (task_override,),
+    ).fetchall()
+    if any(str(owner["seller_id"]) != str(seller_id) for owner in owners):
+        raise PermissionError("You do not have access to this feed task.")
+    if not owners:
+        raise PermissionError("Feed task ID is not associated with your seller account.")
+    return task_override
+
+
+def reconcile_item_submission(
+    item_id: str,
+    seller_id: str,
+    resolution: str = "poll",
+    feed_task_id: str = "",
+) -> dict[str, Any]:
+    """Deliberately reconcile an ambiguous or in-flight draft submission for a seller item."""
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    mode = str(resolution or "poll").strip().lower()
+    if mode not in {"poll", "confirm_failed", "cancelled", "confirm_succeeded"}:
+        raise ValueError("Unsupported reconciliation resolution.")
+    init_db()
+    task_override = str(feed_task_id or "").strip()
+    now = _now_iso()
+    with connect() as db:
+        row = db.execute(
+            """SELECT * FROM inventory_submissions
+               WHERE item_id = ? AND seller_id = ?
+               ORDER BY created_at DESC LIMIT 1""",
+            (item_id, seller_id),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"No submission attempt found for item {item_id}.")
+        effective_task = _verify_reconcile_task_override(row, seller_id, task_override, db)
+        if task_override and effective_task != str(row["feed_task_id"] or ""):
+            db.execute(
+                "UPDATE inventory_submissions SET feed_task_id = ?, updated_at = ? WHERE id = ?",
+                (effective_task, now, row["id"]),
+            )
+        if mode != "poll":
+            return _apply_manual_reconciliation(row, item_id, seller_id, mode, effective_task, now, db)
+        if not effective_task or effective_task.startswith("pending:"):
+            raise ValueError(
+                "Submission has no persisted eBay feed task ID to poll. Supply a task ID or resolve manually."
+            )
+
+    refreshed = get_item_submission_status(item_id, seller_id)
+    refreshed["reconciled"] = refreshed.get("status") not in {"submitted", "processing", "ambiguous"}
+    return refreshed
+
+
+def _prepare_export_item(item: dict[str, Any]) -> dict[str, Any]:
+    expected_hash = _canonical_content_hash(item["listing"], item.get("photos") or [])
+    if not item.get("approvalContentHash") or item["approvalContentHash"] != expected_hash:
+        raise ValueError(
+            f"Item {item['id']} changed after approval and must be validated and approved again before export."
+        )
+    listing = dict(item["listing"])
+    photo_urls = [_photo_image_url(photo) for photo in item.get("photos", []) if _photo_image_url(photo)]
+    if not photo_urls:
+        raise ValueError(f"Item {item['id']} has no usable persisted photo URLs.")
+    listing["pic"] = " ".join(photo_urls)
+    listing["coverUrl"] = item.get("coverThumbnail") or photo_urls[0]
+    listing["photos"] = item.get("photos") or []
+    listing["photoAssets"] = item.get("photos") or []
+    listing["photoCount"] = len(photo_urls)
+    listing["reviewAcknowledged"] = True
+    return {**item, "listing": listing, "sellerConfirmed": True}
+
+
+def _fetch_export_category_metadata(export_items: list[dict[str, Any]]) -> dict[str, Any]:
+    from .ebay_taxonomy import category_aspects
+
+    category_metadata_map: dict[str, Any] = {}
+    for itm in export_items:
+        cat_id = str(itm.get("listing", {}).get("cat") or itm.get("cat") or "").strip()
+        if not cat_id or cat_id in category_metadata_map:
+            continue
+        try:
+            meta = category_aspects(cat_id, timeout=2.0)
+            if meta and meta.get("status") == "ok":
+                category_metadata_map[cat_id] = meta
+        except Exception:
+            pass
+    return category_metadata_map
 
 
 def export_batch_seller_hub_draft_csv(
@@ -1681,32 +2403,23 @@ def export_batch_seller_hub_draft_csv(
     """Export approved items from an inventory batch into official Seller Hub Create Drafts CSV format."""
     if not seller_id:
         raise ValueError("Seller ownership is required.")
-
     items = list_batch_items(batch_id, seller_id)
     if item_ids:
         item_id_set = set(item_ids)
         items = [i for i in items if i["id"] in item_id_set]
 
-    # Only explicitly approved items may enter draft submission / export
-    approved_items = [i for i in items if i.get("workflowStatus") == "approved" or i.get("sellerConfirmed") is True]
+    # Only explicit workflow approval may enter export. Field-level sellerConfirmed
+    # values are not equivalent to human approval of the complete listing.
+    approved_items = [i for i in items if i.get("workflowStatus") == "approved"]
     if not approved_items:
         raise ValueError("No approved items found to export. Review and approve items before exporting to Seller Hub Draft CSV.")
 
-    # Retrieve live category metadata for relevant categories
-    from .ebay_taxonomy import category_aspects
-    category_metadata_map: dict[str, Any] = {}
-    for itm in approved_items:
-        cat_id = str(itm.get("listing", {}).get("cat") or itm.get("cat") or "").strip()
-        if cat_id and cat_id not in category_metadata_map:
-            try:
-                meta = category_aspects(cat_id, timeout=2.0)
-                if meta and meta.get("status") == "ok":
-                    category_metadata_map[cat_id] = meta
-            except Exception:
-                pass
+    export_items = [_prepare_export_item(item) for item in approved_items]
+    validate_draft_photo_urls([item["listing"] for item in export_items])
+    category_metadata_map = _fetch_export_category_metadata(export_items)
 
     from .seller_hub_draft_template import export_seller_hub_draft_csv
-    return export_seller_hub_draft_csv(approved_items, template_text=template_text, category_metadata_map=category_metadata_map)
+    return export_seller_hub_draft_csv(export_items, template_text=template_text, category_metadata_map=category_metadata_map)
 
 
 # ---------------------------------------------------------------------------
@@ -1812,6 +2525,52 @@ def register_photos(batch_id: str, seller_id: str, photos: list[dict[str, Any]])
     return created
 
 
+def _parse_allow_destructive_flag(payload: dict[str, Any]) -> bool:
+    raw = payload["allowDestructive"] if "allowDestructive" in payload else payload.get("allow_destructive")
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    raise ValueError("allowDestructive must be a JSON boolean.")
+
+
+def _claim_and_sync_donor_photos(
+    db: Any,
+    batch_id: str,
+    seller_id: str,
+    item_id: str,
+    photo_ids: list[str],
+    cover_photo_id: str | None,
+    allow_destructive: bool,
+    now: str,
+) -> None:
+    if not photo_ids:
+        return
+    placeholders = ",".join("?" for _ in photo_ids)
+    donor_rows = db.execute(
+        f"""SELECT DISTINCT p.item_id, i.workflow_status, i.seller_confirmed
+           FROM inventory_item_photos p
+           JOIN inventory_items i ON i.id = p.item_id AND i.seller_id = ?
+           WHERE p.batch_id = ? AND p.id IN ({placeholders}) AND p.item_id IS NOT NULL""",
+        (seller_id, batch_id, *photo_ids),
+    ).fetchall()
+    for row in donor_rows:
+        _assert_mutable(str(row["item_id"]), str(row["workflow_status"] or ""), "take photos from", db=db)
+    protected = [
+        str(row["item_id"])
+        for row in donor_rows
+        if str(row["workflow_status"] or "") in {"approved", "ready_for_approval"} or bool(row["seller_confirmed"])
+    ]
+    if protected and not allow_destructive:
+        raise ValueError("Selected photos belong to approved or seller-confirmed items; explicit confirmation (allow_destructive=True) is required.")
+    _assign_photos_to_item(db, batch_id, seller_id, item_id, photo_ids, cover_photo_id, now)
+    for row in donor_rows:
+        donor_id = str(row["item_id"])
+        if donor_id != item_id:
+            _sync_item_photos_to_listing(db, donor_id, seller_id, now)
+            _invalidate_approval(db, donor_id, seller_id, now)
+
+
 def create_item(batch_id: str, seller_id: str, payload: dict[str, Any], actor: str = "") -> dict[str, Any]:
     """Create an inventory item from selected photo IDs with provenance and validation."""
     if not isinstance(payload, dict):
@@ -1833,6 +2592,7 @@ def create_item(batch_id: str, seller_id: str, payload: dict[str, Any], actor: s
         if k not in provenance:
             provenance[k] = {"source": "missing", "confidence": "none", "evidence": "Unanalyzed", "sellerConfirmed": False}
 
+    allow_destructive = _parse_allow_destructive_flag(payload)
     validation = check_listing_rules(listing, len(photo_ids), {})
 
     with connect() as db:
@@ -1857,8 +2617,9 @@ def create_item(batch_id: str, seller_id: str, payload: dict[str, Any], actor: s
                 now,
             ),
         )
-        if photo_ids:
-            _assign_photos_to_item(db, batch_id, seller_id, item_id, photo_ids, cover_photo_id, now)
+        _claim_and_sync_donor_photos(
+            db, batch_id, seller_id, item_id, photo_ids, cover_photo_id, allow_destructive, now
+        )
         _sync_item_photos_to_listing(db, item_id, seller_id, now)
         db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, batch_id, seller_id))
 
@@ -1899,11 +2660,13 @@ def _sync_item_photos_to_listing(db: Any, item_id: str, seller_id: str, now: str
         cover_url = urls[0]
 
     item_row = db.execute(
-        "SELECT listing_json, provenance_json FROM inventory_items WHERE id = ? AND seller_id = ?",
+        "SELECT listing_json, provenance_json, workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
         (item_id, seller_id),
     ).fetchone()
     if not item_row:
         return {}
+    live_status = str(item_row["workflow_status"] or "")
+    _assert_mutable(item_id, live_status, "modify photos on", db=db)
 
     listing = _decode(item_row["listing_json"], {})
     provenance = _decode(item_row["provenance_json"], {})
@@ -1912,14 +2675,15 @@ def _sync_item_photos_to_listing(db: Any, item_id: str, seller_id: str, now: str
     listing["coverUrl"] = cover_url
     listing["photoCount"] = len(urls)
 
-    validation = check_listing_rules(listing, len(urls), provenance)
+    validation = check_listing_rules(listing, len(urls), {})
 
-    db.execute(
+    cur = db.execute(
         """UPDATE inventory_items
            SET listing_json = ?, validation_json = ?, updated_at = ?
-           WHERE id = ? AND seller_id = ?""",
-        (_json(listing), _json(validation), now, item_id, seller_id),
+           WHERE id = ? AND seller_id = ? AND workflow_status = ?""",
+        (_json(listing), _json(validation), now, item_id, seller_id, live_status),
     )
+    _require_rowcount(cur, item_id, "modify photos on")
     return listing
 
 
@@ -1946,18 +2710,59 @@ def _assign_photos_to_item(
         )
 
 
-def update_item_photos(item_id: str, seller_id: str, photo_ids: list[str], cover_photo_id: str | None = None) -> dict[str, Any]:
-    """Reassign or reorder photos assigned to an item."""
+def update_item_photos(
+    item_id: str,
+    seller_id: str,
+    photo_ids: list[str],
+    cover_photo_id: str | None = None,
+    allow_destructive: bool = False,
+) -> dict[str, Any]:
+    """Reassign or reorder photos assigned to an item with donor synchronization and protection."""
     if not seller_id:
         raise ValueError("Seller ownership is required.")
     if not photo_ids:
         raise ValueError("An inventory item must contain at least one photo. To remove all photos, delete the item group.")
     init_db()
     item = get_item(item_id, seller_id)
+    status = item["workflowStatus"]
+    _assert_mutable(item_id, status, "modify photos on")
     now = _now_iso()
     with connect() as db:
+        live_target = db.execute(
+            "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
+            (item_id, seller_id),
+        ).fetchone()
+        if not live_target:
+            raise KeyError(f"Item {item_id} not found.")
+        _assert_mutable(item_id, str(live_target["workflow_status"] or ""), "modify photos on", db=db)
+        placeholders = ",".join("?" for _ in photo_ids)
+        donor_rows = db.execute(
+            f"""SELECT DISTINCT p.item_id, i.workflow_status, i.seller_confirmed
+               FROM inventory_item_photos p
+               JOIN inventory_items i ON i.id = p.item_id AND i.seller_id = ?
+               WHERE p.batch_id = ? AND p.id IN ({placeholders}) AND p.item_id IS NOT NULL AND p.item_id <> ?""",
+            (seller_id, item["batchId"], *[str(p) for p in photo_ids], item_id),
+        ).fetchall() if photo_ids else []
+
+        for row in donor_rows:
+            _assert_mutable(str(row["item_id"]), str(row["workflow_status"] or ""), "take photos from donor", db=db)
+
+        protected_donors = [
+            str(row["item_id"]) for row in donor_rows
+            if str(row["workflow_status"] or "") in {"approved", "ready_for_approval"} or bool(row["seller_confirmed"])
+        ]
+        if protected_donors and not allow_destructive:
+            raise ValueError("Selected photos belong to approved or seller-confirmed items; explicit confirmation (allow_destructive=True) is required.")
+
         _assign_photos_to_item(db, item["batchId"], seller_id, item_id, [str(p) for p in photo_ids], cover_photo_id, now)
         _sync_item_photos_to_listing(db, item_id, seller_id, now)
+        _invalidate_approval(db, item_id, seller_id, now)
+
+        for row in donor_rows:
+            donor_id = str(row["item_id"])
+            _sync_item_photos_to_listing(db, donor_id, seller_id, now)
+            _invalidate_approval(db, donor_id, seller_id, now)
+
         db.execute("UPDATE inventory_items SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, item_id, seller_id))
     return get_item(item_id, seller_id)
 
@@ -1967,12 +2772,27 @@ def update_item(item_id: str, seller_id: str, fields: dict[str, Any], actor: str
     if not isinstance(fields, dict):
         raise ValueError("Item fields must be an object.")
     with connect() as db:
-        row = db.execute("SELECT seller_confirmed_json FROM inventory_items WHERE id = ? AND seller_id = ?", (item_id, seller_id)).fetchone()
-        confirmed = _decode(row["seller_confirmed_json"] if row else "{}", {}) if row else {}
+        row = db.execute(
+            "SELECT seller_confirmed_json, workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
+            (item_id, seller_id),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"Item {item_id} not found.")
+        live_status = str(row["workflow_status"] or "")
+        _assert_mutable(item_id, live_status, "edit", db=db)
+        confirmed = _decode(row["seller_confirmed_json"], {})
         for k, v in fields.items():
             if k in ("title", "price", "cat", "brand", "size", "cnote", "quantity"):
                 confirmed[k] = v
-        db.execute("UPDATE inventory_items SET seller_confirmed_json = ? WHERE id = ? AND seller_id = ?", (_json(confirmed), item_id, seller_id))
+        cur = db.execute(
+            "UPDATE inventory_items SET seller_confirmed_json = ? WHERE id = ? AND seller_id = ? AND workflow_status = ?",
+            (_json(confirmed), item_id, seller_id, live_status),
+        )
+        if getattr(cur, "rowcount", None) == 0:
+            raise ValueError(
+                f"Cannot edit item {item_id}: it has an active or ambiguous eBay draft submission "
+                "(or was modified concurrently)."
+            )
     return patch_item(item_id, seller_id, fields)
 
 
@@ -1992,8 +2812,7 @@ def delete_item(item_id: str, seller_id: str, allow_destructive: bool = False) -
         status = str(row["workflow_status"] or "")
         batch_id = str(row["batch_id"])
 
-        if status in ("draft_submitted", "draft_created"):
-            raise ValueError("Cannot delete an item with an active eBay draft submission.")
+        _assert_mutable(item_id, status, "delete", db=db)
         if status in ("analysis_queued", "analysis_running"):
             raise ValueError("Cannot delete an item while background AI analysis is running.")
         if status == "approved" and not allow_destructive:
@@ -2010,11 +2829,24 @@ def delete_item(item_id: str, seller_id: str, allow_destructive: bool = False) -
             raise ValueError("Item contains seller-confirmed fields. Explicit confirmation (allow_destructive=True) is required to delete it.")
 
         now = _now_iso()
-        db.execute(
-            "UPDATE inventory_item_photos SET item_id = NULL, is_cover = ? WHERE item_id = ? AND batch_id = ?",
-            (False, item_id, batch_id),
+        photo_rows = db.execute(
+            "SELECT id FROM inventory_item_photos WHERE item_id = ? AND batch_id = ?",
+            (item_id, batch_id),
+        ).fetchall()
+        cur = db.execute(
+            "DELETE FROM inventory_items WHERE id = ? AND seller_id = ? AND workflow_status = ?",
+            (item_id, seller_id, status),
         )
-        db.execute("DELETE FROM inventory_items WHERE id = ? AND seller_id = ?", (item_id, seller_id))
+        if getattr(cur, "rowcount", None) == 0:
+            raise ValueError(
+                f"Cannot delete item {item_id}: it has an active or ambiguous eBay draft submission "
+                "(or was modified concurrently)."
+            )
+        for pr in photo_rows:
+            db.execute(
+                "UPDATE inventory_item_photos SET item_id = NULL, is_cover = ? WHERE id = ? AND batch_id = ?",
+                (False, pr["id"], batch_id),
+            )
         db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, batch_id, seller_id))
 
     return {"deleted": True, "itemId": item_id, "batchId": batch_id}
@@ -2051,8 +2883,8 @@ def merge_items(source_item_id: str, target_item_id: str, seller_id: str, allow_
         s_status = str(s_row["workflow_status"] or "")
         t_status = str(t_row["workflow_status"] or "")
 
-        if s_status in ("draft_submitted", "draft_created") or t_status in ("draft_submitted", "draft_created"):
-            raise ValueError("Cannot merge items with active eBay draft submissions.")
+        _assert_mutable(source_item_id, s_status, "merge source", db=db)
+        _assert_mutable(target_item_id, t_status, "merge target", db=db)
         if s_status in ("analysis_queued", "analysis_running") or t_status in ("analysis_queued", "analysis_running"):
             raise ValueError("Cannot merge items while background AI analysis is running.")
 
@@ -2085,11 +2917,21 @@ def merge_items(source_item_id: str, target_item_id: str, seller_id: str, allow_
                 (target_item_id, start_pos + offset, False, sp["id"]),
             )
 
-        # Delete the emptied source item record
-        db.execute("DELETE FROM inventory_items WHERE id = ? AND seller_id = ?", (source_item_id, seller_id))
+        # Delete the emptied source item record atomically under checked status
+        cur = db.execute(
+            "DELETE FROM inventory_items WHERE id = ? AND seller_id = ? AND workflow_status = ?",
+            (source_item_id, seller_id, s_status),
+        )
+        if getattr(cur, "rowcount", None) == 0:
+            raise ValueError(
+                f"Cannot merge source item {source_item_id}: it has an active or ambiguous eBay draft submission "
+                "(or was modified concurrently)."
+            )
 
         # Synchronize target item's listing_json (pic, coverUrl, photoCount, validation)
         _sync_item_photos_to_listing(db, target_item_id, seller_id, now)
+        # Photo changes from merge invalidate any prior approval of the target
+        _invalidate_approval(db, target_item_id, seller_id, now)
 
         # Update batch timestamp
         db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, batch_id, seller_id))
@@ -2189,15 +3031,31 @@ def revoke_approval(item_id: str, seller_id: str, actor: str = "") -> dict[str, 
     if not seller_id:
         raise ValueError("Seller ownership is required.")
     init_db()
-    get_item(item_id, seller_id)
+    item = get_item(item_id, seller_id)
+    _assert_mutable(item_id, item["workflowStatus"], "revoke approval on")
     now = _now_iso()
     with connect() as db:
-        db.execute(
+        live_row = db.execute(
+            "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
+            (item_id, seller_id),
+        ).fetchone()
+        if not live_row:
+            raise KeyError(f"Item {item_id} not found.")
+        live_status = str(live_row["workflow_status"] or "")
+        _assert_mutable(item_id, live_status, "revoke approval on", db=db)
+        cur = db.execute(
             """UPDATE inventory_items
-               SET workflow_status = 'needs_review', seller_confirmed = ?, updated_at = ?
-               WHERE id = ? AND seller_id = ?""",
-            (False, now, item_id, seller_id),
+               SET workflow_status = 'needs_review', seller_confirmed = ?,
+                   approval_content_hash = '', approved_content_hash = NULL,
+                   approved_at = NULL, approved_by = '', updated_at = ?
+               WHERE id = ? AND seller_id = ? AND workflow_status = ?""",
+            (False, now, item_id, seller_id, live_status),
         )
+        if getattr(cur, "rowcount", None) == 0:
+            raise ValueError(
+                f"Cannot revoke approval on item {item_id}: it has an active or ambiguous eBay draft submission "
+                "(or was modified concurrently)."
+            )
     return get_item(item_id, seller_id)
 
 
@@ -2460,3 +3318,61 @@ def sync_persisted_reanalysis(item_id: str, seller_id: str) -> dict[str, Any]:
         "jobId": job_id,
     }
 
+
+
+def _extract_legacy_photo_entries(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    urls: list[str] = []
+    for key in ("photoAssets", "photos"):
+        val = raw.get(key)
+        if not isinstance(val, list):
+            continue
+        for entry in val:
+            url = _photo_image_url(entry) if isinstance(entry, dict) else str(entry or "").strip()
+            if url and url not in urls:
+                urls.append(url)
+    for field in ("pic", "coverUrl"):
+        raw_pic = str(raw.get(field) or "").strip()
+        for part in re.split(r"[\s|]+", raw_pic) if raw_pic else ():
+            if part.startswith("http") and part not in urls:
+                urls.append(part)
+    return [
+        {"filename": f"legacy_photo_{idx}.jpg", "previewUrl": url, "storageUrl": url}
+        for idx, url in enumerate(urls[:24], start=1)
+    ]
+
+
+def import_legacy_queue_to_batch(
+    queue_items: list[dict[str, Any]], seller_id: str, batch_name: str = ""
+) -> dict[str, Any]:
+    """Safely transition legacy in-memory queue items into persisted inventory items.
+
+    Each item is created in 'needs_review' status and must be validated and explicitly
+    approved by the seller before it can reach eBay draft submission.
+    Arbitrary unpersisted dictionary submissions remain blocked.
+    """
+    if not seller_id:
+        raise ValueError("Seller ownership is required.")
+    if not queue_items or not isinstance(queue_items, list):
+        raise ValueError("Queue items array is required.")
+
+    batch = create_batch(seller_id, name=batch_name or "Imported Queue Items", grouping_mode="manual")
+    created_items = []
+    for raw in queue_items:
+        if not isinstance(raw, dict):
+            continue
+        listing = dict(raw)
+        photo_entries = _extract_legacy_photo_entries(raw)
+        reg_photos = register_batch_photos(batch["id"], seller_id, photo_entries) if photo_entries else []
+        payload: dict[str, Any] = {
+            "listing": listing,
+            "sellerConfirmed": {},
+            "photoIds": [p["id"] for p in reg_photos],
+        }
+        created_items.append(create_item(batch["id"], seller_id, payload))
+
+    return {
+        "batch": batch,
+        "importedCount": len(created_items),
+        "itemIds": [it["id"] for it in created_items],
+        "message": f"Imported {len(created_items)} items into batch '{batch['name']}'. Items require validation and seller approval.",
+    }

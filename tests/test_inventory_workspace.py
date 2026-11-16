@@ -2,6 +2,8 @@ import json
 import os
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest import mock
 
 import app as hht_app
@@ -12,6 +14,12 @@ from hht_app.ebay_feed import EbayFeedError
 class InventoryWorkspaceTests(unittest.TestCase):
     def setUp(self):
         # Use temporary in-memory or test SQLite database with unique test seller ID
+        self.old_drafts_flag = os.environ.get("EBAY_DRAFTS_ENABLED")
+        self.old_mutations_flag = os.environ.get("EBAY_MUTATIONS_ENABLED")
+        os.environ["EBAY_DRAFTS_ENABLED"] = "true"
+        os.environ["EBAY_MUTATIONS_ENABLED"] = "true"
+        self.scope_mock = mock.patch("hht_app.inventory_workspace.ebay_scope_status", return_value={"grantedScopesStatus": "verified"})
+        self.scope_mock.start()
         self.seller_id = str(uuid.uuid4())
         self.auth_user_id = f"user-{uuid.uuid4().hex[:8]}"
         commerce_agent.init_db()
@@ -21,6 +29,14 @@ class InventoryWorkspaceTests(unittest.TestCase):
                     "INSERT OR IGNORE INTO sellers(id, auth_user_id, status, created_at) VALUES (?, ?, 'active', ?)",
                     (self.seller_id, self.auth_user_id, "2026-10-15T00:00:00Z"),
                 )
+
+    def tearDown(self):
+        self.scope_mock.stop()
+        for key, value in (("EBAY_DRAFTS_ENABLED", self.old_drafts_flag), ("EBAY_MUTATIONS_ENABLED", self.old_mutations_flag)):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def test_batch_creation_and_listing(self):
         batch = inventory_workspace.create_batch(self.seller_id, name="Test Fall Batch", grouping_mode="auto")
@@ -379,17 +395,20 @@ class InventoryWorkspaceTests(unittest.TestCase):
         register.assert_not_called()
 
     def test_no_live_ebay_mutations_called(self):
-        """Confirm that EBAY_MUTATIONS_ENABLED remains false and live mutation endpoints are forbidden."""
-        self.assertFalse(commerce_agent.ebay_mutations_enabled())
+        """Confirm that draft submission is blocked when live external writes are disabled."""
+        with mock.patch.dict(os.environ, {"EBAY_DRAFTS_ENABLED": "true", "EBAY_MUTATIONS_ENABLED": "false"}):
+            with self.assertRaises(ValueError):
+                inventory_workspace.submit_approved_drafts([], self.seller_id)
         client = hht_app.app.test_client()
         def authenticate():
             # pyrefly: ignore[missing-import]
             from flask import g
             g.supabase_user = {"sub": self.auth_user_id}
 
-        with mock.patch("app.authenticate_request", side_effect=authenticate), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
-            res = client.post("/api/ebay/drafts", json={"item": {"title": "Test"}})
+        with mock.patch.dict(os.environ, {"EBAY_MUTATIONS_ENABLED": "false"}):
+            with mock.patch("app.authenticate_request", side_effect=authenticate), \
+                 mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+                res = client.post("/api/ebay/drafts", json={"item": {"title": "Test"}})
             self.assertEqual(res.status_code, 403)
             self.assertIn("mutations are disabled", res.get_json()["error"])
 
@@ -519,12 +538,115 @@ class InventoryWorkspaceTests(unittest.TestCase):
         inventory_workspace.approve_items([item_id], self.seller_id)
 
         # Now export succeeds and produces valid Seller Hub Draft CSV
-        csv_out = inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], self.seller_id)
+        with mock.patch("hht_app.inventory_workspace.validate_draft_photo_urls", return_value=None):
+            csv_out = inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], self.seller_id)
         self.assertIn("#INFO", csv_out)
         self.assertIn("Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)", csv_out)
         self.assertIn("Draft", csv_out)
         self.assertIn("57988", csv_out)
         self.assertIn("Vintage Approved Item 1", csv_out)
+
+    def test_approval_is_invalidated_when_listing_changes(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Approval Version Batch", grouping_mode="1")
+        photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "approved.jpg", "previewUrl": "https://example.com/approved.jpg", "storageUrl": "https://example.com/approved.jpg"},
+        ])
+        item = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [photos[0]["id"]],
+            "listing": {"title": "Approved Coat", "price": "49.99", "cat": "57988", "size": "M"},
+        })
+        inventory_workspace.approve_items([item["id"]], self.seller_id)
+        approved = inventory_workspace.get_item(item["id"], self.seller_id)
+        self.assertEqual(approved["workflowStatus"], "approved")
+        self.assertTrue(approved["approvalContentHash"])
+
+        changed = inventory_workspace.patch_item(item["id"], self.seller_id, {"price": "59.99"})
+        self.assertEqual(changed["workflowStatus"], "needs_review")
+        self.assertFalse(changed["approvalContentHash"])
+        with self.assertRaises(ValueError):
+            inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], self.seller_id)
+
+    def test_submission_claim_prevents_duplicate_draft_feed(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Idempotency Batch", grouping_mode="1")
+        photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "submission.jpg", "previewUrl": "https://example.com/submission.jpg", "storageUrl": "https://example.com/submission.jpg"},
+        ])
+        item = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [photos[0]["id"]],
+            "listing": {"title": "Submission Coat", "price": "49.99", "cat": "57988", "size": "M"},
+        })
+        inventory_workspace.approve_items([item["id"]], self.seller_id)
+        with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "task-idempotent"}) as upload:
+            result = inventory_workspace.submit_approved_drafts([item["id"]], self.seller_id)
+            self.assertEqual(result["feedTaskId"], "task-idempotent")
+            with self.assertRaises(ValueError) as ctx:
+                inventory_workspace.submit_approved_drafts([item["id"]], self.seller_id)
+        self.assertIn("active or ambiguous", str(ctx.exception).lower())
+        upload.assert_called_once()
+
+    def test_concurrent_submission_claim_allows_only_one_external_call(self):
+        batch = inventory_workspace.create_batch(self.seller_id, name="Concurrent Claim Batch", grouping_mode="1")
+        photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "concurrent.jpg", "previewUrl": "https://example.com/concurrent.jpg", "storageUrl": "https://example.com/concurrent.jpg"},
+        ])
+        item = inventory_workspace.create_item(batch["id"], self.seller_id, {
+            "photoIds": [photos[0]["id"]],
+            "listing": {"title": "Concurrent Coat", "price": "49.99", "cat": "57988", "size": "M"},
+        })
+        inventory_workspace.approve_items([item["id"]], self.seller_id)
+
+        def submit_once():
+            try:
+                return ("ok", inventory_workspace.submit_approved_drafts([item["id"]], self.seller_id))
+            except Exception as exc:
+                return ("error", str(exc))
+
+        with mock.patch(
+            "hht_app.inventory_workspace.upload_seller_hub_draft_csv",
+            return_value={"taskId": "concurrent-task"},
+        ) as upload:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(lambda _ignored: submit_once(), range(2)))
+
+        self.assertEqual(sum(kind == "ok" for kind, _ in results), 1)
+        self.assertEqual(sum(kind == "error" for kind, _ in results), 1)
+        self.assertIn("active or ambiguous", next(value for kind, value in results if kind == "error"))
+        upload.assert_called_once()
+
+    def test_catalog_integrity_migration_uses_postgres_boolean_and_atomic_claim_contract(self):
+        migration = (Path(__file__).parents[1] / "supabase" / "migrations" / "202611150100_catalog_integrity.sql").read_text()
+        self.assertIn("approval_content_hash text NOT NULL DEFAULT ''", migration)
+        self.assertIn("approved_at timestamptz", migration)
+        self.assertIn("status IN ('claiming', 'submitted', 'processing', 'ambiguous')", migration)
+        self.assertIn("CREATE UNIQUE INDEX IF NOT EXISTS inventory_submissions_active_item_idx", migration)
+
+    @unittest.skipUnless(os.environ.get("TEST_POSTGRES_URL"), "Set TEST_POSTGRES_URL for the read-only PostgreSQL integration check")
+    def test_postgres_integrity_schema_is_present_read_only(self):
+        import psycopg
+
+        with psycopg.connect(os.environ["TEST_POSTGRES_URL"], connect_timeout=8) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT table_name, column_name
+                       FROM information_schema.columns
+                       WHERE table_schema = 'public'
+                         AND ((table_name = 'inventory_items' AND column_name IN ('approval_content_hash', 'approved_at', 'approved_by', 'approved_content_hash'))
+                           OR (table_name = 'inventory_submissions' AND column_name IN ('idempotency_key', 'submission_stage')))"""
+                )
+                columns = {(row[0], row[1]) for row in cur.fetchall()}
+                self.assertTrue({
+                    ("inventory_items", "approval_content_hash"),
+                    ("inventory_items", "approved_at"),
+                    ("inventory_items", "approved_by"),
+                    ("inventory_items", "approved_content_hash"),
+                    ("inventory_submissions", "idempotency_key"),
+                    ("inventory_submissions", "submission_stage"),
+                }.issubset(columns))
+                cur.execute(
+                    """SELECT 1 FROM pg_indexes
+                       WHERE schemaname = 'public' AND indexname = 'inventory_submissions_active_item_idx'"""
+                )
+                self.assertIsNotNone(cur.fetchone())
 
     def test_delete_batch_blocked_after_draft_submission(self):
         batch = inventory_workspace.create_batch(self.seller_id, name="Submission Protected Batch", grouping_mode="1")
@@ -1135,7 +1257,8 @@ class InventoryWorkspaceTests(unittest.TestCase):
         inventory_workspace.approve_items([item["id"]], self.seller_id)
 
         # Export CSV
-        csv_text = inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], self.seller_id)
+        with mock.patch("hht_app.inventory_workspace.validate_draft_photo_urls", return_value=None):
+            csv_text = inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], self.seller_id)
         self.assertIn("https://example.com/shoe_1.jpg", csv_text)
         self.assertIn("https://example.com/shoe_2.jpg", csv_text)
 

@@ -69,7 +69,9 @@
         category: "",
         searchTerms: "",
     });
-    let autoDraftEnabled = loadFlag("hht_auto_draft_enabled");
+    // Automatic external draft submission is disabled for this release.
+    // Keep manual review and explicit submission separate from local UI state.
+    let autoDraftEnabled = false;
     let status = "";
     let error = "";
     let loading = false;
@@ -1443,6 +1445,8 @@
     }
 
     function scheduleAutoDraftUpload() {
+        return;
+        /*
         if (
             !autoDraftEnabled ||
             autoDraftInFlight ||
@@ -1460,6 +1464,7 @@
                 sendDraftQueue({ automatic: true });
             }
         }, 0);
+        */
     }
 
     async function exportQueue() {
@@ -2729,15 +2734,14 @@
                     <input
                         type="checkbox"
                         bind:checked={autoDraftEnabled}
+                        disabled
                         on:change={scheduleAutoDraftUpload}
                     />
                     <span
-                        ><strong>Auto-send approved items to eBay Drafts</strong
-                        ><small
-                            >Off by default. When enabled, HHT sends a batch
-                            automatically only after {draftMinItems} unique reviewed
-                            and approved items are ready. It creates drafts only;
-                            it never publishes live listings.</small
+                        ><strong>Automatic eBay draft sending is disabled</strong
+                            ><small
+                            >Use the explicit manual submission action after review;
+                            this release never sends external draft feeds automatically.</small
                         ></span
                     >
                 </label>
