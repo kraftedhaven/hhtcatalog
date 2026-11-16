@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { uploadBatchChunks } from './workspace-uploader.js';
+import { uploadBatchChunks, resolveUploadFailureState } from './workspace-uploader.js';
 
 function mockFile(name) {
     return new File([new Uint8Array([1])], name, { type: 'image/jpeg' });
@@ -56,6 +56,41 @@ test('successful upload returns refreshed persisted items and completed chunks',
     assert.deepEqual(result.items, refreshed);
     assert.deepEqual(result.completedChunkIndexes, [0, 1]);
     assert.equal(result.totalChunks, 2);
+});
+
+test('refresh-only failure clears remaining upload files and blocks duplicate retry', async () => {
+    const files = [mockFile('one.jpg'), mockFile('two.jpg')];
+    const previews = files.map((file) => ({ file, name: file.name }));
+    let capturedError = null;
+
+    await assert.rejects(
+        uploadBatchChunks({
+            batchId: 'batch-4',
+            files,
+            groupingMode: '1',
+            prepareBatch: async (chunk) => ({ files: chunk }),
+            uploadChunk: async () => {},
+            listBatchItems: async () => {
+                throw new Error('listBatchItems failed');
+            },
+        }),
+        (error) => {
+            capturedError = error;
+            assert.deepEqual(error.uploadRecovery.completedChunkIndexes, [0, 1]);
+            assert.deepEqual(error.uploadRecovery.remainingFiles, []);
+            assert.equal(error.uploadRecovery.refreshFailed, true);
+            return true;
+        },
+    );
+
+    const next = resolveUploadFailureState({
+        error: capturedError,
+        uploadFiles: files,
+        uploadPreviews: previews,
+    });
+    assert.deepEqual(next.uploadFiles, []);
+    assert.deepEqual(next.uploadPreviews, []);
+    assert.match(next.uploadError, /Reload the batch instead of re-uploading/i);
 });
 
 test('partial upload preserves recovery metadata when follow-up refresh fails', async () => {

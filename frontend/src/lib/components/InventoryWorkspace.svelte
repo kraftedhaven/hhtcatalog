@@ -33,7 +33,10 @@
         formatBytes,
         prepareUploadBatch,
     } from "$lib/image-compressor";
-    import { uploadBatchChunks } from "$lib/workspace-uploader";
+    import {
+        uploadBatchChunks,
+        resolveUploadFailureState,
+    } from "$lib/workspace-uploader";
 
     export let onSwitchToListingOptimization = () => {};
     export let onOpenFullReview = () => {};
@@ -1417,15 +1420,14 @@
             } catch {
                 // Preserve the original upload error if the recovery refresh fails.
             }
-            const recovery = err.uploadRecovery;
-            if (recovery?.remainingFiles?.length) {
-                const remaining = new Set(recovery.remainingFiles);
-                uploadFiles = recovery.remainingFiles;
-                uploadPreviews = uploadPreviews.filter((preview) => remaining.has(preview.file));
-            }
-            uploadError = recovery
-                ? `${err.message || "Upload interrupted."} ${recovery.completedChunkIndexes.length} of ${recovery.totalChunks} photo batches were saved. The saved items remain visible; retry the remaining photos.`
-                : err.message || "Failed to upload and group photos.";
+            const nextState = resolveUploadFailureState({
+                error: err,
+                uploadFiles,
+                uploadPreviews,
+            });
+            uploadFiles = nextState.uploadFiles;
+            uploadPreviews = nextState.uploadPreviews;
+            uploadError = nextState.uploadError;
         } finally {
             isUploading = false;
             uploadPhase = "idle";

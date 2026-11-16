@@ -125,3 +125,32 @@ export async function uploadBatchChunks({
         totalChunks: chunks.length,
     };
 }
+
+/**
+ * Derive next upload modal files, previews, and user message from an upload or refresh failure.
+ * Clears pending files whenever recovery indicates all chunks were already persisted.
+ */
+export function resolveUploadFailureState({ error, uploadFiles = [], uploadPreviews = [] }) {
+    const recovery = error?.uploadRecovery;
+    if (!recovery || !Array.isArray(recovery.remainingFiles)) {
+        return {
+            uploadFiles,
+            uploadPreviews,
+            uploadError: error?.message || 'Failed to upload and group photos.',
+        };
+    }
+    const remainingSet = new Set(recovery.remainingFiles);
+    const nextPreviews = uploadPreviews.filter((preview) => remainingSet.has(preview.file));
+    if (recovery.remainingFiles.length === 0) {
+        return {
+            uploadFiles: [],
+            uploadPreviews: [],
+            uploadError: `All ${recovery.totalChunks} photo batches were uploaded and saved, but refreshing the workspace failed (${error?.message || 'refresh error'}). Reload the batch instead of re-uploading these photos.`,
+        };
+    }
+    return {
+        uploadFiles: recovery.remainingFiles,
+        uploadPreviews: nextPreviews,
+        uploadError: `${error?.message || 'Upload interrupted.'} ${recovery.completedChunkIndexes.length} of ${recovery.totalChunks} photo batches were saved. The saved items remain visible; retry the remaining photos.`,
+    };
+}
