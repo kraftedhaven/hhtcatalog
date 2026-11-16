@@ -527,7 +527,7 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
         self.assertEqual(inventory_workspace.get_item_submission_status(item_b["id"], self.seller_b)["feedTaskId"], "pending:b1")
 
     def test_concurrent_edit_and_reapprove_before_claim_rejected(self):
-        """Editing and reapproving between preparation and claim acquisition must fail atomically."""
+        """Concurrent re-approval before claim and concurrent claim before edit must both fail atomically."""
         _, item = self._create_approved_item(self.seller_a, title="Race Coat")
         orig_acquire = inventory_workspace._acquire_item_claim
 
@@ -547,6 +547,23 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
         refreshed = inventory_workspace.get_item(item["id"], self.seller_a)
         self.assertEqual(refreshed["workflowStatus"], "approved")
         self.assertEqual(str(refreshed["listing"].get("price")), "99.00")
+
+        # Reverse direction: concurrent claim commits right after patch_item passes _assert_mutable().
+        orig_assert = inventory_workspace._assert_mutable
+
+        def interleaved_claim_during_edit(target_id, status_arg, context="edit", db=None):
+            orig_assert(target_id, status_arg, context, db=db)
+            if context == "edit" and db is not None and target_id == item["id"]:
+                with commerce_agent.connect() as claim_db:
+                    claim_db.execute("UPDATE inventory_items SET workflow_status = 'claiming' WHERE id = ?", (item["id"],))
+
+        with mock.patch("hht_app.inventory_workspace._assert_mutable", side_effect=interleaved_claim_during_edit):
+            with self.assertRaises(ValueError) as edit_ctx:
+                inventory_workspace.patch_item(item["id"], self.seller_a, {"price": "20.00"})
+        self.assertIn("active or ambiguous", str(edit_ctx.exception).lower())
+        final_item = inventory_workspace.get_item(item["id"], self.seller_a)
+        self.assertEqual(final_item["workflowStatus"], "claiming")
+        self.assertEqual(str(final_item["listing"].get("price")), "99.00")
 
 
 if __name__ == "__main__":

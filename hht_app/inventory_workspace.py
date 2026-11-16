@@ -155,17 +155,15 @@ def _invalidate_approval(db: Any, item_id: str, seller_id: str, now: str) -> Non
         return
     db.execute(
         """UPDATE inventory_items
-           SET workflow_status = CASE
-                   WHEN workflow_status IN ('approved', 'ready_for_approval') THEN 'needs_review'
-                   ELSE workflow_status
-               END,
+           SET workflow_status = 'needs_review',
                seller_confirmed = ?,
                approval_content_hash = '',
                approved_content_hash = NULL,
                approved_at = NULL,
                approved_by = '',
                updated_at = ?
-           WHERE id = ? AND seller_id = ?""",
+           WHERE id = ? AND seller_id = ?
+             AND workflow_status IN ('approved', 'ready_for_approval')""",
         (False, now, item_id, seller_id),
     )
 
@@ -203,6 +201,18 @@ def _assert_mutable(item_id: str, status: str, context: str = "edit", db: Any = 
             "or ambiguous eBay draft submission. Reconcile or complete the submission before making changes."
         )
     if db is not None:
+        sql = (
+            "SELECT workflow_status FROM inventory_items WHERE id = ? FOR UPDATE"
+            if getattr(db, "backend", "") == "postgres"
+            else "SELECT workflow_status FROM inventory_items WHERE id = ?"
+        )
+        row = db.execute(sql, (item_id,)).fetchone()
+        live_status = str(row["workflow_status"] or "") if row else ""
+        if live_status in _MUTATION_BLOCKED_STATES:
+            raise ValueError(
+                f"Cannot {context} item {item_id}: it is in state '{live_status}' with an active "
+                "or ambiguous eBay draft submission. Reconcile or complete the submission before making changes."
+            )
         sub = _has_active_or_ambiguous_submission(db, item_id)
         if sub:
             raise ValueError(
@@ -988,6 +998,63 @@ def get_item(item_id: str, seller_id: str) -> dict[str, Any]:
 # Patching Editable Fields & Provenance Tracking
 # ---------------------------------------------------------------------------
 
+def _execute_patch_item_update(
+    db: Any,
+    item_id: str,
+    seller_id: str,
+    listing: dict[str, Any],
+    provenance: dict[str, Any],
+    validation: dict[str, Any],
+    new_status: str,
+    modified_fields: set[str],
+    clear_approval: bool,
+    now: str,
+) -> None:
+    live_row = db.execute(
+        "SELECT workflow_status, approval_content_hash FROM inventory_items WHERE id = ? AND seller_id = ?",
+        (item_id, seller_id),
+    ).fetchone()
+    if not live_row:
+        raise KeyError(f"Item {item_id} not found.")
+    live_status = str(live_row["workflow_status"] or "")
+    live_hash = str(live_row["approval_content_hash"] or "")
+    _assert_mutable(item_id, live_status, "edit", db=db)
+
+    if live_status == "approved" and modified_fields:
+        new_status = "needs_review"
+        clear_approval = True
+
+    if clear_approval:
+        cur = db.execute(
+            """UPDATE inventory_items
+               SET listing_json = ?, provenance_json = ?, validation_json = ?,
+                   workflow_status = ?, seller_confirmed = ?,
+                   approval_content_hash = '', approved_content_hash = NULL,
+                   approved_at = NULL, approved_by = '', updated_at = ?
+               WHERE id = ? AND seller_id = ? AND workflow_status = ? AND approval_content_hash = ?""",
+            (
+                _json(listing), _json(provenance), _json(validation),
+                new_status, False, now, item_id, seller_id, live_status, live_hash,
+            ),
+        )
+    else:
+        cur = db.execute(
+            """UPDATE inventory_items
+               SET listing_json = ?, provenance_json = ?, validation_json = ?,
+                   workflow_status = ?, updated_at = ?
+               WHERE id = ? AND seller_id = ? AND workflow_status = ? AND approval_content_hash = ?""",
+            (
+                _json(listing), _json(provenance), _json(validation),
+                new_status, now, item_id, seller_id, live_status, live_hash,
+            ),
+        )
+    if getattr(cur, "rowcount", None) == 0:
+        raise ValueError(
+            f"Cannot edit item {item_id}: it has an active or ambiguous eBay draft submission "
+            "(or was modified concurrently). Reconcile or complete the submission before making changes."
+        )
+
+
 def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     """Patch editable item fields with seller provenance tracking and auto re-validation."""
     if not seller_id:
@@ -1117,54 +1184,10 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
 
     now = _now_iso()
     with connect() as db:
-        live_row = db.execute(
-            "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
-            (item_id, seller_id),
-        ).fetchone()
-        if not live_row:
-            raise KeyError(f"Item {item_id} not found.")
-        live_status = str(live_row["workflow_status"] or "")
-        _assert_mutable(item_id, live_status, "edit", db=db)
-
-        if live_status == "approved" and modified_fields:
-            new_status = "needs_review"
-            approval_hash_update = [None]
-
-        if approval_hash_update:
-            db.execute(
-                """UPDATE inventory_items
-                   SET listing_json = ?, provenance_json = ?, validation_json = ?,
-                       workflow_status = ?, seller_confirmed = ?,
-                       approval_content_hash = '', approved_content_hash = NULL,
-                       approved_at = NULL, approved_by = '', updated_at = ?
-                   WHERE id = ? AND seller_id = ?""",
-                (
-                    _json(listing),
-                    _json(provenance),
-                    _json(validation),
-                    new_status,
-                    False,
-                    now,
-                    item_id,
-                    seller_id,
-                ),
-            )
-        else:
-            db.execute(
-                """UPDATE inventory_items
-                   SET listing_json = ?, provenance_json = ?, validation_json = ?,
-                       workflow_status = ?, updated_at = ?
-                   WHERE id = ? AND seller_id = ?""",
-                (
-                    _json(listing),
-                    _json(provenance),
-                    _json(validation),
-                    new_status,
-                    now,
-                    item_id,
-                    seller_id,
-                ),
-            )
+        _execute_patch_item_update(
+            db, item_id, seller_id, listing, provenance, validation,
+            new_status, modified_fields, bool(approval_hash_update), now,
+        )
 
     return get_item(item_id, seller_id)
 
@@ -1266,15 +1289,21 @@ def approve_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
             ).fetchone()
             if not live_row:
                 raise KeyError(f"Item {item_id} not found.")
-            _assert_mutable(item_id, str(live_row["workflow_status"] or ""), "approve", db=db)
-            db.execute(
+            live_status = str(live_row["workflow_status"] or "")
+            _assert_mutable(item_id, live_status, "approve", db=db)
+            cur = db.execute(
                 """UPDATE inventory_items
                    SET workflow_status = 'approved', seller_confirmed = ?,
                        approval_content_hash = ?, approved_content_hash = ?,
                        approved_at = ?, approved_by = ?, updated_at = ?
-                   WHERE id = ? AND seller_id = ?""",
-                (True, canonical_hash, content_hash, now, seller_id, now, item_id, seller_id),
+                   WHERE id = ? AND seller_id = ? AND workflow_status = ?""",
+                (True, canonical_hash, content_hash, now, seller_id, now, item_id, seller_id, live_status),
             )
+            if getattr(cur, "rowcount", None) == 0:
+                raise ValueError(
+                    f"Cannot approve item {item_id}: it has an active or ambiguous eBay draft submission "
+                    "(or was modified concurrently)."
+                )
         approved.append(item_id)
 
     return {
@@ -2700,12 +2729,27 @@ def update_item(item_id: str, seller_id: str, fields: dict[str, Any], actor: str
     if not isinstance(fields, dict):
         raise ValueError("Item fields must be an object.")
     with connect() as db:
-        row = db.execute("SELECT seller_confirmed_json FROM inventory_items WHERE id = ? AND seller_id = ?", (item_id, seller_id)).fetchone()
-        confirmed = _decode(row["seller_confirmed_json"] if row else "{}", {}) if row else {}
+        row = db.execute(
+            "SELECT seller_confirmed_json, workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
+            (item_id, seller_id),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"Item {item_id} not found.")
+        live_status = str(row["workflow_status"] or "")
+        _assert_mutable(item_id, live_status, "edit", db=db)
+        confirmed = _decode(row["seller_confirmed_json"], {})
         for k, v in fields.items():
             if k in ("title", "price", "cat", "brand", "size", "cnote", "quantity"):
                 confirmed[k] = v
-        db.execute("UPDATE inventory_items SET seller_confirmed_json = ? WHERE id = ? AND seller_id = ?", (_json(confirmed), item_id, seller_id))
+        cur = db.execute(
+            "UPDATE inventory_items SET seller_confirmed_json = ? WHERE id = ? AND seller_id = ? AND workflow_status = ?",
+            (_json(confirmed), item_id, seller_id, live_status),
+        )
+        if getattr(cur, "rowcount", None) == 0:
+            raise ValueError(
+                f"Cannot edit item {item_id}: it has an active or ambiguous eBay draft submission "
+                "(or was modified concurrently)."
+            )
     return patch_item(item_id, seller_id, fields)
 
 
@@ -2742,11 +2786,24 @@ def delete_item(item_id: str, seller_id: str, allow_destructive: bool = False) -
             raise ValueError("Item contains seller-confirmed fields. Explicit confirmation (allow_destructive=True) is required to delete it.")
 
         now = _now_iso()
-        db.execute(
-            "UPDATE inventory_item_photos SET item_id = NULL, is_cover = ? WHERE item_id = ? AND batch_id = ?",
-            (False, item_id, batch_id),
+        photo_rows = db.execute(
+            "SELECT id FROM inventory_item_photos WHERE item_id = ? AND batch_id = ?",
+            (item_id, batch_id),
+        ).fetchall()
+        cur = db.execute(
+            "DELETE FROM inventory_items WHERE id = ? AND seller_id = ? AND workflow_status = ?",
+            (item_id, seller_id, status),
         )
-        db.execute("DELETE FROM inventory_items WHERE id = ? AND seller_id = ?", (item_id, seller_id))
+        if getattr(cur, "rowcount", None) == 0:
+            raise ValueError(
+                f"Cannot delete item {item_id}: it has an active or ambiguous eBay draft submission "
+                "(or was modified concurrently)."
+            )
+        for pr in photo_rows:
+            db.execute(
+                "UPDATE inventory_item_photos SET item_id = NULL, is_cover = ? WHERE id = ? AND batch_id = ?",
+                (False, pr["id"], batch_id),
+            )
         db.execute("UPDATE inventory_batches SET updated_at = ? WHERE id = ? AND seller_id = ?", (now, batch_id, seller_id))
 
     return {"deleted": True, "itemId": item_id, "batchId": batch_id}
@@ -2817,8 +2874,16 @@ def merge_items(source_item_id: str, target_item_id: str, seller_id: str, allow_
                 (target_item_id, start_pos + offset, False, sp["id"]),
             )
 
-        # Delete the emptied source item record
-        db.execute("DELETE FROM inventory_items WHERE id = ? AND seller_id = ?", (source_item_id, seller_id))
+        # Delete the emptied source item record atomically under checked status
+        cur = db.execute(
+            "DELETE FROM inventory_items WHERE id = ? AND seller_id = ? AND workflow_status = ?",
+            (source_item_id, seller_id, s_status),
+        )
+        if getattr(cur, "rowcount", None) == 0:
+            raise ValueError(
+                f"Cannot merge source item {source_item_id}: it has an active or ambiguous eBay draft submission "
+                "(or was modified concurrently)."
+            )
 
         # Synchronize target item's listing_json (pic, coverUrl, photoCount, validation)
         _sync_item_photos_to_listing(db, target_item_id, seller_id, now)
@@ -2933,15 +2998,21 @@ def revoke_approval(item_id: str, seller_id: str, actor: str = "") -> dict[str, 
         ).fetchone()
         if not live_row:
             raise KeyError(f"Item {item_id} not found.")
-        _assert_mutable(item_id, str(live_row["workflow_status"] or ""), "revoke approval on", db=db)
-        db.execute(
+        live_status = str(live_row["workflow_status"] or "")
+        _assert_mutable(item_id, live_status, "revoke approval on", db=db)
+        cur = db.execute(
             """UPDATE inventory_items
                SET workflow_status = 'needs_review', seller_confirmed = ?,
                    approval_content_hash = '', approved_content_hash = NULL,
                    approved_at = NULL, approved_by = '', updated_at = ?
-               WHERE id = ? AND seller_id = ?""",
-            (False, now, item_id, seller_id),
+               WHERE id = ? AND seller_id = ? AND workflow_status = ?""",
+            (False, now, item_id, seller_id, live_status),
         )
+        if getattr(cur, "rowcount", None) == 0:
+            raise ValueError(
+                f"Cannot revoke approval on item {item_id}: it has an active or ambiguous eBay draft submission "
+                "(or was modified concurrently)."
+            )
     return get_item(item_id, seller_id)
 
 
