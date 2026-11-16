@@ -1,5 +1,31 @@
 import { partitionUploadChunks } from './image-compressor.js';
 
+function validateUploadHandlers({ prepareBatch, uploadChunk, listBatchItems }) {
+    if (typeof prepareBatch !== 'function') throw new TypeError('prepareBatch is required');
+    if (typeof uploadChunk !== 'function') throw new TypeError('uploadChunk is required');
+    if (typeof listBatchItems !== 'function') throw new TypeError('listBatchItems is required');
+}
+
+async function uploadSinglePreparedChunk({
+    chunk,
+    index,
+    totalChunks,
+    prepareBatch,
+    uploadChunk,
+    onProgress,
+    onPrepared,
+    state,
+}) {
+    const prepared = await prepareBatch(chunk, {
+        chunkIndex: index,
+        chunkCount: totalChunks,
+        onProgress,
+    });
+    state.preparedChunkCount += 1;
+    if (onPrepared) await onPrepared(prepared, index, totalChunks);
+    await uploadChunk(prepared.files, index, totalChunks, prepared);
+}
+
 /**
  * Upload photo chunks sequentially and always refresh persisted items after
  * success or partial failure. The caller can use the returned items to expose
@@ -15,26 +41,25 @@ export async function uploadBatchChunks({
     onProgress,
     onPrepared,
 }) {
-    if (typeof prepareBatch !== 'function') throw new TypeError('prepareBatch is required');
-    if (typeof uploadChunk !== 'function') throw new TypeError('uploadChunk is required');
-    if (typeof listBatchItems !== 'function') throw new TypeError('listBatchItems is required');
+    validateUploadHandlers({ prepareBatch, uploadChunk, listBatchItems });
 
     const chunks = partitionUploadChunks(files, groupingMode);
     const completedChunkIndexes = [];
-    let preparedChunkCount = 0;
+    const state = { preparedChunkCount: 0 };
     let refreshedItems = [];
 
     try {
         for (let index = 0; index < chunks.length; index += 1) {
-            const chunk = chunks[index];
-            const prepared = await prepareBatch(chunk, {
-                chunkIndex: index,
-                chunkCount: chunks.length,
+            await uploadSinglePreparedChunk({
+                chunk: chunks[index],
+                index,
+                totalChunks: chunks.length,
+                prepareBatch,
+                uploadChunk,
                 onProgress,
+                onPrepared,
+                state,
             });
-            preparedChunkCount += 1;
-            if (onPrepared) await onPrepared(prepared, index, chunks.length);
-            await uploadChunk(prepared.files, index, chunks.length, prepared);
             completedChunkIndexes.push(index);
         }
     } catch (error) {
@@ -42,7 +67,7 @@ export async function uploadBatchChunks({
             batchId,
             completedChunkIndexes: [...completedChunkIndexes],
             failedChunkIndex: completedChunkIndexes.length,
-            preparedChunkCount,
+            preparedChunkCount: state.preparedChunkCount,
             totalChunks: chunks.length,
             remainingFiles: chunks.slice(completedChunkIndexes.length).flat(),
         };

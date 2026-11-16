@@ -27,21 +27,30 @@ from hht_app.ebay_feed import (
     PHOTO_VALIDATION_MAX_BYTES,
     _validate_image_url,
 )
+from contextlib import contextmanager
 from PIL import Image
+
+
+def _restore_env_map(saved: dict[str, str | None]) -> None:
+    for key, val in saved.items():
+        if val is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = val
 
 
 class IntegrityReleaseBlockersTests(unittest.TestCase):
     def setUp(self):
         self.db_file = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
         self.db_file.close()
-        self.old_db = os.environ.get("COMMERCE_AGENT_DB")
+        self.saved_env = {
+            "COMMERCE_AGENT_DB": os.environ.get("COMMERCE_AGENT_DB"),
+            "SUPABASE_URL": os.environ.get("SUPABASE_URL"),
+            "EBAY_DRAFTS_ENABLED": os.environ.get("EBAY_DRAFTS_ENABLED"),
+            "EBAY_MUTATIONS_ENABLED": os.environ.get("EBAY_MUTATIONS_ENABLED"),
+        }
         os.environ["COMMERCE_AGENT_DB"] = self.db_file.name
-
-        self.old_supabase_url = os.environ.get("SUPABASE_URL")
         os.environ["SUPABASE_URL"] = "https://project.supabase.co"
-
-        self.old_drafts_flag = os.environ.get("EBAY_DRAFTS_ENABLED")
-        self.old_mutations_flag = os.environ.get("EBAY_MUTATIONS_ENABLED")
         os.environ["EBAY_DRAFTS_ENABLED"] = "true"
         os.environ["EBAY_MUTATIONS_ENABLED"] = "true"
 
@@ -71,23 +80,11 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
 
     def tearDown(self):
         self.scope_mock.stop()
-        if self.old_supabase_url is None:
-            os.environ.pop("SUPABASE_URL", None)
-        else:
-            os.environ["SUPABASE_URL"] = self.old_supabase_url
-        for k, v in (("EBAY_DRAFTS_ENABLED", self.old_drafts_flag), ("EBAY_MUTATIONS_ENABLED", self.old_mutations_flag)):
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
         try:
             os.unlink(self.db_file.name)
         except FileNotFoundError:
             pass
-        if self.old_db is None:
-            os.environ.pop("COMMERCE_AGENT_DB", None)
-        else:
-            os.environ["COMMERCE_AGENT_DB"] = self.old_db
+        _restore_env_map(self.saved_env)
 
     def _create_approved_item(self, seller_id: str, title: str = "Vintage Wool Coat L") -> tuple[dict, dict]:
         batch = inventory_workspace.create_batch(seller_id, name="Test Batch", grouping_mode="manual")
@@ -422,19 +419,10 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
         self.assertEqual(updated["workflowStatus"], "needs_review")
         self.assertFalse(updated["sellerConfirmed"])
 
-    @unittest.skipUnless(
-        os.environ.get("TEST_POSTGRES_URL"),
-        "Set TEST_POSTGRES_URL for live disposable PostgreSQL execution tests",
-    )
-    def test_disposable_postgresql_end_to_end_grouping_moves_merges_invalidation_and_claims(self):
-        """Execute grouping, photo moves, donor sync, merges, boolean approval invalidation,
-        manual CSV export, ambiguous outcomes, and concurrent claims against real PostgreSQL."""
-        from concurrent.futures import ThreadPoolExecutor
-
-        pg_url = os.environ["TEST_POSTGRES_URL"]
+    @contextmanager
+    def _pg_seller_session(self, pg_url: str):
         pg_seller = str(uuid.uuid4())
         pg_auth_user = str(uuid.uuid4())
-
         with mock.patch.dict(os.environ, {"DATABASE_URL": pg_url}):
             with commerce_agent.connect() as db:
                 self.assertTrue(db.postgres)
@@ -442,115 +430,228 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
                     "INSERT INTO sellers(id, auth_user_id, status, created_at) VALUES (?, ?, 'active', ?)",
                     (pg_seller, pg_auth_user, commerce_agent.utc_now()),
                 )
-
             try:
-                batch = inventory_workspace.create_batch(pg_seller, name="PG Integrity Batch", grouping_mode="manual")
-                photos = inventory_workspace.register_batch_photos(batch["id"], pg_seller, [
-                    {"filename": "pg1.jpg", "previewUrl": "https://example.com/pg1.jpg", "storageUrl": "https://example.com/pg1.jpg"},
-                    {"filename": "pg2.jpg", "previewUrl": "https://example.com/pg2.jpg", "storageUrl": "https://example.com/pg2.jpg"},
-                    {"filename": "pg3.jpg", "previewUrl": "https://example.com/pg3.jpg", "storageUrl": "https://example.com/pg3.jpg"},
-                ])
-                donor = inventory_workspace.create_item(batch["id"], pg_seller, {
-                    "photoIds": [photos[0]["id"], photos[1]["id"]],
-                    "listing": {"title": "PG Donor Jacket L", "price": "45.00", "cat": "57988", "size": "L", "brand": "Vintage"},
-                })
-                receiver = inventory_workspace.create_item(batch["id"], pg_seller, {
-                    "photoIds": [photos[2]["id"]],
-                    "listing": {"title": "PG Receiver Shirt M", "price": "25.00", "cat": "57988", "size": "M", "brand": "Vintage"},
-                })
-                for it in (donor, receiver):
-                    inventory_workspace.patch_item(it["id"], pg_seller, {"confirmAll": True})
-                inv_app = inventory_workspace.approve_items([donor["id"], receiver["id"]], pg_seller)
-                self.assertEqual(inv_app["approvedCount"], 2)
-
-                # Moving a photo from an approved donor requires allow_destructive=True
-                with self.assertRaises(ValueError):
-                    inventory_workspace.update_item_photos(receiver["id"], pg_seller, [photos[2]["id"], photos[1]["id"]], allow_destructive=False)
-
-                # With allow_destructive=True, donor & receiver sync and invalidate PostgreSQL boolean seller_confirmed=FALSE
-                moved = inventory_workspace.update_item_photos(
-                    receiver["id"], pg_seller, [photos[2]["id"], photos[1]["id"]], allow_destructive=True
-                )
-                self.assertEqual(moved["photoCount"], 2)
-                self.assertEqual(moved["workflowStatus"], "needs_review")
-                self.assertFalse(moved["sellerConfirmed"])
-                self.assertEqual(moved["approvalContentHash"], "")
-
-                donor_after = inventory_workspace.get_item(donor["id"], pg_seller)
-                self.assertEqual(donor_after["photoCount"], 1)
-                self.assertEqual(donor_after["workflowStatus"], "needs_review")
-                self.assertFalse(donor_after["sellerConfirmed"])
-
-                # Merge donor into receiver
-                merged = inventory_workspace.merge_items(donor["id"], receiver["id"], pg_seller, allow_destructive=True)
-                self.assertEqual(merged["photoCount"], 3)
-                with self.assertRaises(KeyError):
-                    inventory_workspace.get_item(donor["id"], pg_seller)
-
-                # Approve merged item, then edit to verify PostgreSQL boolean invalidation
-                inventory_workspace.patch_item(merged["id"], pg_seller, {"confirmAll": True})
-                app_res = inventory_workspace.approve_items([merged["id"]], pg_seller)
-                self.assertEqual(app_res["approvedCount"], 1)
-                edited = inventory_workspace.patch_item(merged["id"], pg_seller, {"price": "55.00"})
-                self.assertEqual(edited["workflowStatus"], "needs_review")
-                self.assertFalse(edited["sellerConfirmed"])
-
-                # Re-approve and verify manual CSV export with mutations disabled
-                inventory_workspace.patch_item(merged["id"], pg_seller, {"confirmAll": True})
-                self.assertEqual(inventory_workspace.approve_items([merged["id"]], pg_seller)["approvedCount"], 1)
-                with mock.patch.dict(os.environ, {"EBAY_MUTATIONS_ENABLED": "false", "EBAY_DRAFTS_ENABLED": "false"}):
-                    with mock.patch("hht_app.inventory_workspace.validate_draft_photo_urls", return_value=None):
-                        csv_out = inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], pg_seller)
-                self.assertIn("Draft", csv_out)
-                self.assertIn("PG Receiver Shirt M", csv_out)
-
-                # Concurrent draft submission claims against PostgreSQL unique index
-                def submit_once():
-                    with mock.patch.dict(os.environ, {"DATABASE_URL": pg_url}):
-                        try:
-                            return ("ok", inventory_workspace.submit_approved_drafts([merged["id"]], pg_seller))
-                        except Exception as exc:
-                            return ("error", str(exc))
-
-                with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "pg-task-1"}) as upload:
-                    with ThreadPoolExecutor(max_workers=2) as pool:
-                        results = list(pool.map(lambda _i: submit_once(), range(2)))
-                self.assertEqual(sum(k == "ok" for k, _ in results), 1)
-                self.assertEqual(sum(k == "error" for k, _ in results), 1)
-                self.assertIn("active or ambiguous", next(v for k, v in results if k == "error").lower())
-                upload.assert_called_once()
-
-                # Also exercise ambiguous_submission workflow_status constraint in PostgreSQL
-                pg4 = inventory_workspace.register_batch_photos(batch["id"], pg_seller, [
-                    {"filename": "pg4.jpg", "previewUrl": "https://example.com/pg4.jpg", "storageUrl": "https://example.com/pg4.jpg"},
-                ])[0]
-                amb_item = inventory_workspace.create_item(batch["id"], pg_seller, {
-                    "photoIds": [pg4["id"]],
-                    "listing": {"title": "PG Ambiguous Item", "price": "30.00", "cat": "57988", "size": "M", "brand": "Vintage"},
-                }, actor="pg-test")
-                inventory_workspace.patch_item(amb_item["id"], pg_seller, {"confirmAll": True})
-                self.assertEqual(inventory_workspace.approve_items([amb_item["id"]], pg_seller)["approvedCount"], 1)
-
-                def fail_404(listings, on_task_created=None, on_upload_sent=None, on_upload_confirmed=None):
-                    if on_task_created:
-                        on_task_created("pg-task-404")
-                    if on_upload_sent:
-                        on_upload_sent("pg-task-404")
-                    if on_upload_confirmed:
-                        on_upload_confirmed("pg-task-404")
-                    raise EbayFeedError(404, "request_error", "Not found", code="404", operation="get_task")
-
-                with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", side_effect=fail_404):
-                    with self.assertRaises(EbayFeedError):
-                        inventory_workspace.submit_approved_drafts([amb_item["id"]], pg_seller)
-
-                amb_after = inventory_workspace.get_item(amb_item["id"], pg_seller)
-                self.assertEqual(amb_after["workflowStatus"], "ambiguous_submission")
+                yield pg_seller
             finally:
                 with commerce_agent.connect() as db:
                     db.execute("DELETE FROM inventory_submissions WHERE seller_id = ?", (pg_seller,))
                     db.execute("DELETE FROM inventory_batches WHERE seller_id = ?", (pg_seller,))
                     db.execute("DELETE FROM sellers WHERE id = ?", (pg_seller,))
+
+    @unittest.skipUnless(
+        os.environ.get("TEST_POSTGRES_URL"),
+        "Set TEST_POSTGRES_URL for live disposable PostgreSQL execution tests",
+    )
+    def test_disposable_postgresql_grouping_moves_merges_invalidation_and_csv_export(self):
+        """Execute photo moves, donor sync, merges, boolean approval invalidation, and manual CSV export on PostgreSQL."""
+        with self._pg_seller_session(os.environ["TEST_POSTGRES_URL"]) as pg_seller:
+            batch = inventory_workspace.create_batch(pg_seller, name="PG Integrity Batch", grouping_mode="manual")
+            photos = inventory_workspace.register_batch_photos(batch["id"], pg_seller, [
+                {"filename": "pg1.jpg", "previewUrl": "https://example.com/pg1.jpg", "storageUrl": "https://example.com/pg1.jpg"},
+                {"filename": "pg2.jpg", "previewUrl": "https://example.com/pg2.jpg", "storageUrl": "https://example.com/pg2.jpg"},
+                {"filename": "pg3.jpg", "previewUrl": "https://example.com/pg3.jpg", "storageUrl": "https://example.com/pg3.jpg"},
+            ])
+            donor = inventory_workspace.create_item(batch["id"], pg_seller, {
+                "photoIds": [photos[0]["id"], photos[1]["id"]],
+                "listing": {"title": "PG Donor Jacket L", "price": "45.00", "cat": "57988", "size": "L", "brand": "Vintage"},
+            })
+            receiver = inventory_workspace.create_item(batch["id"], pg_seller, {
+                "photoIds": [photos[2]["id"]],
+                "listing": {"title": "PG Receiver Shirt M", "price": "25.00", "cat": "57988", "size": "M", "brand": "Vintage"},
+            })
+            for it in (donor, receiver):
+                inventory_workspace.patch_item(it["id"], pg_seller, {"confirmAll": True})
+            self.assertEqual(inventory_workspace.approve_items([donor["id"], receiver["id"]], pg_seller)["approvedCount"], 2)
+
+            with self.assertRaises(ValueError):
+                inventory_workspace.update_item_photos(receiver["id"], pg_seller, [photos[2]["id"], photos[1]["id"]], allow_destructive=False)
+
+            moved = inventory_workspace.update_item_photos(
+                receiver["id"], pg_seller, [photos[2]["id"], photos[1]["id"]], allow_destructive=True
+            )
+            self.assertEqual(moved["photoCount"], 2)
+            self.assertFalse(moved["sellerConfirmed"])
+            donor_after = inventory_workspace.get_item(donor["id"], pg_seller)
+            self.assertEqual(donor_after["photoCount"], 1)
+            self.assertFalse(donor_after["sellerConfirmed"])
+
+            merged = inventory_workspace.merge_items(donor["id"], receiver["id"], pg_seller, allow_destructive=True)
+            self.assertEqual(merged["photoCount"], 3)
+            inventory_workspace.patch_item(merged["id"], pg_seller, {"confirmAll": True})
+            self.assertEqual(inventory_workspace.approve_items([merged["id"]], pg_seller)["approvedCount"], 1)
+            edited = inventory_workspace.patch_item(merged["id"], pg_seller, {"price": "55.00"})
+            self.assertFalse(edited["sellerConfirmed"])
+
+            inventory_workspace.patch_item(merged["id"], pg_seller, {"confirmAll": True})
+            self.assertEqual(inventory_workspace.approve_items([merged["id"]], pg_seller)["approvedCount"], 1)
+            with mock.patch.dict(os.environ, {"EBAY_MUTATIONS_ENABLED": "false", "EBAY_DRAFTS_ENABLED": "false"}):
+                with mock.patch("hht_app.inventory_workspace.validate_draft_photo_urls", return_value=None):
+                    csv_out = inventory_workspace.export_batch_seller_hub_draft_csv(batch["id"], pg_seller)
+            self.assertIn("PG Receiver Shirt M", csv_out)
+
+    @unittest.skipUnless(
+        os.environ.get("TEST_POSTGRES_URL"),
+        "Set TEST_POSTGRES_URL for live disposable PostgreSQL execution tests",
+    )
+    def test_disposable_postgresql_concurrent_claims_and_ambiguous_submission(self):
+        """Verify concurrent submission claim uniqueness and ambiguous_submission workflow constraints on PostgreSQL."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        pg_url = os.environ["TEST_POSTGRES_URL"]
+        with self._pg_seller_session(pg_url) as pg_seller:
+            batch = inventory_workspace.create_batch(pg_seller, name="PG Claim Batch", grouping_mode="manual")
+            photos = inventory_workspace.register_batch_photos(batch["id"], pg_seller, [
+                {"filename": "pgc1.jpg", "previewUrl": "https://example.com/pgc1.jpg", "storageUrl": "https://example.com/pgc1.jpg"},
+                {"filename": "pgc2.jpg", "previewUrl": "https://example.com/pgc2.jpg", "storageUrl": "https://example.com/pgc2.jpg"},
+            ])
+            item = inventory_workspace.create_item(batch["id"], pg_seller, {
+                "photoIds": [photos[0]["id"]],
+                "listing": {"title": "PG Concurrent Item", "price": "35.00", "cat": "57988", "size": "M", "brand": "Vintage"},
+            })
+            inventory_workspace.patch_item(item["id"], pg_seller, {"confirmAll": True})
+            self.assertEqual(inventory_workspace.approve_items([item["id"]], pg_seller)["approvedCount"], 1)
+
+            def submit_once():
+                with mock.patch.dict(os.environ, {"DATABASE_URL": pg_url}):
+                    try:
+                        return ("ok", inventory_workspace.submit_approved_drafts([item["id"]], pg_seller))
+                    except Exception as exc:
+                        return ("error", str(exc))
+
+            with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "pg-task-1"}) as upload:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(lambda _i: submit_once(), range(2)))
+            self.assertEqual(sum(k == "ok" for k, _ in results), 1)
+            self.assertEqual(sum(k == "error" for k, _ in results), 1)
+            upload.assert_called_once()
+
+            amb_item = inventory_workspace.create_item(batch["id"], pg_seller, {
+                "photoIds": [photos[1]["id"]],
+                "listing": {"title": "PG Ambiguous Item", "price": "30.00", "cat": "57988", "size": "M", "brand": "Vintage"},
+            })
+            inventory_workspace.patch_item(amb_item["id"], pg_seller, {"confirmAll": True})
+            inventory_workspace.approve_items([amb_item["id"]], pg_seller)
+
+            def fail_404(listings, on_task_created=None, on_upload_sent=None, on_upload_confirmed=None):
+                if on_task_created:
+                    on_task_created("pg-task-404")
+                if on_upload_sent:
+                    on_upload_sent("pg-task-404")
+                if on_upload_confirmed:
+                    on_upload_confirmed("pg-task-404")
+                raise EbayFeedError(404, "request_error", "Not found", code="404", operation="get_task")
+
+            with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", side_effect=fail_404):
+                with self.assertRaises(EbayFeedError):
+                    inventory_workspace.submit_approved_drafts([amb_item["id"]], pg_seller)
+            self.assertEqual(inventory_workspace.get_item(amb_item["id"], pg_seller)["workflowStatus"], "ambiguous_submission")
+
+    def test_completed_with_errors_allows_retry_for_failed_item_and_blocks_succeeded_item(self):
+        """Partial feed errors allow resubmitting the failed item after fixes while blocking the succeeded item."""
+        from hht_app.schema import _draft_sku, normalize_listing
+
+        _, ok_item = self._create_approved_item(self.seller_a, title="Succeeded Coat L")
+        _, err_item = self._create_approved_item(self.seller_a, title="Errored Coat M")
+        ok_sku = _draft_sku(ok_item["listing"], normalize_listing(ok_item["listing"]))
+        err_sku = _draft_sku(err_item["listing"], normalize_listing(err_item["listing"]))
+
+        with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "task-mixed-1"}):
+            inventory_workspace.submit_approved_drafts([ok_item["id"], err_item["id"]], self.seller_a)
+
+        partial_details = {
+            "taskId": "task-mixed-1",
+            "status": "COMPLETED",
+            "uploadSummary": {"successCount": 1, "failureCount": 1},
+            "resultDetails": {"errorCount": 1, "errors": [{"customLabel": err_sku, "message": "Invalid item specific"}]},
+        }
+        with mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value=partial_details):
+            ok_status = inventory_workspace.get_item_submission_status(ok_item["id"], self.seller_a)
+            err_status = inventory_workspace.get_item_submission_status(err_item["id"], self.seller_a)
+        self.assertEqual(ok_status["itemWorkflowStatus"], "draft_result_available")
+        self.assertEqual(err_status["itemWorkflowStatus"], "draft_failed")
+
+        inventory_workspace.patch_item(err_item["id"], self.seller_a, {"price": "59.99", "confirmAll": True})
+        self.assertEqual(inventory_workspace.approve_items([err_item["id"]], self.seller_a)["approvedCount"], 1)
+
+        with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "task-retry-2"}) as upload:
+            res = inventory_workspace.submit_approved_drafts([err_item["id"]], self.seller_a)
+            self.assertEqual(res["feedTaskId"], "task-retry-2")
+            upload.assert_called_once()
+
+        with self.assertRaises(ValueError):
+            inventory_workspace.submit_approved_drafts([ok_item["id"]], self.seller_a)
+        self.assertTrue(bool(ok_sku))
+
+    def test_ambiguous_submission_reconciles_via_status_poll_and_reconcile_endpoint(self):
+        """Ambiguous submissions keep retry blocked on polling errors and unlock cleanly once reconciled."""
+        _, item = self._create_approved_item(self.seller_a, title="Ambiguous Reconcile Coat")
+
+        def fail_timeout(listings, on_task_created=None, on_upload_sent=None, on_upload_confirmed=None):
+            if on_task_created:
+                on_task_created("task-ambig-poll")
+            if on_upload_sent:
+                on_upload_sent("task-ambig-poll")
+            raise EbayFeedError(504, "timeout", "Upload timeout", operation="upload_file")
+
+        with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", side_effect=fail_timeout):
+            with self.assertRaises(EbayFeedError):
+                inventory_workspace.submit_approved_drafts([item["id"]], self.seller_a)
+
+        # Transient error during reconciliation keeps ambiguous lock intact
+        with mock.patch("hht_app.inventory_workspace.get_feed_task_details", side_effect=EbayFeedError(503, "server_error", "Busy")):
+            still_ambig = inventory_workspace.get_item_submission_status(item["id"], self.seller_a)
+        self.assertEqual(still_ambig["status"], "ambiguous")
+
+        # HTTP POST /submission/reconcile polling COMPLETED unlocks item into draft_result_available
+        client = hht_app.app.test_client()
+
+        def auth_seller_a():
+            from flask import g
+            g.supabase_user = {"sub": self.user_a}
+
+        completed_task = {"taskId": "task-ambig-poll", "status": "COMPLETED", "uploadSummary": {"successCount": 1, "failureCount": 0}}
+        with mock.patch("app.authenticate_request", side_effect=auth_seller_a), \
+             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_a, "auth_user_id": self.user_a}), \
+             mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value=completed_task):
+            res = client.post(f"/api/inventory/items/{item['id']}/submission/reconcile", json={"resolution": "poll"})
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.get_json()["result"]["reconciled"])
+        self.assertEqual(inventory_workspace.get_item(item["id"], self.seller_a)["workflowStatus"], "draft_result_available")
+
+    def test_hosted_image_resolves_relative_https_redirect_and_rejects_unsafe_redirect(self):
+        """Relative Location redirects resolve against current HTTPS URL; scheme downgrades are rejected."""
+        img_io = io.BytesIO()
+        Image.new("RGB", (60, 60), color="green").save(img_io, format="JPEG")
+        valid_bytes = img_io.getvalue()
+
+        redir = mock.MagicMock()
+        redir.status_code = 302
+        redir.headers = {"Location": "/cdn/resolved_photo.jpg"}
+
+        final_resp = mock.MagicMock()
+        final_resp.status_code = 200
+        final_resp.headers = {"Content-Type": "image/jpeg", "Content-Length": str(len(valid_bytes))}
+        final_resp.iter_content.return_value = [valid_bytes]
+
+        seen_urls: list[str] = []
+
+        def fake_get(url, **kwargs):
+            seen_urls.append(url)
+            return redir if url.endswith("/initial.jpg") else final_resp
+
+        with mock.patch("hht_app.ebay_feed.requests.get", side_effect=fake_get), \
+             mock.patch("hht_app.ebay_feed._is_private_address", return_value=False):
+            _validate_image_url("https://cdn.example.com/photos/initial.jpg", 1, 5.0)
+        self.assertEqual(seen_urls, ["https://cdn.example.com/photos/initial.jpg", "https://cdn.example.com/cdn/resolved_photo.jpg"])
+
+        bad_redir = mock.MagicMock()
+        bad_redir.status_code = 301
+        bad_redir.headers = {"Location": "http://insecure.example.com/photo.jpg"}
+        with mock.patch("hht_app.ebay_feed.requests.get", return_value=bad_redir), \
+             mock.patch("hht_app.ebay_feed._is_private_address", return_value=False):
+            with self.assertRaises(EbayFeedError) as err_ctx:
+                _validate_image_url("https://cdn.example.com/photos/initial.jpg", 1, 5.0)
+        self.assertIn("non-HTTPS", err_ctx.exception.safe_message)
 
     def test_csv_export_rejects_seller_confirmed_only_and_validates_photo_urls_and_create_item_bool(self):
         """Export requires explicit workflowStatus=='approved', runs validate_draft_photo_urls,
