@@ -553,9 +553,9 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
 
         def interleaved_claim_during_edit(target_id, status_arg, context="edit", db=None):
             orig_assert(target_id, status_arg, context, db=db)
-            if context == "edit" and db is not None and target_id == item["id"]:
+            if db is not None:
                 with commerce_agent.connect() as claim_db:
-                    claim_db.execute("UPDATE inventory_items SET workflow_status = 'claiming' WHERE id = ?", (item["id"],))
+                    claim_db.execute("UPDATE inventory_items SET workflow_status = 'claiming' WHERE id = ?", (target_id,))
 
         with mock.patch("hht_app.inventory_workspace._assert_mutable", side_effect=interleaved_claim_during_edit):
             with self.assertRaises(ValueError) as edit_ctx:
@@ -564,6 +564,14 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
         final_item = inventory_workspace.get_item(item["id"], self.seller_a)
         self.assertEqual(final_item["workflowStatus"], "claiming")
         self.assertEqual(str(final_item["listing"].get("price")), "99.00")
+
+        executed_sql = []
+        pg_cursor = mock.MagicMock()
+        pg_cursor.fetchone.side_effect = [{"workflow_status": "approved"}, None]
+        fake_pg_db = mock.MagicMock(postgres=True)
+        fake_pg_db.execute.side_effect = lambda sql, params=(): executed_sql.append(sql) or pg_cursor
+        inventory_workspace._assert_mutable(item["id"], "approved", "modify photos on", db=fake_pg_db)
+        self.assertIn("FOR UPDATE", executed_sql[0])
 
 
 if __name__ == "__main__":

@@ -203,7 +203,7 @@ def _assert_mutable(item_id: str, status: str, context: str = "edit", db: Any = 
     if db is not None:
         sql = (
             "SELECT workflow_status FROM inventory_items WHERE id = ? FOR UPDATE"
-            if getattr(db, "backend", "") == "postgres"
+            if bool(getattr(db, "postgres", False))
             else "SELECT workflow_status FROM inventory_items WHERE id = ?"
         )
         row = db.execute(sql, (item_id,)).fetchone()
@@ -220,6 +220,14 @@ def _assert_mutable(item_id: str, status: str, context: str = "edit", db: Any = 
                 f"(status='{sub.get('status')}', stage='{sub.get('submission_stage')}'). "
                 "Reconcile or complete the submission before making changes."
             )
+
+
+def _require_rowcount(cur: Any, item_id: str, action: str) -> None:
+    if getattr(cur, "rowcount", None) == 0:
+        raise ValueError(
+            f"Cannot {action} item {item_id}: it has an active or ambiguous eBay draft submission "
+            "(or was modified concurrently)."
+        )
 
 
 def seller_owns_feed_task(task_id: str, seller_id: str) -> bool:
@@ -678,13 +686,14 @@ def apply_photo_grouping(
                         existing_listing["notes"] = (notes + " Group flagged: duplicate photo filenames detected.").strip()
 
                 validation = check_listing_rules(existing_listing, len(group), {})
-
-                db.execute(
+                matched_status = str(matched_item.get("workflow_status") or "")
+                cur = db.execute(
                     """UPDATE inventory_items
                        SET listing_json = ?, validation_json = ?, updated_at = ?
-                       WHERE id = ?""",
-                    (_json(existing_listing), _json(validation), now, item_id),
+                       WHERE id = ? AND workflow_status = ?""",
+                    (_json(existing_listing), _json(validation), now, item_id, matched_status),
                 )
+                _require_rowcount(cur, item_id, "regroup")
                 old_photo_ids = [str(p["id"]) for p in photo_records if str(p.get("item_id") or "") == item_id]
                 new_photo_ids = [str(p["id"]) for p in group]
                 if old_photo_ids != new_photo_ids:
@@ -750,9 +759,14 @@ def apply_photo_grouping(
             created_items.append(item_id)
 
         # Remove orphaned items that no longer have any photos assigned
-        for old_id in available_existing_items:
+        for old_id, old_item in available_existing_items.items():
             if old_id not in used_item_ids:
-                db.execute("DELETE FROM inventory_items WHERE id = ?", (old_id,))
+                old_status = str(old_item.get("workflow_status") or "")
+                cur = db.execute(
+                    "DELETE FROM inventory_items WHERE id = ? AND workflow_status = ?",
+                    (old_id, old_status),
+                )
+                _require_rowcount(cur, old_id, "regroup")
 
     return list_batch_items(batch_id, seller_id)
 
@@ -2620,11 +2634,13 @@ def _sync_item_photos_to_listing(db: Any, item_id: str, seller_id: str, now: str
         cover_url = urls[0]
 
     item_row = db.execute(
-        "SELECT listing_json, provenance_json FROM inventory_items WHERE id = ? AND seller_id = ?",
+        "SELECT listing_json, provenance_json, workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
         (item_id, seller_id),
     ).fetchone()
     if not item_row:
         return {}
+    live_status = str(item_row["workflow_status"] or "")
+    _assert_mutable(item_id, live_status, "modify photos on", db=db)
 
     listing = _decode(item_row["listing_json"], {})
     provenance = _decode(item_row["provenance_json"], {})
@@ -2635,12 +2651,13 @@ def _sync_item_photos_to_listing(db: Any, item_id: str, seller_id: str, now: str
 
     validation = check_listing_rules(listing, len(urls), {})
 
-    db.execute(
+    cur = db.execute(
         """UPDATE inventory_items
            SET listing_json = ?, validation_json = ?, updated_at = ?
-           WHERE id = ? AND seller_id = ?""",
-        (_json(listing), _json(validation), now, item_id, seller_id),
+           WHERE id = ? AND seller_id = ? AND workflow_status = ?""",
+        (_json(listing), _json(validation), now, item_id, seller_id, live_status),
     )
+    _require_rowcount(cur, item_id, "modify photos on")
     return listing
 
 
