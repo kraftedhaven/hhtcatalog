@@ -465,22 +465,38 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
         self.assertIn("boolean", str(bool_ctx.exception).lower())
 
     def test_partial_feed_without_error_rows_stays_unresolved(self):
-        """Missing error rows on a partial feed must not mark items succeeded prematurely."""
+        """Missing or unlabeled error rows on a partial feed must not mark items succeeded prematurely."""
         _, item = self._create_approved_item(self.seller_a, title="Unresolved Row Coat")
         with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "task-missing-err"}):
             inventory_workspace.submit_approved_drafts([item["id"]], self.seller_a)
 
-        unresolved = {
-            "taskId": "task-missing-err",
-            "status": "COMPLETED",
-            "uploadSummary": {"successCount": 1, "failureCount": 1},
-            "resultDetails": {"errorCount": 1, "errors": []},
-        }
-        with mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value=unresolved):
-            status = inventory_workspace.get_item_submission_status(item["id"], self.seller_a)
-        self.assertEqual(status["status"], "processing")
-        self.assertEqual(status["itemWorkflowStatus"], "draft_submitted")
-        self.assertEqual(inventory_workspace.get_item(item["id"], self.seller_a)["workflowStatus"], "draft_submitted")
+        for errs in ([], [{"customLabel": "", "lineNumber": "2", "message": "Unlabeled XML failure"}]):
+            unresolved = {
+                "taskId": "task-missing-err",
+                "status": "COMPLETED",
+                "uploadSummary": {"successCount": 1, "failureCount": 1},
+                "resultDetails": {"errorCount": 1, "errors": errs},
+            }
+            with mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value=unresolved):
+                status = inventory_workspace.get_item_submission_status(item["id"], self.seller_a)
+            self.assertEqual(status["status"], "processing")
+            self.assertEqual(status["itemWorkflowStatus"], "draft_submitted")
+            self.assertEqual(inventory_workspace.get_item(item["id"], self.seller_a)["workflowStatus"], "draft_submitted")
+
+    def test_validate_items_preserves_draft_result_available(self):
+        """Validating a completed item must preserve 'draft_result_available' instead of reopening it for duplicate upload."""
+        _, item = self._create_approved_item(self.seller_a, title="Completed Coat")
+        with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "task-done-1"}):
+            inventory_workspace.submit_approved_drafts([item["id"]], self.seller_a)
+        done_task = {"taskId": "task-done-1", "status": "COMPLETED", "uploadSummary": {"successCount": 1, "failureCount": 0}}
+        with mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value=done_task):
+            inventory_workspace.get_item_submission_status(item["id"], self.seller_a)
+        self.assertEqual(inventory_workspace.get_item(item["id"], self.seller_a)["workflowStatus"], "draft_result_available")
+
+        with mock.patch("hht_app.inventory_workspace.validate_listing", return_value={"status": "unverified", "findings": []}):
+            val_res = inventory_workspace.validate_items([item["id"]], self.seller_a)
+        self.assertEqual(val_res["results"][0]["status"], "draft_result_available")
+        self.assertEqual(inventory_workspace.get_item(item["id"], self.seller_a)["workflowStatus"], "draft_result_available")
 
     def test_reconcile_rejects_cross_seller_task_override(self):
         """A seller cannot hijack another seller's feedTaskId via submission reconciliation."""

@@ -1191,14 +1191,13 @@ def validate_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
             item["provenance"].get(f, {}).get("sellerConfirmed") is True for f in ("title", "price")
         )
 
+        preserved_states = _MUTATION_BLOCKED_STATES | frozenset({"draft_result_available"})
         current_status = item["workflowStatus"]
         new_status = current_status
         blocking = [f for f in validation.get("findings", []) if f.get("rule") != "taxonomy_unverified"]
         is_valid = len(blocking) == 0
 
-        current_status = item["workflowStatus"]
-        new_status = current_status
-        if current_status not in _MUTATION_BLOCKED_STATES:
+        if current_status not in preserved_states:
             if is_valid and has_required and all_confirmed:
                 new_status = "ready_for_approval"
             else:
@@ -1211,7 +1210,7 @@ def validate_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
                 (item_id, seller_id),
             ).fetchone()
             live_status = str(live_row["workflow_status"] or "") if live_row else current_status
-            if live_status in _MUTATION_BLOCKED_STATES:
+            if live_status in preserved_states:
                 new_status = live_status
             db.execute(
                 """UPDATE inventory_items
@@ -2050,13 +2049,10 @@ def _effective_submission_sku(row: Any, item_id: str, db: Any) -> str:
     return _draft_sku(snapshot, normalize_listing(snapshot))
 
 
-def _determine_partial_task_item_failed(
-    item_id: str, row_errors: list[dict[str, Any]], failure_count: int, db: Any, row: Any = None
-) -> bool:
-    sku = _effective_submission_sku(row, item_id, db)
-    if sku:
-        return any(err.get("customLabel") == sku for err in row_errors)
-    return failure_count > 0
+def _has_unlabeled_partial_errors(row_errors: list[dict[str, Any]], failure_count: int, error_count: int) -> bool:
+    if not row_errors:
+        return failure_count > 0 or error_count > 0
+    return any(not str(err.get("customLabel") or "").strip() for err in row_errors)
 
 
 def _resolve_partial_task_outcome(
@@ -2073,16 +2069,21 @@ def _resolve_partial_task_outcome(
     error_count = int(result_details.get("errorCount") or len(row_errors))
     enriched = dict(task_details)
 
-    if (failure_count > 0 or error_count > 0) and not row_errors:
-        # Result file rows were unavailable; keep outcome unresolved so polling retries.
+    sku = _effective_submission_sku(row, item_id, db)
+    matched_failure = bool(sku) and any(str(err.get("customLabel") or "").strip() == sku for err in row_errors)
+    if matched_failure:
+        enriched["itemOutcome"] = "failed"
+        return "completed_with_errors", "draft_failed", STAGE_COMPLETED, enriched
+
+    if not sku or _has_unlabeled_partial_errors(row_errors, failure_count, error_count):
+        # Unmatched or missing error-row labels cannot prove per-item success; keep unresolved.
         enriched["itemOutcome"] = "unresolved"
         next_sub = "ambiguous" if current_status == "ambiguous" else "processing"
         next_item = "ambiguous_submission" if current_status == "ambiguous" else "draft_submitted"
         return next_sub, next_item, None, enriched
 
-    is_item_failed = _determine_partial_task_item_failed(item_id, row_errors, failure_count, db, row=row)
-    enriched["itemOutcome"] = "failed" if is_item_failed else "completed"
-    return "completed_with_errors", ("draft_failed" if is_item_failed else "draft_result_available"), STAGE_COMPLETED, enriched
+    enriched["itemOutcome"] = "completed"
+    return "completed_with_errors", "draft_result_available", STAGE_COMPLETED, enriched
 
 
 def _resolve_completed_task_outcomes(
