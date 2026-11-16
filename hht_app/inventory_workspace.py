@@ -1210,6 +1210,42 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
 # Validation & Approval Gating
 # ---------------------------------------------------------------------------
 
+def _select_live_workflow_status(db: Any, item_id: str, seller_id: str, fallback: str) -> str:
+    sql = (
+        "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ? FOR UPDATE"
+        if bool(getattr(db, "postgres", False))
+        else "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?"
+    )
+    row = db.execute(sql, (item_id, seller_id)).fetchone()
+    return str(row["workflow_status"] or "") if row else fallback
+
+
+def _persist_item_validation(
+    db: Any,
+    item_id: str,
+    seller_id: str,
+    validation: dict[str, Any],
+    candidate_status: str,
+    current_status: str,
+    preserved_states: frozenset[str],
+    now: str,
+) -> str:
+    live_status = current_status
+    for _ in range(2):
+        live_status = _select_live_workflow_status(db, item_id, seller_id, live_status)
+        final_status = live_status if live_status in preserved_states else candidate_status
+        cur = db.execute(
+            """UPDATE inventory_items
+               SET validation_json = ?, workflow_status = ?, updated_at = ?
+               WHERE id = ? AND seller_id = ? AND workflow_status = ?""",
+            (_json(validation), final_status, now, item_id, seller_id, live_status),
+        )
+        if getattr(cur, "rowcount", None) != 0:
+            return final_status
+    _require_rowcount(cur, item_id, "validate")
+    return final_status
+
+
 def validate_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
     """Run validation checks on selected items and update their validation states."""
     if not seller_id:
@@ -1242,18 +1278,8 @@ def validate_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
 
         now = _now_iso()
         with connect() as db:
-            live_row = db.execute(
-                "SELECT workflow_status FROM inventory_items WHERE id = ? AND seller_id = ?",
-                (item_id, seller_id),
-            ).fetchone()
-            live_status = str(live_row["workflow_status"] or "") if live_row else current_status
-            if live_status in preserved_states:
-                new_status = live_status
-            db.execute(
-                """UPDATE inventory_items
-                   SET validation_json = ?, workflow_status = ?, updated_at = ?
-                   WHERE id = ? AND seller_id = ?""",
-                (_json(validation), new_status, now, item_id, seller_id),
+            new_status = _persist_item_validation(
+                db, item_id, seller_id, validation, new_status, current_status, preserved_states, now
             )
         results.append({
             "itemId": item_id,

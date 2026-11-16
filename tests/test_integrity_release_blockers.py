@@ -484,7 +484,7 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
             self.assertEqual(inventory_workspace.get_item(item["id"], self.seller_a)["workflowStatus"], "draft_submitted")
 
     def test_validate_items_preserves_draft_result_available(self):
-        """Validating a completed item must preserve 'draft_result_available' instead of reopening it for duplicate upload."""
+        """Validating a completed or concurrently claimed item must preserve protected workflow status."""
         _, item = self._create_approved_item(self.seller_a, title="Completed Coat")
         with mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv", return_value={"taskId": "task-done-1"}):
             inventory_workspace.submit_approved_drafts([item["id"]], self.seller_a)
@@ -497,6 +497,26 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
             val_res = inventory_workspace.validate_items([item["id"]], self.seller_a)
         self.assertEqual(val_res["results"][0]["status"], "draft_result_available")
         self.assertEqual(inventory_workspace.get_item(item["id"], self.seller_a)["workflowStatus"], "draft_result_available")
+
+        # Concurrent claim between initial live-status read and UPDATE must preserve 'claiming'.
+        _, item2 = self._create_approved_item(self.seller_a, title="Claim Race Coat")
+        orig_select = inventory_workspace._select_live_workflow_status
+        calls = 0
+
+        def race_select(db, target_id, seller_id, fallback):
+            nonlocal calls
+            status = orig_select(db, target_id, seller_id, fallback)
+            calls += 1
+            if calls == 1:
+                with commerce_agent.connect() as claim_db:
+                    claim_db.execute("UPDATE inventory_items SET workflow_status = 'claiming' WHERE id = ?", (target_id,))
+            return status
+
+        with mock.patch("hht_app.inventory_workspace.validate_listing", return_value={"status": "unverified", "findings": []}), \
+             mock.patch("hht_app.inventory_workspace._select_live_workflow_status", side_effect=race_select):
+            race_res = inventory_workspace.validate_items([item2["id"]], self.seller_a)
+        self.assertEqual(race_res["results"][0]["status"], "claiming")
+        self.assertEqual(inventory_workspace.get_item(item2["id"], self.seller_a)["workflowStatus"], "claiming")
 
     def test_reconcile_rejects_cross_seller_task_override(self):
         """A seller cannot hijack another seller's feedTaskId via submission reconciliation."""
