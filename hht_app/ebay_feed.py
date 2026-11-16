@@ -19,6 +19,7 @@ from .photo_url_validator import (
     PHOTO_URL_TIMEOUT_SECONDS,
     PHOTO_VALIDATION_MAX_BYTES,
     PRIVATE_IP_NETWORKS,
+    PhotoCheckContext,
     is_image_magic_header,
     is_private_hostname,
     validate_single_image_url,
@@ -223,12 +224,14 @@ def _is_private_address(hostname: str) -> bool:
 def _validate_image_url(url: str, item_index: int, timeout: float) -> None:
     validate_single_image_url(
         url,
-        item_index,
-        timeout,
-        get_fn=requests.get,
-        is_private_fn=_is_private_address,
-        max_bytes=PHOTO_VALIDATION_MAX_BYTES,
-        networks=_PRIVATE_NETWORKS,
+        PhotoCheckContext(
+            item_index=item_index,
+            timeout=timeout,
+            get_fn=requests.get,
+            is_private_fn=_is_private_address,
+            max_bytes=PHOTO_VALIDATION_MAX_BYTES,
+            networks=_PRIVATE_NETWORKS,
+        ),
     )
 
 

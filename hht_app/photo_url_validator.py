@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import ipaddress
 import socket
+from dataclasses import dataclass
 from typing import Any, NoReturn
 from urllib.parse import urljoin, urlparse
 
@@ -34,6 +35,21 @@ PRIVATE_IP_NETWORKS = [
 ]
 
 
+@dataclass(frozen=True)
+class PhotoCheckContext:
+    """Configuration bundle for hosted photo validation hops."""
+
+    item_index: int
+    timeout: float
+    get_fn: Any = requests.get
+    is_private_fn: Any = None
+    max_bytes: int = PHOTO_VALIDATION_MAX_BYTES
+    networks: list[Any] | None = None
+
+    def effective_networks(self) -> list[Any]:
+        return PRIVATE_IP_NETWORKS if self.networks is None else self.networks
+
+
 def _raise_photo_error(
     item_index: int, detail: str, cause: Exception | None = None
 ) -> NoReturn:
@@ -45,9 +61,7 @@ def _raise_photo_error(
         f"Seller Hub draft photo review required: item {item_index} {detail}",
         operation="validate_photo_url",
     )
-    if cause is not None:
-        raise err from cause
-    raise err
+    raise err from cause if cause is not None else err
 
 
 def is_private_ip(addr_str: str, networks: list[Any] | None = None) -> bool:
@@ -57,9 +71,7 @@ def is_private_ip(addr_str: str, networks: list[Any] | None = None) -> bool:
         addr = ipaddress.ip_address(addr_str)
     except ValueError:
         return False
-    if addr.is_private or addr.is_loopback:
-        return True
-    return any(addr in net for net in net_list)
+    return addr.is_private or addr.is_loopback or any(addr in net for net in net_list)
 
 
 def is_private_hostname(hostname: str, networks: list[Any] | None = None) -> bool:
@@ -71,12 +83,14 @@ def is_private_hostname(hostname: str, networks: list[Any] | None = None) -> boo
     return any(is_private_ip(sockaddr[0], networks) for _, _, _, _, sockaddr in infos)
 
 
-def _is_webp_header(data: bytes) -> bool:
-    return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
-
-
-def _is_ftyp_header(data: bytes) -> bool:
-    return len(data) >= 12 and data[4:8] == b"ftyp"
+_HTTPS_ERR = {
+    False: "has a photo URL that is not HTTPS.",
+    True: "has an unsafe redirect to a non-HTTPS URL.",
+}
+_PRIVATE_ERR = {
+    False: "has a photo URL pointing to an internal address.",
+    True: "has a redirect to an internal address.",
+}
 
 
 def is_image_magic_header(data: bytes) -> bool:
@@ -85,51 +99,38 @@ def is_image_magic_header(data: bytes) -> bool:
         return False
     if any(data.startswith(sig) for sig in _PREFIX_MAGIC):
         return True
-    return _is_webp_header(data) or _is_ftyp_header(data)
+    if len(data) < 12:
+        return False
+    return (data[0:4], data[8:12]) == (b"RIFF", b"WEBP") or data[4:8] == b"ftyp"
 
 
 def _verify_https_and_public_host(
-    url: str, item_index: int, is_private_fn: Any, *, is_redirect: bool = False
+    url: str, ctx: PhotoCheckContext, *, is_redirect: bool = False
 ) -> None:
     parsed = urlparse(url)
     if parsed.scheme.lower() != "https":
-        detail = (
-            "has an unsafe redirect to a non-HTTPS URL."
-            if is_redirect
-            else "has a photo URL that is not HTTPS."
-        )
-        _raise_photo_error(item_index, detail)
+        _raise_photo_error(ctx.item_index, _HTTPS_ERR[is_redirect])
     if not parsed.netloc:
-        _raise_photo_error(item_index, "has a photo URL that is missing a host.")
-    hostname = parsed.hostname or ""
-    if is_private_fn(hostname):
-        detail = (
-            "has a redirect to an internal address."
-            if is_redirect
-            else "has a photo URL pointing to an internal address."
-        )
-        _raise_photo_error(item_index, detail)
+        _raise_photo_error(ctx.item_index, "has a photo URL that is missing a host.")
+    checker = ctx.is_private_fn or (lambda host: is_private_hostname(host, ctx.effective_networks()))
+    if checker(parsed.hostname or ""):
+        _raise_photo_error(ctx.item_index, _PRIVATE_ERR[is_redirect])
 
 
 def _fetch_single_hop(
-    url: str, item_index: int, timeout: float, get_fn: Any, *, is_redirect: bool = False
+    url: str, ctx: PhotoCheckContext, *, is_redirect: bool = False
 ) -> Any:
     try:
-        return get_fn(url, stream=True, timeout=timeout, allow_redirects=False)
+        return ctx.get_fn(url, stream=True, timeout=ctx.timeout, allow_redirects=False)
     except requests.Timeout as exc:
-        _raise_photo_error(item_index, "has an unreachable photo URL.", exc)
+        _raise_photo_error(ctx.item_index, "has an unreachable photo URL.", exc)
     except requests.RequestException as exc:
         suffix = " after redirect." if is_redirect else "."
-        _raise_photo_error(item_index, f"has an unreachable photo URL{suffix}", exc)
+        _raise_photo_error(ctx.item_index, f"has an unreachable photo URL{suffix}", exc)
 
 
 def _follow_safe_redirects(
-    initial_response: Any,
-    initial_url: str,
-    item_index: int,
-    timeout: float,
-    get_fn: Any,
-    is_private_fn: Any,
+    initial_response: Any, initial_url: str, ctx: PhotoCheckContext
 ) -> tuple[Any, list[Any]]:
     followed = initial_response
     current_url = initial_url
@@ -141,47 +142,49 @@ def _follow_safe_redirects(
         if not location:
             break
         resolved_url = urljoin(current_url, location)
-        _verify_https_and_public_host(resolved_url, item_index, is_private_fn, is_redirect=True)
-        followed = _fetch_single_hop(resolved_url, item_index, timeout, get_fn, is_redirect=True)
+        _verify_https_and_public_host(resolved_url, ctx, is_redirect=True)
+        followed = _fetch_single_hop(resolved_url, ctx, is_redirect=True)
         opened.append(followed)
         current_url = resolved_url
     return followed, opened
 
 
-def _verify_connected_peer(response: Any, item_index: int, networks: list[Any]) -> None:
+def _peer_ip_address(response: Any) -> str | None:
     raw_conn = getattr(getattr(response, "raw", None), "_connection", None)
     sock = getattr(raw_conn, "sock", None)
     if sock is None:
-        return
+        return None
     try:
         peer = sock.getpeername()
     except OSError:
-        return
-    if not peer or not isinstance(peer, tuple):
-        return
-    if is_private_ip(peer[0], networks):
-        _raise_photo_error(item_index, f"connected to a private destination ({peer[0]}).")
+        return None
+    return peer[0] if isinstance(peer, tuple) and peer else None
 
 
-def _verify_response_headers(response: Any, item_index: int, max_bytes: int) -> None:
+def _verify_connected_peer(response: Any, ctx: PhotoCheckContext) -> None:
+    peer_host = _peer_ip_address(response)
+    if peer_host and is_private_ip(peer_host, ctx.effective_networks()):
+        _raise_photo_error(ctx.item_index, f"connected to a private destination ({peer_host}).")
+
+
+def _parse_int_header(raw_value: Any) -> int:
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _verify_response_headers(response: Any, ctx: PhotoCheckContext) -> None:
     if response.status_code != 200:
-        _raise_photo_error(item_index, "has a photo URL that did not return HTTP 200.")
-    content_length = response.headers.get("Content-Length")
-    if content_length:
-        try:
-            length_val = int(content_length)
-        except ValueError:
-            length_val = 0
-        if length_val > max_bytes:
-            _raise_photo_error(
-                item_index, "has a photo URL returning a response that exceeds the size limit."
-            )
+        _raise_photo_error(ctx.item_index, "has a photo URL that did not return HTTP 200.")
+    if _parse_int_header(response.headers.get("Content-Length")) > ctx.max_bytes:
+        _raise_photo_error(ctx.item_index, "has a photo URL returning a response that exceeds the size limit.")
     content_type = response.headers.get("Content-Type", "")
     if not content_type.lower().startswith("image/"):
-        _raise_photo_error(item_index, "has a photo URL that is not an image.")
+        _raise_photo_error(ctx.item_index, "has a photo URL that is not an image.")
 
 
-def _read_bounded_body(response: Any, item_index: int, max_bytes: int) -> bytes:
+def _read_bounded_body(response: Any, ctx: PhotoCheckContext) -> bytes:
     iter_fn = getattr(response, "iter_content", None)
     if not callable(iter_fn):
         return getattr(response, "content", b"")
@@ -191,65 +194,45 @@ def _read_bounded_body(response: Any, item_index: int, max_bytes: int) -> bytes:
         if not chunk:
             continue
         total += len(chunk)
-        if total > max_bytes:
-            _raise_photo_error(
-                item_index, "has a photo URL returning a response that exceeds the size limit."
-            )
+        if total > ctx.max_bytes:
+            _raise_photo_error(ctx.item_index, "has a photo URL returning a response that exceeds the size limit.")
         chunks.append(chunk)
     return b"".join(chunks)
 
 
-def _verify_decoded_image(full_data: bytes, item_index: int) -> None:
+def _verify_decoded_image(full_data: bytes, ctx: PhotoCheckContext) -> None:
     if not full_data:
         return
     if len(full_data) < 16 or not is_image_magic_header(full_data[:16]):
-        _raise_photo_error(
-            item_index, "has a photo URL that does not return valid image content."
-        )
+        _raise_photo_error(ctx.item_index, "has a photo URL that does not return valid image content.")
     try:
         from PIL import Image
 
-        img = Image.open(io.BytesIO(full_data))
-        img.verify()
+        Image.open(io.BytesIO(full_data)).verify()
     except Exception as exc:
-        _raise_photo_error(
-            item_index, "has a photo URL with truncated or corrupted image data.", exc
-        )
+        _raise_photo_error(ctx.item_index, "has a photo URL with truncated or corrupted image data.", exc)
 
 
-def _close_responses(responses: list[Any]) -> None:
-    for resp in responses:
-        close = getattr(resp, "close", None)
-        if not callable(close):
-            continue
+def _close_one(resp: Any) -> None:
+    close = getattr(resp, "close", None)
+    if callable(close):
         try:
             close()
         except Exception:
             pass
 
 
-def validate_single_image_url(
-    url: str,
-    item_index: int,
-    timeout: float,
-    *,
-    get_fn: Any = requests.get,
-    is_private_fn: Any = is_private_hostname,
-    max_bytes: int = PHOTO_VALIDATION_MAX_BYTES,
-    networks: list[Any] | None = None,
-) -> None:
+def validate_single_image_url(url: str, ctx: PhotoCheckContext) -> None:
     """Validate a hosted photo URL via HTTPS, public IP checks, bounded streaming, and decoding."""
-    _verify_https_and_public_host(url, item_index, is_private_fn)
-    initial_response = _fetch_single_hop(url, item_index, timeout, get_fn)
+    _verify_https_and_public_host(url, ctx)
+    initial_response = _fetch_single_hop(url, ctx)
     opened: list[Any] = [initial_response]
     try:
-        followed, opened = _follow_safe_redirects(
-            initial_response, url, item_index, timeout, get_fn, is_private_fn
-        )
-        net_list = PRIVATE_IP_NETWORKS if networks is None else networks
-        _verify_connected_peer(followed, item_index, net_list)
-        _verify_response_headers(followed, item_index, max_bytes)
-        full_data = _read_bounded_body(followed, item_index, max_bytes)
-        _verify_decoded_image(full_data, item_index)
+        followed, opened = _follow_safe_redirects(initial_response, url, ctx)
+        _verify_connected_peer(followed, ctx)
+        _verify_response_headers(followed, ctx)
+        full_data = _read_bounded_body(followed, ctx)
+        _verify_decoded_image(full_data, ctx)
     finally:
-        _close_responses(opened)
+        for resp in opened:
+            _close_one(resp)

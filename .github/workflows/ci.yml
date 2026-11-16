@@ -29,7 +29,7 @@ jobs:
           --health-cmd="pg_isready -U postgres"
           --health-interval=5s
           --health-timeout=5s
-          --retries=12
+          --health-retries=12
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -98,8 +98,8 @@ jobs:
           targets = [
               "tests.test_inventory_workspace.InventoryWorkspaceTests.test_postgres_integrity_schema_is_present_read_only",
               "tests.test_inventory_workspace.InventoryWorkspaceTests.test_concurrent_submission_claim_allows_only_one_external_call",
-              "tests.test_integrity_release_blockers.IntegrityReleaseBlockersTests.test_disposable_postgresql_grouping_moves_merges_invalidation_and_csv_export",
-              "tests.test_integrity_release_blockers.IntegrityReleaseBlockersTests.test_disposable_postgresql_concurrent_claims_and_ambiguous_submission",
+              "tests.test_postgres_integrity.PostgresIntegrityTests.test_disposable_postgresql_grouping_moves_merges_invalidation_and_csv_export",
+              "tests.test_postgres_integrity.PostgresIntegrityTests.test_disposable_postgresql_concurrent_claims_and_ambiguous_submission",
           ]
           suite = unittest.defaultTestLoader.loadTestsFromNames(targets)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
