@@ -350,6 +350,10 @@ def _ensure_inventory_workspace_schema(db: _Database) -> None:
             analysis_job_id TEXT NOT NULL DEFAULT '',
             seller_confirmed INTEGER NOT NULL DEFAULT 0,
             seller_confirmed_json TEXT NOT NULL DEFAULT '{}',
+            approval_content_hash TEXT NOT NULL DEFAULT '',
+            approved_content_hash TEXT,
+            approved_at TEXT,
+            approved_by TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -395,8 +399,11 @@ def _ensure_inventory_workspace_schema(db: _Database) -> None:
             item_id TEXT NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
             seller_id TEXT NOT NULL REFERENCES sellers(id),
             batch_id TEXT REFERENCES inventory_batches(id) ON DELETE SET NULL,
-            feed_task_id TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'submitted',
+            feed_task_id TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            submission_stage TEXT NOT NULL DEFAULT 'validating',
+            idempotency_key TEXT NOT NULL DEFAULT '',
+            listing_snapshot TEXT NOT NULL DEFAULT '{}',
             result_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -414,6 +421,27 @@ def _ensure_inventory_workspace_schema(db: _Database) -> None:
     item_cols = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(inventory_items)").fetchall()}
     if "seller_confirmed_json" not in item_cols:
         db.execute("ALTER TABLE inventory_items ADD COLUMN seller_confirmed_json TEXT NOT NULL DEFAULT '{}'")
+    if "approval_content_hash" not in item_cols:
+        db.execute("ALTER TABLE inventory_items ADD COLUMN approval_content_hash TEXT NOT NULL DEFAULT ''")
+    if "approved_content_hash" not in item_cols:
+        db.execute("ALTER TABLE inventory_items ADD COLUMN approved_content_hash TEXT")
+    if "approved_at" not in item_cols:
+        db.execute("ALTER TABLE inventory_items ADD COLUMN approved_at TEXT")
+    if "approved_by" not in item_cols:
+        db.execute("ALTER TABLE inventory_items ADD COLUMN approved_by TEXT NOT NULL DEFAULT ''")
+    sub_cols = {str(row[1]) for row in db.connection.execute("PRAGMA table_info(inventory_submissions)").fetchall()}
+    if "submission_stage" not in sub_cols:
+        db.execute("ALTER TABLE inventory_submissions ADD COLUMN submission_stage TEXT NOT NULL DEFAULT 'validating'")
+    if "idempotency_key" not in sub_cols:
+        db.execute("ALTER TABLE inventory_submissions ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''")
+    if "listing_snapshot" not in sub_cols:
+        db.execute("ALTER TABLE inventory_submissions ADD COLUMN listing_snapshot TEXT NOT NULL DEFAULT '{}'")
+    db.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS inventory_submissions_active_item_idx
+           ON inventory_submissions(item_id)
+           WHERE status IN ('claiming', 'submitted', 'processing', 'ambiguous')"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS inventory_submissions_active_idx ON inventory_submissions(item_id, seller_id, status, submission_stage)")
 
 
 def ebay_scope_status() -> dict[str, Any]:
