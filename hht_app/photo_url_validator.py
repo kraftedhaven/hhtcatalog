@@ -184,20 +184,26 @@ def _verify_response_headers(response: Any, ctx: PhotoCheckContext) -> None:
         _raise_photo_error(ctx.item_index, "has a photo URL that is not an image.")
 
 
+def _collect_bounded_chunks(iter_fn: Any, ctx: PhotoCheckContext) -> list[bytes]:
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in iter_fn(chunk_size=16384):
+        if chunk:
+            total += len(chunk)
+            if total > ctx.max_bytes:
+                _raise_photo_error(ctx.item_index, "has a photo URL returning a response that exceeds the size limit.")
+            chunks.append(chunk)
+    return chunks
+
+
 def _read_bounded_body(response: Any, ctx: PhotoCheckContext) -> bytes:
     iter_fn = getattr(response, "iter_content", None)
     if not callable(iter_fn):
         return getattr(response, "content", b"")
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in iter_fn(chunk_size=16384):
-        if not chunk:
-            continue
-        total += len(chunk)
-        if total > ctx.max_bytes:
-            _raise_photo_error(ctx.item_index, "has a photo URL returning a response that exceeds the size limit.")
-        chunks.append(chunk)
-    return b"".join(chunks)
+    try:
+        return b"".join(_collect_bounded_chunks(iter_fn, ctx))
+    except (requests.RequestException, OSError) as exc:
+        _raise_photo_error(ctx.item_index, "has an unreachable photo URL.", exc)
 
 
 def _verify_decoded_image(full_data: bytes, ctx: PhotoCheckContext) -> None:

@@ -92,6 +92,23 @@ class PhotoUrlValidatorTests(unittest.TestCase):
                 _validate_image_url("https://cdn.example.com/photos/initial.jpg", 1, 5.0)
         self.assertIn("non-HTTPS", err_ctx.exception.safe_message)
 
+    def test_hosted_image_stream_interruption_raises_validation_error(self):
+        import requests
+
+        def broken_stream(**kwargs):
+            yield b"\xff\xd8\xff\xe0"
+            raise requests.ConnectionError("Connection reset during photo body download")
+
+        mock_resp = mock.MagicMock(status_code=200, headers={"Content-Type": "image/jpeg"})
+        mock_resp.iter_content.side_effect = broken_stream
+
+        with mock.patch("hht_app.ebay_feed.requests.get", return_value=mock_resp), \
+             mock.patch("hht_app.ebay_feed._is_private_address", return_value=False):
+            with self.assertRaises(EbayFeedError) as ctx:
+                _validate_image_url("https://example.com/interrupted.jpg", 1, 5.0)
+        self.assertEqual(ctx.exception.operation, "validate_photo_url")
+        self.assertIn("unreachable photo url", ctx.exception.safe_message.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
