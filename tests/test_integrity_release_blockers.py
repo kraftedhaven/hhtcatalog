@@ -526,6 +526,28 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
         self.assertEqual(res.status_code, 403)
         self.assertEqual(inventory_workspace.get_item_submission_status(item_b["id"], self.seller_b)["feedTaskId"], "pending:b1")
 
+    def test_concurrent_edit_and_reapprove_before_claim_rejected(self):
+        """Editing and reapproving between preparation and claim acquisition must fail atomically."""
+        _, item = self._create_approved_item(self.seller_a, title="Race Coat")
+        orig_acquire = inventory_workspace._acquire_item_claim
+
+        def interleaved_acquire(prepared_item, listing_snapshot, seller_id, now, db):
+            inventory_workspace.patch_item(prepared_item["id"], seller_id, {"price": "99.00", "confirmAll": True})
+            reapproved = inventory_workspace.approve_items([prepared_item["id"]], seller_id)
+            self.assertEqual(reapproved["approvedCount"], 1)
+            return orig_acquire(prepared_item, listing_snapshot, seller_id, now, db)
+
+        with mock.patch("hht_app.inventory_workspace._acquire_item_claim", side_effect=interleaved_acquire), \
+             mock.patch("hht_app.inventory_workspace.upload_seller_hub_draft_csv") as uploader:
+            with self.assertRaises(ValueError) as ctx:
+                inventory_workspace.submit_approved_drafts([item["id"]], self.seller_a)
+
+        self.assertIn("concurrently", str(ctx.exception).lower())
+        uploader.assert_not_called()
+        refreshed = inventory_workspace.get_item(item["id"], self.seller_a)
+        self.assertEqual(refreshed["workflowStatus"], "approved")
+        self.assertEqual(str(refreshed["listing"].get("price")), "99.00")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1810,19 +1810,21 @@ def _acquire_item_claim(
 ) -> str:
     _check_duplicate_submission(item["id"], seller_id, db)
     sub_id = str(uuid.uuid4())
-    seed_hash = item.get("approvalContentHash") or _content_hash(item["listing"])
+    checked_hash = str(item.get("approvalContentHash") or "")
+    seed_hash = checked_hash or _content_hash(item["listing"])
     idempotency_key = hashlib.sha256(f"{seller_id}:{item['id']}:{seed_hash}".encode("utf-8")).hexdigest()
     cur = db.execute(
         """UPDATE inventory_items
            SET workflow_status = 'claiming', updated_at = ?
-           WHERE id = ? AND workflow_status = 'approved' AND seller_id = ?""",
-        (now, item["id"], seller_id),
+           WHERE id = ? AND workflow_status = 'approved' AND seller_id = ?
+             AND approval_content_hash = ?""",
+        (now, item["id"], seller_id, checked_hash),
     )
     rowcount = getattr(cur, "rowcount", None)
     if rowcount is not None and rowcount == 0:
         raise ValueError(
             f"Item {item['id']} already has an active or ambiguous draft submission "
-            "(or was modified concurrently). Check existing status before retrying."
+            "(or its approved content changed concurrently). Check existing status before retrying."
         )
     try:
         db.execute(
