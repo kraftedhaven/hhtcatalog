@@ -304,10 +304,10 @@ class InventoryWorkspaceTests(unittest.TestCase):
         def authenticate():
             # pyrefly: ignore[missing-import]
             from flask import g
-            g.supabase_user = {"sub": self.auth_user_id}
+            g.neon_user = {"sub": self.auth_user_id}
 
         with mock.patch("app.authenticate_request", side_effect=authenticate), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
 
             # 1. Create batch
             res = client.post("/api/inventory/batches", json={"name": "API Batch", "groupingMode": "2"})
@@ -376,10 +376,10 @@ class InventoryWorkspaceTests(unittest.TestCase):
         def authenticate():
             # pyrefly: ignore[missing-import]
             from flask import g
-            g.supabase_user = {"sub": self.auth_user_id}
+            g.neon_user = {"sub": self.auth_user_id}
 
         with mock.patch("app.authenticate_request", side_effect=authenticate), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}), \
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}), \
              mock.patch("app.store_photo", return_value={"assetId": "asset-1", "ebayUrl": ""}), \
              mock.patch("app.inventory_workspace.register_batch_photos") as register:
             batch = inventory_workspace.create_batch(self.seller_id, name="Storage Failure", grouping_mode="1")
@@ -403,11 +403,11 @@ class InventoryWorkspaceTests(unittest.TestCase):
         def authenticate():
             # pyrefly: ignore[missing-import]
             from flask import g
-            g.supabase_user = {"sub": self.auth_user_id}
+            g.neon_user = {"sub": self.auth_user_id}
 
         with mock.patch.dict(os.environ, {"EBAY_MUTATIONS_ENABLED": "false"}):
             with mock.patch("app.authenticate_request", side_effect=authenticate), \
-                 mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+                 mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
                 res = client.post("/api/ebay/drafts", json={"item": {"title": "Test"}})
             self.assertEqual(res.status_code, 403)
             self.assertIn("mutations are disabled", res.get_json()["error"])
@@ -441,10 +441,10 @@ class InventoryWorkspaceTests(unittest.TestCase):
         def authenticate():
             # pyrefly: ignore[missing-import]
             from flask import g
-            g.supabase_user = {"sub": self.auth_user_id}
+            g.neon_user = {"sub": self.auth_user_id}
 
         with mock.patch("app.authenticate_request", side_effect=authenticate), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
             res = client.put(f"/api/inventory/batches/{batch['id']}/photos/groups", json={"mode": "1", "force": False})
             self.assertEqual(res.status_code, 409)
             data = res.get_json()
@@ -948,10 +948,10 @@ class InventoryWorkspaceTests(unittest.TestCase):
         client = hht_app.app.test_client()
         def authenticate():
             from flask import g
-            g.supabase_user = {"sub": self.auth_user_id}
+            g.neon_user = {"sub": self.auth_user_id}
 
         with mock.patch("app.authenticate_request", side_effect=authenticate), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}), \
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}), \
              mock.patch("hht_app.inventory_workspace.urllib.request.urlopen", return_value=MockResponse()):
             http_res = client.post(
                 f"/api/inventory/batches/{batch['id']}/analyze",
@@ -1148,10 +1148,10 @@ class InventoryWorkspaceTests(unittest.TestCase):
 
         def authenticate():
             from flask import g
-            g.supabase_user = {"sub": self.auth_user_id}
+            g.neon_user = {"sub": self.auth_user_id}
 
         with mock.patch("app.authenticate_request", side_effect=authenticate), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
 
             # Create batch
             res = client.post("/api/inventory/batches", json={"name": "API Photos Batch"})
@@ -1350,10 +1350,10 @@ class InventoryWorkspaceTests(unittest.TestCase):
 
         def authenticate():
             from flask import g
-            g.supabase_user = {"sub": self.auth_user_id}
+            g.neon_user = {"sub": self.auth_user_id}
 
         with mock.patch("app.authenticate_request", side_effect=authenticate), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_id, "auth_user_id": self.auth_user_id}):
 
             batch = inventory_workspace.create_batch(self.seller_id, name="Route Merge Batch", grouping_mode="manual")
             photos = inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [

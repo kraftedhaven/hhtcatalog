@@ -1,5 +1,4 @@
 <script>
-    import { onMount } from "svelte";
     import "./app.css";
     import {
         analyzeImages,
@@ -31,7 +30,6 @@
     import CommerceAgent from "$lib/components/CommerceAgent.svelte";
     import InventoryWorkspace from "$lib/components/InventoryWorkspace.svelte";
     import AuthGate from "$lib/components/AuthGate.svelte";
-    import { supabase } from "$lib/supabase";
 
     const emptyItem = EMPTY_ITEM;
     const draftMinItems = 3;
@@ -194,7 +192,11 @@
         (photo) => selectedPhotoIds.includes(photo.id) && !photo.processed,
     );
 
-    onMount(() => {
+    let analysisJobsResumed = false;
+
+    function resumeAnalysisJobs() {
+        if (analysisJobsResumed) return;
+        analysisJobsResumed = true;
         const now = Date.now();
         // Reconcile and recover stale jobs stuck in queued or running states
         analysisJobs = analysisJobs.map((job) => {
@@ -216,26 +218,15 @@
         )) {
             void monitorListingAnalysis(job.jobId, []);
         }
-        if (supabase) {
-            void supabase.auth
-                .getSession()
-                .then(({ data: { session } }) => refreshPhotoStorage(session));
-            const {
-                data: { subscription },
-            } = supabase.auth.onAuthStateChange((_event, session) => {
-                setTimeout(() => refreshPhotoStorage(session), 0);
-            });
-            return () => subscription.unsubscribe();
-        }
-    });
+    }
 
-    async function refreshPhotoStorage(sessionOrEvent) {
+    async function handleSessionChange({ detail: session }) {
         const request = ++photoStorageRequest;
-        const session = sessionOrEvent?.detail ?? sessionOrEvent;
         if (!session) {
             photoStorage = { provider: "disabled", configured: false };
             return;
         }
+        resumeAnalysisJobs();
         try {
             const result = await photoStorageStatus();
             if (request === photoStorageRequest)
@@ -1789,7 +1780,7 @@
     }
 </script>
 
-<AuthGate on:sessionChange={refreshPhotoStorage}>
+<AuthGate on:sessionChange={handleSessionChange}>
     <div class="shell">
         <header class="topbar">
             <div>

@@ -1,6 +1,6 @@
 import { normalizeClientItem, normalizeClientPayloadItem } from './ebay.js';
 import { retryWithBackoff, getCachedCategorySearch, setCategorySearchCache } from './utils.js';
-import { getAccessToken } from './supabase.js';
+import { getAccessToken } from './neon-auth.js';
 
 const PUBLIC_API_URL = import.meta.env.DEV
     ? import.meta.env.VITE_PUBLIC_API_URL || import.meta.env.VITE_API_BASE_URL || ''

@@ -553,51 +553,18 @@ def record_analysis_run(
     return run
 
 
-def ensure_seller_identity(auth_user_id: str) -> dict[str, Any]:
-    """Return the seller bound to the caller, bootstrapping only the configured pilot."""
-    init_db()
-    with connect() as db:
-        seller = db.execute(
-            "SELECT * FROM sellers WHERE auth_user_id=? AND status='active'",
-            (auth_user_id,),
-        ).fetchone()
+def linked_neon_seller(claims: dict[str, Any]) -> dict[str, Any]:
+    subject = os.environ.get("NEON_AUTH_LINKED_USER_ID", "").strip()
+    seller_id = os.environ.get("NEON_AUTH_LINKED_SELLER_ID", "").strip()
+    if subject and seller_id and claims["sub"] == subject and claims.get("emailVerified") is True:
+        init_db()
+        with connect() as db:
+            seller = db.execute(
+                "SELECT * FROM sellers WHERE id=? AND status='active'", (seller_id,),
+            ).fetchone()
         if seller:
             return dict(seller)
-
-        bootstrap_user_id = os.environ.get("SELLER_BOOTSTRAP_AUTH_USER_ID", "").strip()
-        ebay_account_id = os.environ.get("EBAY_ACCOUNT_ID", "").strip()
-        if not bootstrap_user_id or not ebay_account_id or auth_user_id != bootstrap_user_id:
-            raise PermissionError("This Supabase user is not bound to an HHT seller account.")
-
-        seller_id = str(uuid.uuid4())
-        account_id = str(uuid.uuid4())
-        now = utc_now()
-        db.execute(
-            "INSERT INTO sellers(id,auth_user_id,status,created_at) VALUES(?,?,?,?)",
-            (seller_id, auth_user_id, "active", now),
-        )
-        db.execute(
-            "INSERT INTO ebay_accounts(id,seller_id,ebay_account_id,connected_at) VALUES(?,?,?,?)",
-            (account_id, seller_id, ebay_account_id, now),
-        )
-        # Legacy catalog data is adopted only by the preconfigured pilot user.
-        db.execute(
-            "UPDATE listings SET seller_id=?, ebay_account_id=? WHERE seller_id IS NULL",
-            (seller_id, account_id),
-        )
-        db.execute(
-            "UPDATE recommendations SET seller_id=? WHERE seller_id IS NULL",
-            (seller_id,),
-        )
-        db.execute(
-            "UPDATE actions SET seller_id=? WHERE seller_id IS NULL",
-            (seller_id,),
-        )
-        db.execute(
-            "UPDATE rotation_actions SET seller_id=? WHERE seller_id IS NULL",
-            (seller_id,),
-        )
-        return {"id": seller_id, "auth_user_id": auth_user_id, "status": "active"}
+    raise PermissionError("A verified Neon account must be linked to an active HHT seller account.")
 
 
 def _ensure_phase4_schema(db: _Database) -> None:

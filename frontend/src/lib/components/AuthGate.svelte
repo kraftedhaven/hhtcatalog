@@ -1,8 +1,10 @@
 <script>
     import { createEventDispatcher, onMount } from "svelte";
-    import { isSupabaseConfigured, supabase } from "$lib/supabase";
+    import { checkSellerAccess, loadAuthClient } from "$lib/neon-auth";
 
     const dispatch = createEventDispatcher();
+    let auth;
+    let sellerAccess = false;
     let email = "";
     let password = "";
     let mode = "sign-in";
@@ -13,66 +15,76 @@
     let error = "";
 
     onMount(() => {
-        if (!supabase) {
-            loading = false;
-            return;
-        }
-
-        supabase.auth.getSession().then(({ data, error: sessionError }) => {
-            session = data.session;
-            error = sessionError?.message || "";
-            loading = false;
-            dispatch("sessionChange", session);
-        });
-
-        const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-            session = nextSession;
-            loading = false;
-            dispatch("sessionChange", session);
-        });
-
-        return () => listener.subscription.unsubscribe();
+        void initialize();
     });
+
+    async function initialize() {
+        try {
+            auth = await loadAuthClient();
+            await refreshSession();
+        } catch (cause) {
+            error = cause.message;
+        } finally {
+            loading = false;
+        }
+    }
+
+    async function refreshSession() {
+        const result = await auth.getSession();
+        if (result.error) throw new Error(result.error.message);
+        session = result.data || null;
+        sellerAccess = false;
+        if (session) sellerAccess = await checkSellerAccess();
+        dispatch("sessionChange", sellerAccess ? session : null);
+    }
 
     async function submit() {
         error = "";
         message = "";
         submitting = true;
-
-        const credentials = { email, password };
-        const result = mode === "sign-in"
-            ? await supabase.auth.signInWithPassword(credentials)
-            : await supabase.auth.signUp({
-                ...credentials,
-                options: { emailRedirectTo: window.location.origin },
-            });
-
-        submitting = false;
-
-        if (result.error) {
-            error = result.error.message;
-            return;
-        }
-
-        if (mode === "sign-up" && !result.data.session) {
-            message = "Check your email to confirm your account, then return here to sign in.";
+        try {
+            const credentials = { email, password };
+            const result = mode === "sign-in"
+                ? await auth.signIn.email(credentials)
+                : await auth.signUp.email({
+                    ...credentials,
+                    name: email.split("@")[0],
+                    callbackURL: window.location.origin,
+                });
+            if (result.error) throw new Error(result.error.message);
+            password = "";
+            await refreshSession();
+            if (mode === "sign-up" && !session) {
+                message = "Check your email to confirm your account, then return here to sign in.";
+            }
+        } catch (cause) {
+            error = cause.message;
+        } finally {
+            submitting = false;
         }
     }
 
     async function signOut() {
         error = "";
-        const { error: signOutError } = await supabase.auth.signOut();
-        error = signOutError?.message || "";
+        try {
+            const result = await auth.signOut();
+            if (result.error) throw new Error(result.error.message);
+            session = null;
+            sellerAccess = false;
+            dispatch("sessionChange", null);
+        } catch (cause) {
+            error = cause.message;
+        }
     }
 </script>
 
 {#if loading}
     <main class="auth-shell"><p>Checking your session...</p></main>
-{:else if !isSupabaseConfigured}
+{:else if !auth}
     <main class="auth-shell">
         <section class="auth-panel">
             <h1>HHT Catalog</h1>
-            <p>Authentication needs Supabase environment variables before this app can be opened.</p>
+            <p>{error}</p>
         </section>
     </main>
 {:else if session}
@@ -80,7 +92,18 @@
         <span>{session.user.email}</span>
         <button type="button" on:click={signOut}>Sign out</button>
     </div>
-    <slot />
+    {#if sellerAccess}
+        {#if error}<p class="auth-error" role="alert">{error}</p>{/if}
+        <slot />
+    {:else}
+        <main class="auth-shell">
+            <section class="auth-panel">
+                <h1>Seller access required</h1>
+                <p>{error || "Verify your Neon account and have it linked to your existing HHT seller record."}</p>
+                <button type="button" on:click={() => window.location.reload()}>Check access again</button>
+            </section>
+        </main>
+    {/if}
 {:else}
     <main class="auth-shell">
         <section class="auth-panel">

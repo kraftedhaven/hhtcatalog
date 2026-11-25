@@ -20,7 +20,7 @@ from hht_app.seller_hub_draft_template import DraftExportValidationError, export
 from hht_app.photo_quality import assess_image
 from hht_app.photo_storage import PhotoStorageError, storage_status, store_photo
 from hht_app.sentry import init_sentry
-from hht_app.supabase_auth import authenticate_request
+from hht_app.neon_auth import auth_url, authenticate_request
 
 
 PORT = int(os.environ.get("PORT", 8080))
@@ -64,6 +64,7 @@ def ebay_drafts_enabled() -> bool:
 
 
 _SELLER_AUTH_EXACT_PATHS = frozenset({
+    "/api/auth/seller",
     "/bulk-analyze",
     "/api/nvidia/analyze/start",
     "/api/photos",
@@ -102,7 +103,7 @@ def _requires_seller_auth() -> bool:
 
 
 @app.before_request
-def require_supabase_auth():
+def require_neon_auth():
     if request.method == "OPTIONS" or request.endpoint == "static":
         return None
     if request.path in PUBLIC_AUTH_PATHS:
@@ -113,12 +114,22 @@ def require_supabase_auth():
     if response is not None:
         return response
     try:
-        seller = commerce_agent.ensure_seller_identity(str(g.supabase_user["sub"]))
+        seller = commerce_agent.linked_neon_seller(g.neon_user)
     except PermissionError as exc:
         return jsonify({"error": str(exc)}), 403
     g.seller_id = seller["id"]
-    g.auth_user_id = str(g.supabase_user["sub"])
+    g.auth_user_id = g.neon_user["sub"]
     return None
+
+
+@app.get("/api/auth/config")
+def neon_auth_config():
+    return jsonify(authUrl=auth_url()), 200, {"Cache-Control": "no-store"}
+
+
+@app.get("/api/auth/seller")
+def neon_seller_access():
+    return jsonify(sellerId=g.seller_id), 200, {"Cache-Control": "no-store"}
 
 
 @app.errorhandler(PermissionError)
