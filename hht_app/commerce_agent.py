@@ -2102,6 +2102,8 @@ _ATTRIBUTE_EXTRACT_KEYS = (
     "serialNumber", "measurements", "cnote",
 )
 
+_SUPPLEMENTAL_TEXT_KEYS = ("desc", "notes", "labelOcr", "conditionNotes")
+
 
 def _provenance_entry(
     source: str,
@@ -2203,6 +2205,26 @@ def _attribute_provenance(ai_val: str, raw_prov_map: dict[str, Any], key: str, n
     return _provenance_entry(source, conf, ev, legacy_source=legacy, extra={"timestamp": now})
 
 
+def _merge_supplemental_text_fields(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    provenance: dict[str, Any],
+    confirmed: set[str],
+) -> None:
+    """Apply unconfirmed descriptive text fields (desc, notes, OCR, conditionNotes)."""
+    for key in _SUPPLEMENTAL_TEXT_KEYS:
+        if key in confirmed:
+            continue
+        ai_val = str(raw_ai.get(key) or "").strip()
+        if not ai_val:
+            continue
+        working[key] = ai_val
+        provenance.setdefault(
+            key,
+            _provenance_entry("ai_inference", "medium", f"Analyzed {key} text."),
+        )
+
+
 def _merge_visual_attributes(
     working: dict[str, Any],
     raw_ai: dict[str, Any],
@@ -2223,6 +2245,7 @@ def _merge_visual_attributes(
             provenance[key] = _provenance_entry(
                 "missing", "none", "Not observed in photos; seller confirmation required.", extra={"timestamp": now}
             )
+    _merge_supplemental_text_fields(working, raw_ai, provenance, confirmed)
     _apply_category_defaults(working, raw_ai, provenance, confirmed, now)
 
 
@@ -2374,7 +2397,9 @@ def _apply_default_condition_note(
     confirmed: set[str],
     now: str,
 ) -> None:
-    if "cnote" in confirmed or str(working.get("cnote") or "").strip():
+    if "cnote" in confirmed:
+        return
+    if str(working.get("cnote") or "").strip():
         return
     working["cnote"] = str(raw_ai.get("cnote") or "Pre-owned in good condition.")
     prov["cnote"] = _provenance_entry(

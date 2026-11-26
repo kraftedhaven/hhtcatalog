@@ -1583,6 +1583,53 @@ class InventoryWorkspaceTests(unittest.TestCase):
         self.assertIn("commerceAgent", l)
         self.assertFalse(l["insufficientMarketEvidence"])
 
+    def test_reanalysis_retains_unconfirmed_desc_and_notes_while_protecting_confirmed(self):
+        """Persisted analysis/reanalysis applies analyzed desc and notes unless seller-confirmed."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Reanalysis Desc Batch", grouping_mode="1")
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "sweater.jpg", "previewUrl": "https://example.com/sweater.jpg", "storageUrl": "https://example.com/sweater.jpg"}
+        ])
+        item = inventory_workspace.list_batch_items(batch["id"], self.seller_id)[0]
+
+        first = inventory_workspace.prepopulate_item_from_analysis(
+            item["id"],
+            self.seller_id,
+            {
+                "listing": {
+                    "title": "Wool Crewneck Sweater",
+                    "brand": "Pendleton",
+                    "type": "Sweater",
+                    "desc": "Soft Virgin Wool crewneck sweater in dark green.",
+                    "notes": "No moth holes observed in photos.",
+                }
+            },
+        )
+        self.assertEqual(first["listing"]["desc"], "Soft Virgin Wool crewneck sweater in dark green.")
+        self.assertEqual(first["listing"]["notes"], "No moth holes observed in photos.")
+
+        # Confirm desc only; re-analysis updates notes without clobbering confirmed desc
+        inventory_workspace.patch_item(
+            item["id"],
+            self.seller_id,
+            {"desc": "Seller Verified Virgin Wool Sweater Description", "confirmField": "desc"},
+        )
+        second = inventory_workspace.prepopulate_item_from_analysis(
+            item["id"],
+            self.seller_id,
+            {
+                "listing": {
+                    "title": "Pendleton Wool Crewneck Sweater",
+                    "brand": "Pendleton",
+                    "type": "Sweater",
+                    "desc": "AI overwrite should be blocked",
+                    "notes": "Updated inspection note: ribbed cuffs clean.",
+                }
+            },
+            preserve_seller_edits=True,
+        )
+        self.assertEqual(second["listing"]["desc"], "Seller Verified Virgin Wool Sweater Description")
+        self.assertEqual(second["listing"]["notes"], "Updated inspection note: ribbed cuffs clean.")
+
 
 if __name__ == "__main__":
     unittest.main()

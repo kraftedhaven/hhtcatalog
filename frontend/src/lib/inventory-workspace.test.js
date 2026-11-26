@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
+    combinePatchMaps,
     findFirstMissingFieldTarget,
     formatProvenanceClassification,
     getMarketPricingEvidence,
@@ -155,6 +156,20 @@ test('mergePolledItemsWithPending preserves unsaved edits and findFirstMissingFi
     const evtTarget = findFirstMissingFieldTarget(merged, { type: 'click', target: {} });
     assert.equal(evtTarget.item.id, 'item-1');
     assert.equal(evtTarget.fieldId, 'inspector-category-input');
+
+    const inflight = new Map([['item-1', { price: '28.50', confirmField: 'price' }]]);
+    const queued = new Map([['item-1', { title: 'Newer Unsaved Title' }]]);
+    const protectedPatches = combinePatchMaps(inflight, queued);
+    const currentForInflight = [
+        {
+            id: 'item-1',
+            listing: { title: 'Newer Unsaved Title', price: '28.50', cat: '' },
+        },
+    ];
+    const afterStalePoll = mergePolledItemsWithPending(serverItems, currentForInflight, protectedPatches);
+    assert.equal(afterStalePoll[0].listing.price, '28.50');
+    assert.equal(afterStalePoll[0].listing.title, 'Newer Unsaved Title');
+    assert.equal(afterStalePoll[0].provenance.price.sellerConfirmed, true);
 });
 
 test('inventory API contract includes seller-scoped persistence operations', () => {

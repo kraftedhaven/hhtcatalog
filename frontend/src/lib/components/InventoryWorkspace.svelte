@@ -42,6 +42,7 @@
         getTitleCandidateEntries,
         getMarketPricingEvidence,
         formatProvenanceClassification,
+        combinePatchMaps,
         mergePolledItemsWithPending,
         findFirstMissingFieldTarget,
         INSUFFICIENT_MARKET_MESSAGE,
@@ -177,6 +178,12 @@
     let autosaveStatus = "idle"; // idle, saving, saved, error
     let autosaveTimeout = null;
     let pendingPatches = new Map(); // itemId -> { field: value }
+    let inflightPatches = new Map(); // itemId -> { field: value } currently saving
+    let localEditGeneration = 0;
+
+    function getProtectedPatches() {
+        return combinePatchMaps(inflightPatches, pendingPatches);
+    }
 
     // Upload & Grouping Drawer / Modal
     let isUploadOpen = false;
@@ -238,16 +245,21 @@
         if (analysisPollInFlight || !selectedBatchId) return;
         const requestBatchId = selectedBatchId;
         const requestId = ++activePollRequestId;
+        const pollGen = localEditGeneration;
         analysisPollInFlight = true;
         try {
             const freshItems = await inventoryListBatchItems(requestBatchId);
-            if (requestId !== activePollRequestId || selectedBatchId !== requestBatchId) {
+            if (
+                pollGen !== localEditGeneration ||
+                requestId !== activePollRequestId ||
+                selectedBatchId !== requestBatchId
+            ) {
                 return;
             }
             const merged = mergePolledItemsWithPending(
                 freshItems,
                 items,
-                pendingPatches,
+                getProtectedPatches(),
             );
             items = merged;
             if (inspectingItemId) {
@@ -345,6 +357,8 @@
     async function selectBatch(batchId) {
         stopAnalysisPolling();
         wasAnalyzing = false;
+        inflightPatches.clear();
+        localEditGeneration += 1;
         selectedBatchId = batchId;
         batchLoading = true;
         selectedItemIds = new Set();
@@ -382,7 +396,7 @@
             const latest = await inventoryListBatchItems(requestBatchId);
             const latestPhotos = await inventoryListBatchPhotos(requestBatchId).catch(() => []);
             if (selectedBatchId !== requestBatchId) return;
-            items = mergePolledItemsWithPending(latest, items, pendingPatches);
+            items = mergePolledItemsWithPending(latest, items, getProtectedPatches());
             batchPhotos = latestPhotos;
             if (inspectingItemId) {
                 inspectingItem = items.find((it) => it.id === inspectingItemId) || null;
@@ -1033,7 +1047,7 @@
         try {
             await inventoryAnalyzeBatch(selectedBatchId, ids);
             const refreshed = await inventoryListBatchItems(selectedBatchId);
-            items = mergePolledItemsWithPending(refreshed, items, pendingPatches);
+            items = mergePolledItemsWithPending(refreshed, items, getProtectedPatches());
             wasAnalyzing = true;
             ensureAnalysisPolling();
             globalStatus = `Analysis queued for ${ids.length} item(s). Commerce Agent is optimizing titles and market pricing.`;
@@ -1063,7 +1077,7 @@
         try {
             await inventoryAnalyzeBatch(selectedBatchId, unconfirmedIds);
             const refreshed = await inventoryListBatchItems(selectedBatchId);
-            items = mergePolledItemsWithPending(refreshed, items, pendingPatches);
+            items = mergePolledItemsWithPending(refreshed, items, getProtectedPatches());
             wasAnalyzing = true;
             ensureAnalysisPolling();
             globalStatus = `Reprocessing ${unconfirmedIds.length} unconfirmed item(s). Seller-confirmed edits are preserved.`;
@@ -1167,6 +1181,8 @@
         const currentPatch = pendingPatches.get(item.id) || {};
         currentPatch[field] = value;
         pendingPatches.set(item.id, currentPatch);
+        localEditGeneration += 1;
+        activePollRequestId += 1;
 
         autosaveStatus = "saving";
         if (autosaveTimeout) clearTimeout(autosaveTimeout);
@@ -1179,19 +1195,37 @@
             return;
         }
         autosaveStatus = "saving";
-        const entries = Array.from(pendingPatches.entries());
+        localEditGeneration += 1;
+        activePollRequestId += 1;
+        const entries = Array.from(pendingPatches.entries()).map(([itemId, patchData]) => [
+            itemId,
+            { ...patchData },
+        ]);
+        for (const [itemId, patchData] of entries) {
+            inflightPatches.set(itemId, { ...(inflightPatches.get(itemId) || {}), ...patchData });
+        }
         pendingPatches.clear();
 
+        let idxEntry = 0;
         try {
-            for (const [itemId, patchData] of entries) {
+            for (; idxEntry < entries.length; idxEntry++) {
+                const [itemId, patchData] = entries[idxEntry];
                 const updated = await inventoryPatchItem(itemId, patchData);
-                // Update in items list
+                localEditGeneration += 1;
+                activePollRequestId += 1;
+                inflightPatches.delete(itemId);
+                const protectedPatch = getProtectedPatches();
+                const protectedUpdated = mergePolledItemsWithPending(
+                    [updated],
+                    items,
+                    protectedPatch,
+                )[0];
                 const idx = items.findIndex((it) => it.id === itemId);
                 if (idx !== -1) {
-                    items[idx] = updated;
+                    items[idx] = protectedUpdated;
                 }
                 if (inspectingItem && inspectingItem.id === itemId) {
-                    inspectingItem = updated;
+                    inspectingItem = protectedUpdated;
                 }
             }
             items = [...items];
@@ -1200,6 +1234,14 @@
                 if (autosaveStatus === "saved") autosaveStatus = "idle";
             }, 2500);
         } catch (err) {
+            for (let j = idxEntry; j < entries.length; j++) {
+                const [failedId, failedPatch] = entries[j];
+                inflightPatches.delete(failedId);
+                pendingPatches.set(failedId, {
+                    ...failedPatch,
+                    ...(pendingPatches.get(failedId) || {}),
+                });
+            }
             autosaveStatus = "error";
             globalError = `Autosave failed: ${err.message}. Retrying on next change.`;
         }
@@ -1331,7 +1373,7 @@
                 itemId,
             ]);
             const refreshed = await inventoryListBatchItems(selectedBatchId);
-            items = mergePolledItemsWithPending(refreshed, items, pendingPatches);
+            items = mergePolledItemsWithPending(refreshed, items, getProtectedPatches());
             if (inspectingItemId === itemId) {
                 inspectingItem =
                     items.find((item) => item.id === itemId) || inspectingItem;
@@ -1576,7 +1618,7 @@
             items = mergePolledItemsWithPending(
                 uploadResult.items,
                 items,
-                pendingPatches,
+                getProtectedPatches(),
             );
             const newItemIds = items
                 .filter((item) => !existingItemIds.has(item.id))
@@ -1587,7 +1629,7 @@
                 items = mergePolledItemsWithPending(
                     latestAfterQueue,
                     items,
-                    pendingPatches,
+                    getProtectedPatches(),
                 );
                 wasAnalyzing = true;
                 ensureAnalysisPolling();
@@ -1706,7 +1748,7 @@
                         const mergedList = mergePolledItemsWithPending(
                             items.map((it) => (it.id === item.id ? refreshedItem : it)),
                             items,
-                            pendingPatches,
+                            getProtectedPatches(),
                         );
                         items = mergedList;
                         if (inspectingItemId === item.id) {

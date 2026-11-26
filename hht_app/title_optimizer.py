@@ -101,10 +101,10 @@ def _clean_department(raw_dept: str) -> str:
 
 
 def _is_usable_attr(raw: str) -> bool:
-    lowered = raw.casefold()
-    if not raw or lowered in STOP:
+    if not raw:
         return False
-    return lowered not in DEFAULT_FILLER_VALUES
+    lowered = raw.casefold()
+    return lowered not in STOP and lowered not in DEFAULT_FILLER_VALUES
 
 
 def _valid_active(active: Any) -> bool:
@@ -131,21 +131,17 @@ def _dict_query_value(mapping: Any, field: str, sample_count: int) -> Any:
     return mapping.get(field)
 
 
-def _collect_market_queries(
-    ctx: dict[str, Any],
-    sold: Any,
-    active: Any,
-    item: dict[str, Any],
-    sold_count: int,
-    active_count: int,
-) -> list[str]:
-    has_any = sold_count > 0 or active_count > 0
+def _collect_market_queries(ctx: dict[str, Any], sources: dict[str, Any]) -> list[str]:
+    sold_count = int(sources.get("soldCount") or 0)
+    active_count = int(sources.get("activeCount") or 0)
+    item = sources.get("item") or {}
+    fallback_kw = item.get("pricingSearchKeywords") if (sold_count > 0 or active_count > 0) else ""
     raw_candidates = [
         ctx.get("keyword"),
         ctx.get("query"),
-        _dict_query_value(sold, "query", sold_count),
-        _dict_query_value(active, "keyword", active_count),
-        item.get("pricingSearchKeywords") if has_any else "",
+        _dict_query_value(sources.get("sold"), "query", sold_count),
+        _dict_query_value(sources.get("active"), "keyword", active_count),
+        fallback_kw,
     ]
     seen: list[str] = []
     for candidate in raw_candidates:
@@ -169,7 +165,10 @@ def _extract_market_context(item: dict[str, Any], market_context: dict[str, Any]
     sold_count = _valid_sold_count(sold, ctx)
     raw_active_n = active.get("sampleSize") if _valid_active(active) else 0
     active_count = int(ctx.get("activeSampleSize") or raw_active_n or 0)
-    queries = _collect_market_queries(ctx, sold, active, item, sold_count, active_count)
+    queries = _collect_market_queries(
+        ctx,
+        {"sold": sold, "active": active, "item": item, "soldCount": sold_count, "activeCount": active_count},
+    )
     return {
         "soldSampleSize": sold_count,
         "activeSampleSize": active_count,
@@ -201,16 +200,24 @@ def _clean_values(item: dict[str, Any], category_name: str = "") -> dict[str, st
     return values
 
 
+def _should_skip_token(cleaned: str, excluded_cf: str, seen_cf: set[str]) -> bool:
+    if len(cleaned) < 2:
+        return True
+    low = cleaned.casefold()
+    if low in excluded_cf or low in STOP:
+        return True
+    return low in seen_cf
+
+
 def _unique_novel_tokens(text: str, excluded_cf: str, limit: int) -> list[str]:
     tokens: list[str] = []
     seen_cf: set[str] = set()
     for raw in re.findall(r"[A-Za-z0-9'&-]+", text):
         cleaned = raw.strip("-'&")
-        low = cleaned.casefold()
-        if len(cleaned) < 2 or low in excluded_cf or low in STOP or low in seen_cf:
+        if _should_skip_token(cleaned, excluded_cf, seen_cf):
             continue
         tokens.append(cleaned)
-        seen_cf.add(low)
+        seen_cf.add(cleaned.casefold())
         if len(tokens) >= limit:
             break
     return tokens
@@ -240,15 +247,14 @@ def _append_tokens_dedup(parts: list[str], tokens: list[str]) -> list[str]:
 def _build_candidate_title(
     values: dict[str, str],
     keys: tuple[str, ...],
-    extras: list[str],
-    market_tokens: list[str],
-    current: str,
+    token_bundle: dict[str, Any],
 ) -> str:
     brand_prefix = values.get("brand", "")
     parts: list[str] = []
     _append_tokens_dedup(parts, [values[k] for k in keys if k in values])
-    _append_tokens_dedup(parts, extras)
-    _append_tokens_dedup(parts, market_tokens)
+    _append_tokens_dedup(parts, list(token_bundle.get("extras") or []))
+    _append_tokens_dedup(parts, list(token_bundle.get("market") or []))
+    current = str(token_bundle.get("current") or "")
     if not parts:
         return fit_title(current, brand_prefix) if current else ""
     return fit_title(re.sub(r"\s+", " ", " ".join(parts)).strip(), brand_prefix)
@@ -285,24 +291,20 @@ def _strategy_profile(has_evidence: bool) -> dict[str, Any]:
 
 def _build_candidates(
     values: dict[str, str],
-    extras: list[str],
-    market_tokens: list[str],
-    current: str,
     mctx: dict[str, Any],
-    confidence: str,
+    candidate_ctx: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    has_evidence = mctx["hasMarketEvidence"]
+    has_evidence = bool(mctx["hasMarketEvidence"])
     prof = _strategy_profile(has_evidence)
+    extras = list(candidate_ctx.get("extras") or [])
+    market_tokens = list(candidate_ctx.get("market") or []) if has_evidence else []
+    current = str(candidate_ctx.get("current") or "")
+    confidence = str(candidate_ctx.get("confidence") or "low")
     candidates: dict[str, dict[str, Any]] = {}
 
     for name, keys, reason, base_score in _STRATEGY_SPECS:
-        cand_title = _build_candidate_title(
-            values,
-            keys,
-            [] if name == "quick_sale" else extras,
-            market_tokens if has_evidence else [],
-            current,
-        )
+        bundle = {"extras": [] if name == "quick_sale" else extras, "market": market_tokens, "current": current}
+        cand_title = _build_candidate_title(values, keys, bundle)
         if not cand_title:
             continue
         score = min(100, base_score if has_evidence else max(50, base_score - 20))
@@ -373,30 +375,22 @@ def _compute_keyword_coverage(confirmed_keywords: list[str], best: str) -> float
     return round(matched / len(confirmed_keywords), 2)
 
 
-def _assemble_seo_metadata(
-    confirmed_keywords: list[str],
-    keyword_priority: list[dict[str, Any]],
-    keyword_evidence: list[str],
-    coverage: float,
-    prof: dict[str, Any],
-    confidence: str,
-    reasoning: str,
-    now: str,
-    has_evidence: bool,
-) -> dict[str, Any]:
+def _assemble_seo_metadata(meta_ctx: dict[str, Any]) -> dict[str, Any]:
+    prof = meta_ctx["profile"]
+    has_evidence = bool(meta_ctx["has_evidence"])
     return {
-        "confirmedKeywords": confirmed_keywords,
-        "keywordPriority": keyword_priority,
-        "keywordEvidence": keyword_evidence,
-        "keywordCoverage": coverage,
+        "confirmedKeywords": meta_ctx["confirmed_keywords"],
+        "keywordPriority": meta_ctx["keyword_priority"],
+        "keywordEvidence": meta_ctx["keyword_evidence"],
+        "keywordCoverage": meta_ctx["coverage"],
         "titleLimit": 80,
         "strategy": prof["strategy"],
         "strategyLabel": prof["label"],
         "isFallback": not has_evidence,
-        "confidence": confidence,
+        "confidence": meta_ctx["confidence"],
         "provenanceSource": prof["provenanceSource"],
-        "productReasoning": reasoning,
-        "timestamp": now,
+        "productReasoning": meta_ctx["reasoning"],
+        "timestamp": meta_ctx["now"],
         "source": "market_and_attributes" if has_evidence else "ai_attribute_fallback",
         "note": (
             "Title prioritized using brand, model, product attributes, and market query traction."
@@ -426,7 +420,9 @@ def optimize_title(
     market_tokens = _extract_market_tokens(mctx["queries"], values) if has_evidence else []
     keyword_priority = _build_keyword_priority(values, market_tokens)
     confidence = _compute_title_confidence(mctx, len([k for k in values if k != "category"]))
-    candidates = _build_candidates(values, extras, market_tokens, current, mctx, confidence)
+    candidates = _build_candidates(
+        values, mctx, {"extras": extras, "market": market_tokens, "current": current, "confidence": confidence}
+    )
 
     best = (candidates.get("search_first") or {}).get("title") or fit_title(current, values.get("brand", ""))
     changed = bool(best and best.casefold() != current.casefold())
@@ -452,7 +448,15 @@ def optimize_title(
         "productReasoning": reasoning,
         "timestamp": now,
         "reason": f"{prof['label']}: {reasoning}",
-        "seoMetadata": _assemble_seo_metadata(
-            confirmed_keywords, keyword_priority, keyword_evidence, coverage, prof, confidence, reasoning, now, has_evidence
-        ),
+        "seoMetadata": _assemble_seo_metadata({
+            "confirmed_keywords": confirmed_keywords,
+            "keyword_priority": keyword_priority,
+            "keyword_evidence": keyword_evidence,
+            "coverage": coverage,
+            "profile": prof,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "now": now,
+            "has_evidence": has_evidence,
+        }),
     }

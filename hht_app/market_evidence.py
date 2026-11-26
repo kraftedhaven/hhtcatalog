@@ -39,7 +39,9 @@ def _safe_int(value: Any, default: int = -1) -> int:
 
 
 def _clamp_range(low: float, median: float, high: float) -> tuple[float, float]:
-    clamped_low = median if (low <= 0 or low > median) else low
+    clamped_low = median if low <= 0 else low
+    if clamped_low > median:
+        clamped_low = median
     clamped_high = median if high < median else high
     return round(clamped_low, 2), round(clamped_high, 2)
 
@@ -183,9 +185,10 @@ def sanitize_market_evidence(
     return _sanitize_sold_summary(sold_summary), _sanitize_active_summary(active_summary)
 
 
-def _sold_tier_prices(
-    target: float, low: float, high: float, p25: float
-) -> tuple[float, float, str, str, str]:
+def _sold_tier_prices(target: float, bounds: dict[str, float]) -> tuple[float, float, str, str, str]:
+    low = float(bounds.get("low") or target)
+    high = float(bounds.get("high") or target)
+    p25 = float(bounds.get("p25") or 0.0)
     quick = min(low, round(target * 0.9, 2)) if low < target else round(target * 0.88, 2)
     if 0 < p25 < target and p25 >= low:
         quick = min(quick, p25)
@@ -193,9 +196,11 @@ def _sold_tier_prices(
     return quick, premium, "market_sold_comp", "sold_comp_anchored", "verified_sold_evidence"
 
 
-def _active_tier_prices(
-    target: float, low: float, high: float, p25: float, p75: float
-) -> tuple[float, float, str, str, str]:
+def _active_tier_prices(target: float, bounds: dict[str, float]) -> tuple[float, float, str, str, str]:
+    low = float(bounds.get("low") or target)
+    high = float(bounds.get("high") or target)
+    p25 = float(bounds.get("p25") or 0.0)
+    p75 = float(bounds.get("p75") or 0.0)
     quick = max(low, min(p25, round(target * 0.92, 2))) if 0 < p25 < target else round(target * 0.85, 2)
     if p75 > target:
         premium = min(max(p75, round(target * 1.10, 2)), round(target * 1.65, 2))
@@ -213,12 +218,12 @@ def _fallback_tier_prices(source: str, target: float) -> tuple[float, float, str
 
 
 def _resolve_tier_tuple(
-    source: str, target: float, low_val: float, high_val: float, p25: float, p75: float
+    source: str, target: float, bounds: dict[str, float]
 ) -> tuple[float, float, str, str, str]:
     if source in {"exact_used_sold", "similar_used_sold"}:
-        return _sold_tier_prices(target, low_val, high_val, p25)
+        return _sold_tier_prices(target, bounds)
     if source == "active_comparable":
-        return _active_tier_prices(target, low_val, high_val, p25, p75)
+        return _active_tier_prices(target, bounds)
     return _fallback_tier_prices(source, target)
 
 
@@ -239,37 +244,34 @@ def _demand_meta_fields(demand: Any) -> tuple[str, str]:
     )
 
 
+def _dict_or_default(candidate: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    return candidate if isinstance(candidate, dict) else fallback
+
+
 def build_pricing_result(
     source: str,
     recommended: float,
-    current: float,
-    confidence: str,
-    sample_size: int,
-    low: float,
-    high: float,
-    reason: str,
-    query: str,
-    *,
-    ai_price: float = 0.0,
-    sold_summary: dict[str, Any] | None = None,
-    active_summary: dict[str, Any] | None = None,
-    demand: dict[str, Any] | None = None,
-    p25: float = 0.0,
-    p75: float = 0.0,
-    insufficient: bool = False,
+    context: dict[str, Any],
 ) -> dict[str, Any]:
     """Assemble Fast Sale, Balanced, and Premium pricing outputs with strict provenance."""
-    low_val = round(low or recommended, 2)
-    high_val = round(high or recommended, 2)
+    low_val = round(float(context.get("low") or recommended), 2)
+    high_val = round(float(context.get("high") or recommended), 2)
     target = round(recommended, 2)
-    quick, premium, prov, strategy, market_status = _resolve_tier_tuple(
-        source, target, low_val, high_val, p25, p75
-    )
+    bounds = {
+        "low": low_val,
+        "high": high_val,
+        "p25": float(context.get("p25") or 0.0),
+        "p75": float(context.get("p75") or 0.0),
+    }
+    quick, premium, prov, strategy, market_status = _resolve_tier_tuple(source, target, bounds)
     quick, premium = _ensure_distinct_tiers(quick, target, premium)
+
+    current = float(context.get("current") or 0.0)
+    ai_price = float(context.get("ai_price") or 0.0)
+    insufficient = bool(context.get("insufficient"))
     change = round(((recommended - current) / current) * 100, 1) if current > 0 else None
-    demand_signal, demand_status = _demand_meta_fields(demand)
-    empty_sold = {"status": "not_configured", "sampleSize": 0}
-    empty_active = {"status": "not_configured", "sampleSize": 0}
+    demand_signal, demand_status = _demand_meta_fields(context.get("demand"))
+    empty_comp = {"status": "not_configured", "sampleSize": 0}
 
     return {
         "status": "ok",
@@ -284,24 +286,24 @@ def build_pricing_result(
         "pricingSource": source,
         "provenanceSource": prov,
         "pricingStrategy": strategy,
-        "pricingConfidence": confidence,
-        "insufficientMarketEvidence": bool(insufficient),
+        "pricingConfidence": str(context.get("confidence") or "low"),
+        "insufficientMarketEvidence": insufficient,
         "marketStatus": market_status,
         "marketMessage": INSUFFICIENT_MARKET_MESSAGE if insufficient else "",
-        "requiresSellerConfirmation": bool(insufficient),
-        "isFallback": bool(insufficient),
-        "sampleSize": sample_size,
+        "requiresSellerConfirmation": insufficient,
+        "isFallback": insufficient,
+        "sampleSize": int(context.get("sample_size") or 0),
         "lowPrice": low_val,
         "highPrice": high_val,
         "currentPrice": round(current, 2),
         "recommendedChangePct": change,
-        "adjustmentReason": reason,
-        "soldComparableSummary": sold_summary if isinstance(sold_summary, dict) else empty_sold,
-        "activeCompetitionSummary": active_summary if isinstance(active_summary, dict) else empty_active,
+        "adjustmentReason": str(context.get("reason") or ""),
+        "soldComparableSummary": _dict_or_default(context.get("sold_summary"), empty_comp),
+        "activeCompetitionSummary": _dict_or_default(context.get("active_summary"), empty_comp),
         "demandSignal": demand_signal,
         "currentDemandStatus": demand_status,
         "dataFreshness": _now(),
-        "comparableQuery": query,
+        "comparableQuery": str(context.get("query") or ""),
     }
 
 

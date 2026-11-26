@@ -1135,6 +1135,7 @@ _PRESERVED_ENRICHMENT_KEYS = (
     "madeIn",
     "itemSpecifics",
     "quantity",
+    "notes",
 )
 
 
@@ -1152,6 +1153,16 @@ def _restore_preserved_metadata(listing: dict[str, Any], preserved: dict[str, An
     for key, value in preserved.items():
         if key not in listing or listing[key] in ("", None):
             listing[key] = value
+
+
+def _saved_desc_value(listing: dict[str, Any], provenance: dict[str, Any], modified_fields: set[str]) -> str | None:
+    raw_desc = str(listing.get("desc") or "")
+    if "desc" in modified_fields:
+        return raw_desc
+    desc_prov = provenance.get("desc")
+    if isinstance(desc_prov, dict) and desc_prov.get("sellerConfirmed"):
+        return raw_desc
+    return raw_desc if raw_desc.strip() else None
 
 
 def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str, Any]:
@@ -1256,13 +1267,14 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
     saved_cat = listing.get("cat")
     saved_category_name = listing.get("categoryName")
     saved_cid = listing.get("cid")
+    saved_desc = _saved_desc_value(listing, provenance, modified_fields)
 
     # Auto-normalize listing attributes while preserving Commerce Agent metadata
     preserved_meta = _extract_preserved_metadata(listing)
     listing = normalize_listing(listing)
     _restore_preserved_metadata(listing, preserved_meta)
 
-    # Restore exact seller-edited values
+    # Restore exact seller-edited or previously analyzed values
     if seller_edited_title and saved_title:
         listing["title"] = str(saved_title)
         listing["sellerEditedTitle"] = True
@@ -1274,6 +1286,8 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
         listing["categoryName"] = str(saved_category_name)
     if saved_cid:
         listing["cid"] = str(saved_cid)
+    if saved_desc:
+        listing["desc"] = str(saved_desc)
 
     # Re-evaluate validation
     photo_count = current_item["photoCount"]

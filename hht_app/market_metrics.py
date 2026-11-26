@@ -153,43 +153,55 @@ def _ai_fallback_price(item: dict[str, Any]) -> float:
 def _sold_pricing_result(
     clean_sold: dict[str, Any],
     clean_active: dict[str, Any],
-    current: float,
-    ai_price: float,
-    query: str,
-    demand_data: dict[str, Any],
+    base_ctx: dict[str, Any],
 ) -> dict[str, Any]:
     src = clean_sold.get("pricingSource")
     source = src if src in PRICING_SOURCES else "similar_used_sold"
     n = int(clean_sold.get("sampleSize") or 0)
     conf = "high" if (source == "exact_used_sold" and n >= 3) else "medium"
     return build_pricing_result(
-        source, _money(clean_sold.get("medianSoldPrice")), current, conf, n,
-        _money(clean_sold.get("lowSoldPrice")), _money(clean_sold.get("highSoldPrice")),
-        "Price is based on verified used sold-comparable records.", query,
-        ai_price=ai_price, sold_summary=clean_sold, active_summary=clean_active,
-        demand=demand_data, p25=_money(clean_sold.get("p25SoldPrice")),
-        p75=_money(clean_sold.get("p75SoldPrice")), insufficient=False,
+        source,
+        _money(clean_sold.get("medianSoldPrice")),
+        {
+            **base_ctx,
+            "confidence": conf,
+            "sample_size": n,
+            "low": _money(clean_sold.get("lowSoldPrice")),
+            "high": _money(clean_sold.get("highSoldPrice")),
+            "p25": _money(clean_sold.get("p25SoldPrice")),
+            "p75": _money(clean_sold.get("p75SoldPrice")),
+            "reason": "Price is based on verified used sold-comparable records.",
+            "sold_summary": clean_sold,
+            "active_summary": clean_active,
+            "insufficient": False,
+        },
     )
 
 
 def _active_pricing_result(
     clean_sold: dict[str, Any],
     clean_active: dict[str, Any],
-    current: float,
-    ai_price: float,
-    query: str,
-    demand_data: dict[str, Any],
+    base_ctx: dict[str, Any],
 ) -> dict[str, Any]:
     n = int(clean_active.get("sampleSize") or 0)
-    resolved_query = str(clean_active.get("keyword") or query)
+    resolved_query = str(clean_active.get("keyword") or base_ctx.get("query") or "")
     return build_pricing_result(
-        "active_comparable", _money(clean_active.get("medianActivePrice")), current,
-        "medium" if n >= 3 else "low", n,
-        _money(clean_active.get("lowActivePrice")), _money(clean_active.get("highActivePrice")),
-        f"Sold comps unavailable; based on {n} active eBay comparable listings (advisory ask prices).",
-        resolved_query, ai_price=ai_price, sold_summary=clean_sold, active_summary=clean_active,
-        demand=demand_data, p25=_money(clean_active.get("p25ActivePrice")),
-        p75=_money(clean_active.get("p75ActivePrice")), insufficient=False,
+        "active_comparable",
+        _money(clean_active.get("medianActivePrice")),
+        {
+            **base_ctx,
+            "confidence": "medium" if n >= 3 else "low",
+            "sample_size": n,
+            "low": _money(clean_active.get("lowActivePrice")),
+            "high": _money(clean_active.get("highActivePrice")),
+            "p25": _money(clean_active.get("p25ActivePrice")),
+            "p75": _money(clean_active.get("p75ActivePrice")),
+            "query": resolved_query,
+            "reason": f"Sold comps unavailable; based on {n} active eBay comparable listings (advisory ask prices).",
+            "sold_summary": clean_sold,
+            "active_summary": clean_active,
+            "insufficient": False,
+        },
     )
 
 
@@ -212,23 +224,30 @@ def pricing_recommendation(
     demand_data = demand if isinstance(demand, dict) else demand_score(
         item, sold_summary=clean_sold, active_summary=clean_active
     )
+    base_ctx = {
+        "current": current,
+        "ai_price": ai_price,
+        "query": query,
+        "demand": demand_data,
+        "sold_summary": clean_sold,
+        "active_summary": clean_active,
+    }
 
     if clean_sold.get("status") == "ok" and _money(clean_sold.get("medianSoldPrice")) > 0:
-        return _sold_pricing_result(clean_sold, clean_active, current, ai_price, query, demand_data)
+        return _sold_pricing_result(clean_sold, clean_active, base_ctx)
     if clean_active.get("status") == "ok" and _money(clean_active.get("medianActivePrice")) > 0:
-        return _active_pricing_result(clean_sold, clean_active, current, ai_price, query, demand_data)
+        return _active_pricing_result(clean_sold, clean_active, base_ctx)
     if ai_price > 0:
         return build_pricing_result(
-            "ai_estimate", ai_price, current, "low", 0, ai_price, ai_price,
-            INSUFFICIENT_MARKET_MESSAGE, query, ai_price=ai_price,
-            sold_summary=clean_sold, active_summary=clean_active, demand=demand_data, insufficient=True,
+            "ai_estimate", ai_price,
+            {**base_ctx, "confidence": "low", "sample_size": 0, "low": ai_price, "high": ai_price,
+             "reason": INSUFFICIENT_MARKET_MESSAGE, "insufficient": True},
         )
     if current > 0:
         return build_pricing_result(
-            "seller_price_fallback", current, current, "low", 0, current, current,
-            f"{INSUFFICIENT_MARKET_MESSAGE} Existing seller price retained.", query,
-            ai_price=ai_price, sold_summary=clean_sold, active_summary=clean_active,
-            demand=demand_data, insufficient=True,
+            "seller_price_fallback", current,
+            {**base_ctx, "confidence": "low", "sample_size": 0, "low": current, "high": current,
+             "reason": f"{INSUFFICIENT_MARKET_MESSAGE} Existing seller price retained.", "insufficient": True},
         )
     return build_error_pricing_result(current, query, clean_sold, clean_active)
 
