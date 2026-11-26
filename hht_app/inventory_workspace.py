@@ -32,6 +32,7 @@ from .commerce_agent import (
     validate_listing,
     start_listing_analysis_job,
     ebay_scope_status,
+    run_commerce_agent_optimization,
 )
 from .ebay_feed import (
     upload_seller_hub_draft_csv,
@@ -39,7 +40,7 @@ from .ebay_feed import (
     EbayFeedError,
     validate_draft_photo_urls,
 )
-from .market_metrics import pricing_recommendation, sold_price_summary
+from .market_metrics import INSUFFICIENT_MARKET_MESSAGE, pricing_recommendation, sold_price_summary
 from .schema import _draft_sku, fit_title, normalize_listing
 from .title_optimizer import optimize_title
 
@@ -468,7 +469,18 @@ def check_batch_has_protected_items(batch_id: str) -> tuple[bool, list[str]]:
                 continue
             prov = _decode(item["provenance_json"], {})
             has_prov_edits = any(
-                p.get("source") in ("seller_input", "ai_estimate") or p.get("sellerConfirmed")
+                p.get("source") in (
+                    "seller_input",
+                    "observed_photo_fact",
+                    "ai_inference",
+                    "market_sold_comp",
+                    "market_active_comp",
+                    "demand_signal",
+                    "fallback_estimate",
+                    "ai_estimate",
+                    "photo_evidence",
+                )
+                or p.get("sellerConfirmed")
                 for p in prov.values()
                 if isinstance(p, dict)
             )
@@ -874,6 +886,24 @@ def reconcile_stale_item_analyses(seller_id: str, max_age_seconds: int = 180) ->
     return reconciled
 
 
+def _format_pricing_convenience(pricing_options: Any) -> dict[str, Any]:
+    opts = pricing_options if isinstance(pricing_options, dict) else {}
+    quick = opts.get("quick_sale") if isinstance(opts.get("quick_sale"), dict) else {}
+    balanced = opts.get("balanced") if isinstance(opts.get("balanced"), dict) else {}
+    premium = opts.get("premium") if isinstance(opts.get("premium"), dict) else {}
+    return {
+        "pricingOptions": opts,
+        "pricingTiers": {
+            **({"quickSale": quick} if quick else {}),
+            **({"balanced": balanced} if balanced else {}),
+            **({"premium": premium} if premium else {}),
+        },
+        "quickSalePrice": quick.get("price"),
+        "balancedPrice": balanced.get("price"),
+        "premiumPrice": premium.get("price"),
+    }
+
+
 def list_batch_items(batch_id: str, seller_id: str) -> list[dict[str, Any]]:
     if not seller_id:
         raise ValueError("Seller ownership is required.")
@@ -930,7 +960,7 @@ def list_batch_items(batch_id: str, seller_id: str) -> list[dict[str, Any]]:
                 "provenance": provenance,
                 "workflowStatus": str(r["workflow_status"]),
                 "validation": validation,
-                "pricingOptions": pricing_options,
+                **_format_pricing_convenience(pricing_options),
                 "titleCandidates": title_candidates,
                 "analysisJobId": str(r["analysis_job_id"] or ""),
                 "sellerConfirmed": bool(r["seller_confirmed"]),
@@ -984,6 +1014,7 @@ def get_item(item_id: str, seller_id: str) -> dict[str, Any]:
             for p in photo_rows
         ]
         cover_photo = next((p for p in photos if p["isCover"]), None) or (photos[0] if photos else None)
+        pricing_options = _decode(row["pricing_options_json"], {})
 
         return {
             "id": str(row["id"]),
@@ -993,7 +1024,7 @@ def get_item(item_id: str, seller_id: str) -> dict[str, Any]:
             "provenance": _decode(row["provenance_json"], {}),
             "workflowStatus": str(row["workflow_status"]),
             "validation": _decode(row["validation_json"], {}),
-            "pricingOptions": _decode(row["pricing_options_json"], {}),
+            **_format_pricing_convenience(pricing_options),
             "titleCandidates": _decode(row["title_candidates_json"], {}),
             "analysisJobId": str(row["analysis_job_id"] or ""),
             "sellerConfirmed": bool(row["seller_confirmed"]),
@@ -1082,10 +1113,10 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
 
     # Allowed fields to patch
     editable_keys = {
-        "title", "price", "cat", "cid", "brand", "model", "size",
-        "color", "dept", "type", "style", "mat", "pat", "cnote",
-        "cid_condition", "quantity", "desc", "madeIn", "serialNumber",
-        "measurements", "itemSpecifics"
+        "title", "price", "cat", "categoryName", "cid", "brand", "model", "size",
+        "color", "dept", "type", "style", "theme", "mat", "pat", "cnote",
+        "condition", "cid_condition", "quantity", "desc", "madeIn", "serialNumber",
+        "measurements", "itemSpecifics", "labelOcr", "vin", "slv", "nk", "sea", "occ", "st",
     }
 
     modified_fields = set()
@@ -1114,9 +1145,10 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
         listing["sellerEditedTitle"] = True
         modified_fields.add("title")
         provenance["title"] = {
-            "source": "ai_estimate",
+            "source": "seller_input",
+            "legacySource": candidate_info.get("provenanceSource") or "ai_estimate",
             "confidence": candidate_info.get("confidence", "medium"),
-            "evidence": f"Selected candidate: {chosen_candidate}",
+            "evidence": f"Seller selected candidate: {chosen_candidate}",
             "sellerConfirmed": True,
         }
 
@@ -1127,8 +1159,11 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
         listing["price"] = str(opt.get("price", listing.get("price", "")))
         requires_confirm = bool(patch.get("confirmPrice", True))
         modified_fields.add("price")
+        if not requires_confirm:
+            listing["sellerEditedPrice"] = True
         provenance["price"] = {
-            "source": "ai_estimate",
+            "source": str(opt.get("source") or "fallback_estimate"),
+            "legacySource": "ai_estimate",
             "confidence": opt.get("confidence", "medium"),
             "evidence": f"Selected pricing option: {chosen_pricing}",
             "sellerConfirmed": not requires_confirm,
@@ -1136,8 +1171,24 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
 
     # Handle explicit seller confirmations
     confirm_field = patch.get("confirmField")
-    if confirm_field and confirm_field in provenance:
-        provenance[confirm_field]["sellerConfirmed"] = True
+    if confirm_field:
+        targets = [str(confirm_field)]
+        if confirm_field == "condition":
+            targets.append("cid")
+        elif confirm_field == "cid":
+            targets.append("condition")
+        elif confirm_field == "cat":
+            targets.append("categoryName")
+        for target_field in targets:
+            if isinstance(provenance.get(target_field), dict):
+                provenance[target_field]["sellerConfirmed"] = True
+            else:
+                provenance[target_field] = {
+                    "source": "seller_input",
+                    "confidence": "high",
+                    "evidence": "Seller confirmed value",
+                    "sellerConfirmed": True,
+                }
 
     if patch.get("confirmAll") is True:
         for f in provenance.values():
@@ -1149,6 +1200,7 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
     saved_title = listing.get("title")
     saved_price = listing.get("price")
     saved_cat = listing.get("cat")
+    saved_category_name = listing.get("categoryName")
     saved_cid = listing.get("cid")
 
     # Auto-normalize listing attributes
@@ -1162,6 +1214,8 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
         listing["price"] = str(saved_price)
     if saved_cat:
         listing["cat"] = str(saved_cat)
+    if saved_category_name:
+        listing["categoryName"] = str(saved_category_name)
     if saved_cid:
         listing["cid"] = str(saved_cid)
 
@@ -1361,173 +1415,68 @@ def approve_items(item_ids: list[str], seller_id: str) -> dict[str, Any]:
 def prepopulate_item_from_analysis(
     item_id: str, seller_id: str, analysis_result: dict[str, Any], preserve_seller_edits: bool = True
 ) -> dict[str, Any]:
-    """Merge an AI analysis result into an inventory item.
-    
-    Generates:
-    - 2-3 title candidates via optimize_title
-    - Pricing options: quick_sale, balanced, premium via market_metrics
-    - Stores field-level provenance (source, confidence, evidence, sellerConfirmed)
-    - Flags uncertain or missing fields
-    - Does NOT invent brand, size, model, measurements, condition, or market comps.
+    """Run the unified Commerce Agent optimization pipeline and persist results.
+
+    Pipeline:
+      visual identification -> Commerce Agent enrichment -> market evidence retrieval ->
+      demand & keyword scoring -> title optimization -> pricing strategy ->
+      item-specific recommendations -> persisted provenance/confidence/evidence -> needs_review.
+
+    Strictly preserves seller-confirmed fields on re-analysis and never fabricates
+    market statistics or overwrites confirmed seller values.
     """
     item = get_item(item_id, seller_id)
     listing = dict(item["listing"])
     provenance = dict(item["provenance"])
-    ai_listing = analysis_result.get("listing", {})
+    ai_listing = analysis_result.get("listing", {}) if isinstance(analysis_result, dict) else {}
 
-    # Existing seller edits to preserve
-    seller_edited_keys = {
-        k for k, p in provenance.items()
-        if isinstance(p, dict) and p.get("source") == "seller_input" and p.get("sellerConfirmed") is True
-    }
+    with connect() as db:
+        conf_row = db.execute(
+            "SELECT seller_confirmed_json FROM inventory_items WHERE id = ? AND seller_id = ?",
+            (item_id, seller_id),
+        ).fetchone()
+        seller_confirmed_map = _decode(conf_row["seller_confirmed_json"] if conf_row else "{}", {}) if conf_row else {}
 
-    # Extract field candidates
-    for key in (
-        "brand", "model", "size", "color", "dept", "type", "style",
-        "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn",
-        "serialNumber", "measurements", "cnote"
-    ):
-        if preserve_seller_edits and key in seller_edited_keys:
-            continue
-        ai_val = str(ai_listing.get(key) or "").strip()
-        if ai_val and ai_val.lower() not in {"not visible", "unknown", "n/a", "none"}:
-            listing[key] = ai_val
-            # Provenance
-            groq_prov = ai_listing.get("provenance", {}).get(key)
-            is_verified = groq_prov == "Known from image"
-            provenance[key] = {
-                "source": "photo_evidence" if is_verified else "ai_estimate",
-                "confidence": "high" if is_verified else "medium",
-                "evidence": f"Observed in item photos: '{ai_val}'" if is_verified else f"AI suggestion from visual context: '{ai_val}'",
-                "sellerConfirmed": False,
-            }
-        elif key not in listing or not listing[key]:
-            provenance[key] = {
-                "source": "missing",
-                "confidence": "none",
-                "evidence": "Not observed in photos; seller confirmation required",
-                "sellerConfirmed": False,
-            }
-
-    # eBay Category
-    if not (preserve_seller_edits and "cat" in seller_edited_keys):
-        cat = str(ai_listing.get("cat") or "").strip()
-        cid = str(ai_listing.get("cid") or "").strip()
-        if cat:
-            listing["cat"] = cat
-            listing["cid"] = cid
-            provenance["cat"] = {
-                "source": "ai_estimate",
-                "confidence": "medium",
-                "evidence": f"Suggested eBay Category: {cat} (ID {cid})",
-                "sellerConfirmed": False,
-            }
-
-    # Title & Candidates via optimize_title
-    title_plan = optimize_title(listing)
-    candidates_dict = title_plan.get("candidates", {})
-    title_candidates = {}
-    for c_name, c_data in candidates_dict.items():
-        title_candidates[c_name] = {
-            "title": c_data["title"],
-            "length": c_data["length"],
-            "reason": c_data["reason"],
-            "confidence": c_data["confidence"],
+    seller_edited_keys: set[str] = set()
+    if preserve_seller_edits:
+        seller_edited_keys = {
+            k for k, p in provenance.items()
+            if isinstance(p, dict) and (p.get("sellerConfirmed") is True or (p.get("source") == "seller_input" and p.get("sellerConfirmed") is not False))
         }
+        for k, v in (seller_confirmed_map or {}).items():
+            if v not in (None, "", False):
+                seller_edited_keys.add(str(k))
+        if listing.get("sellerEditedTitle") is True:
+            seller_edited_keys.add("title")
+        if listing.get("sellerEditedPrice") is True:
+            seller_edited_keys.add("price")
+        if "cat" in seller_edited_keys:
+            seller_edited_keys.add("categoryName")
+        if "cid" in seller_edited_keys or "condition" in seller_edited_keys:
+            seller_edited_keys.update({"cid", "condition"})
 
-    best_title = title_plan.get("title") or ai_listing.get("title") or ""
-    if not (preserve_seller_edits and "title" in seller_edited_keys) and best_title:
-        listing["title"] = best_title
-        provenance["title"] = {
-            "source": "ai_estimate",
-            "confidence": title_plan.get("confidence", "medium"),
-            "evidence": title_plan.get("reason", "Constructed from confirmed attributes"),
-            "sellerConfirmed": False,
-        }
+    confirmed_snapshot = {k: listing.get(k) for k in seller_edited_keys if k in listing}
 
-    # Pricing recommendations via pricing_recommendation
-    pricing_rec = pricing_recommendation(listing)
-    pricing_options = {}
-    base_price = None
-    if pricing_rec.get("status") != "error" and pricing_rec.get("recommendedPrice"):
-        base_price = float(pricing_rec["recommendedPrice"])
-    else:
-        candidate_price = ai_listing.get("price") or listing.get("price")
-        if candidate_price:
-            try:
-                candidate_float = float(str(candidate_price).replace("$", "").strip())
-                if candidate_float > 0:
-                    base_price = round(candidate_float, 2)
-            except (ValueError, TypeError):
-                pass
+    optimized = run_commerce_agent_optimization(
+        listing,
+        raw_ai_listing=ai_listing,
+        existing_provenance=provenance,
+        seller_confirmed_fields=seller_edited_keys,
+        fetch_live_market=True,
+    )
+    listing = optimized["listing"]
+    provenance = optimized["provenance"]
+    pricing_options = optimized["pricingOptions"]
+    title_candidates = optimized["titleCandidates"]
 
-    if base_price:
-        low_p = float(pricing_rec.get("lowSoldPrice") or round(base_price * 0.85, 2))
-        high_p = float(pricing_rec.get("highSoldPrice") or round(base_price * 1.15, 2))
+    if preserve_seller_edits:
+        for k, v in confirmed_snapshot.items():
+            listing[k] = v
+            if k in provenance and isinstance(provenance[k], dict):
+                provenance[k]["sellerConfirmed"] = True
 
-        pricing_options = {
-            "quick_sale": {
-                "price": low_p,
-                "label": "Quick sale",
-                "confidence": pricing_rec.get("confidence", "medium"),
-                "reason": "Competitive price for faster sell-through.",
-            },
-            "balanced": {
-                "price": base_price,
-                "label": "Balanced",
-                "confidence": pricing_rec.get("confidence", "high"),
-                "reason": f"Median estimate from {pricing_rec.get('pricingSource', 'model estimate')}.",
-            },
-            "premium": {
-                "price": high_p,
-                "label": "Premium",
-                "confidence": pricing_rec.get("confidence", "low"),
-                "reason": "Upper market tier for patience or pristine condition.",
-            },
-        }
-    else:
-        # Vision providers may return a usable estimated price even when no
-        # comparable-sales dataset is available. Preserve that estimate and
-        # expose the same three seller-review tiers instead of dropping it.
-        raw_analyzed_price = ai_listing.get("price")
-        try:
-            analyzed_price = float(str(raw_analyzed_price).replace("$", "").replace(",", "").strip())
-        except (TypeError, ValueError):
-            analyzed_price = 0.0
-        if analyzed_price > 0:
-            base_price = analyzed_price
-            pricing_options = {
-                "quick_sale": {"price": round(base_price * 0.85, 2), "label": "Quick sale", "confidence": "medium", "reason": "Below the AI estimate for faster sell-through."},
-                "balanced": {"price": round(base_price, 2), "label": "Balanced", "confidence": "medium", "reason": "Based on the AI visual estimate; verify before approval."},
-                "premium": {"price": round(base_price * 1.15, 2), "label": "Premium", "confidence": "low", "reason": "Higher asking price; expect a longer sales cycle."},
-            }
-
-    if not (preserve_seller_edits and "price" in seller_edited_keys):
-        if base_price:
-            listing["price"] = str(base_price)
-            provenance["price"] = {
-                "source": "ai_estimate",
-                "confidence": pricing_rec.get("confidence", "medium"),
-                "evidence": f"Suggested price from {pricing_rec.get('pricingSource', 'comparable analysis')}. Seller confirmation required.",
-                "sellerConfirmed": False,
-            }
-        else:
-            provenance["price"] = {
-                "source": "missing",
-                "confidence": "none",
-                "evidence": "No market comps available; seller must provide numeric price.",
-                "sellerConfirmed": False,
-            }
-
-    # Condition & Specifics
-    if not (preserve_seller_edits and "cnote" in seller_edited_keys):
-        listing["cnote"] = ai_listing.get("cnote") or "Pre-owned in good condition."
-        provenance["cnote"] = {
-            "source": "ai_estimate",
-            "confidence": "medium",
-            "evidence": "Standard pre-owned condition note",
-            "sellerConfirmed": False,
-        }
+    listing["analysisStatus"] = "complete"
+    listing.pop("analysisError", None)
 
     # Validate
     validation = check_listing_rules(listing, item["photoCount"], {})
@@ -1558,7 +1507,7 @@ def prepopulate_item_from_analysis(
 def enrich_item_from_research_clues(
     item_id: str, seller_id: str, clues: dict[str, Any]
 ) -> dict[str, Any]:
-    """Generate reviewable title and price suggestions from seller research.
+    """Generate reviewable title and price suggestions from seller research via Commerce Agent.
 
     This does not create an analysis job or an eBay draft. Clues remain
     seller-provided and unconfirmed until the seller confirms the fields.
@@ -1610,37 +1559,39 @@ def enrich_item_from_research_clues(
             }
     if specifics:
         listing["itemSpecifics"] = specifics
+
     comparable = clean.get("comparablePrice", "")
     price_match = re.search(r"\d+(?:[.,]\d{1,2})?", comparable)
     comparable_price = float(price_match.group(0).replace(",", "")) if price_match else None
-    title_input = {**listing, "sellerEditedTitle": False, "sellerEditedMetadata": False}
-    title_plan = optimize_title(title_input)
-    title_candidates = title_plan.get("candidates", {})
-    if title_plan.get("title"):
-        listing["title"] = title_plan["title"]
-        provenance["title"] = {
-            "source": "ai_estimate",
-            "confidence": title_plan.get("confidence", "medium"),
-            "evidence": "Generated from seller-provided research clues; verify every attribute.",
+    if comparable_price and comparable_price > 0:
+        listing["aiEstimatedPrice"] = comparable_price
+
+    seller_confirmed = {
+        k for k, p in provenance.items()
+        if isinstance(p, dict) and p.get("sellerConfirmed") is True
+    }
+    optimized = run_commerce_agent_optimization(
+        listing,
+        raw_ai_listing=None,
+        existing_provenance=provenance,
+        seller_confirmed_fields=seller_confirmed,
+        fetch_live_market=True,
+    )
+    listing = optimized["listing"]
+    provenance = optimized["provenance"]
+    pricing_options = optimized["pricingOptions"]
+    title_candidates = optimized["titleCandidates"]
+
+    if comparable_price and not str(listing.get("price") or "").strip():
+        listing["price"] = f"{comparable_price:.2f}"
+        provenance["price"] = {
+            "source": "fallback_estimate",
+            "legacySource": "ai_estimate",
+            "confidence": "medium",
+            "evidence": "Balanced suggestion generated from the seller-provided comparable clue; verify before approval.",
             "sellerConfirmed": False,
         }
-    pricing_rec = pricing_recommendation(listing)
-    base_price = float(pricing_rec["recommendedPrice"]) if pricing_rec.get("recommendedPrice") else comparable_price
-    pricing_options: dict[str, Any] = {}
-    if base_price and base_price > 0:
-        pricing_options = {
-            "quick_sale": {"price": round(base_price * 0.85, 2), "label": "Quick sale", "confidence": "medium", "reason": "Below the supplied/recommended reference for faster sell-through."},
-            "balanced": {"price": round(base_price, 2), "label": "Balanced", "confidence": "medium", "reason": "Centered on the supplied/recommended reference."},
-            "premium": {"price": round(base_price * 1.15, 2), "label": "Premium", "confidence": "low", "reason": "Higher asking price; expect a longer sales cycle."},
-        }
-        if not str(listing.get("price") or "").strip():
-            listing["price"] = f"{pricing_options['balanced']['price']:.2f}"
-            provenance["price"] = {
-                "source": "ai_estimate",
-                "confidence": "medium",
-                "evidence": "Balanced suggestion generated from the seller-provided comparable price; verify before approval.",
-                "sellerConfirmed": False,
-            }
+
     validation = check_listing_rules(listing, item["photoCount"], {})
     now = _now_iso()
     with connect() as db:
@@ -3305,9 +3256,10 @@ def sync_persisted_reanalysis(item_id: str, seller_id: str) -> dict[str, Any]:
 
     result = _decode(job.get("result_json"), {})
     if job.get("status") == "completed":
-        listing = result.get("listing") if isinstance(result, dict) else {}
-        prov = {k: "ai_estimate" for k in (listing or {})}
-        updated_item = apply_analysis_result(item_id, seller_id, listing or {}, prov, job_id)
+        analysis_payload = result if isinstance(result, dict) and "listing" in result else {"listing": result if isinstance(result, dict) else {}}
+        updated_item = prepopulate_item_from_analysis(
+            item_id, seller_id, analysis_payload, preserve_seller_edits=True
+        )
         return {"item": updated_item, "status": "completed", "jobId": job_id}
 
     return {

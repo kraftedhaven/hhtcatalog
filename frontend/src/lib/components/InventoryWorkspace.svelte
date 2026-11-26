@@ -1,5 +1,5 @@
 <script>
-    import { onMount, onDestroy } from "svelte";
+    import { onMount, onDestroy, tick } from "svelte";
     import {
         inventoryCreateBatch,
         inventoryListBatches,
@@ -37,6 +37,15 @@
         uploadBatchChunks,
         resolveUploadFailureState,
     } from "$lib/workspace-uploader";
+    import {
+        getPriceTiers,
+        getTitleCandidateEntries,
+        getMarketPricingEvidence,
+        formatProvenanceClassification,
+        mergePolledItemsWithPending,
+        findFirstMissingFieldTarget,
+        INSUFFICIENT_MARKET_MESSAGE,
+    } from "$lib/workspace-helpers";
 
     export let onSwitchToListingOptimization = () => {};
     export let onOpenFullReview = () => {};
@@ -203,12 +212,94 @@
         }
     }
 
+    // Analysis auto-polling state while batch items are queued or running
+    let analysisPollTimer = null;
+    let analysisPollInFlight = false;
+    let wasAnalyzing = false;
+
+    function stopAnalysisPolling() {
+        if (analysisPollTimer) {
+            clearInterval(analysisPollTimer);
+            analysisPollTimer = null;
+        }
+    }
+
+    function ensureAnalysisPolling() {
+        if (analysisPollTimer || !selectedBatchId) return;
+        analysisPollTimer = setInterval(() => {
+            void pollBatchAnalysisResults();
+        }, 2500);
+    }
+
+    async function pollBatchAnalysisResults() {
+        if (analysisPollInFlight || !selectedBatchId) return;
+        analysisPollInFlight = true;
+        try {
+            const freshItems = await inventoryListBatchItems(selectedBatchId);
+            const merged = mergePolledItemsWithPending(
+                freshItems,
+                items,
+                pendingPatches,
+            );
+            items = merged;
+            if (inspectingItemId) {
+                const updatedInspecting = merged.find(
+                    (it) => it.id === inspectingItemId,
+                );
+                if (updatedInspecting) {
+                    inspectingItem = updatedInspecting;
+                }
+            }
+
+            const remainingAnalyzing = merged.filter(
+                (it) =>
+                    it.workflowStatus === "analysis_queued" ||
+                    it.workflowStatus === "analysis_running",
+            ).length;
+
+            if (remainingAnalyzing === 0) {
+                stopAnalysisPolling();
+                const failedItems = merged.filter(
+                    (it) =>
+                        it.listing?.analysisStatus === "failed" ||
+                        it.listing?.analysisStatus === "timeout",
+                );
+                if (failedItems.length > 0) {
+                    const firstErr =
+                        failedItems[0]?.listing?.analysisError ||
+                        "Photo analysis could not complete.";
+                    globalError = `Analysis failed for ${failedItems.length} item(s): ${firstErr}`;
+                    globalStatus = "";
+                } else if (wasAnalyzing) {
+                    globalStatus =
+                        "AI title and price analysis complete — ready for review.";
+                }
+                wasAnalyzing = false;
+            }
+        } catch (err) {
+            // Transient poll failure should not wipe edits or stop retries unless batch changes
+            console.warn("Analysis status poll deferred:", err);
+        } finally {
+            analysisPollInFlight = false;
+        }
+    }
+
+    $: {
+        if (analyzingCount > 0 && selectedBatchId) {
+            wasAnalyzing = true;
+            ensureAnalysisPolling();
+        } else if (analyzingCount === 0 && analysisPollTimer) {
+            stopAnalysisPolling();
+        }
+    }
+
     onMount(async () => {
         await loadBatches();
     });
 
     onDestroy(() => {
         if (autosaveTimeout) clearTimeout(autosaveTimeout);
+        stopAnalysisPolling();
     });
 
     async function loadBatches() {
@@ -242,6 +333,8 @@
     }
 
     async function selectBatch(batchId) {
+        stopAnalysisPolling();
+        wasAnalyzing = false;
         selectedBatchId = batchId;
         batchLoading = true;
         selectedItemIds = new Set();
@@ -265,7 +358,8 @@
     async function reloadBatchData() {
         if (!selectedBatchId) return;
         try {
-            items = await inventoryListBatchItems(selectedBatchId);
+            const latest = await inventoryListBatchItems(selectedBatchId);
+            items = mergePolledItemsWithPending(latest, items, pendingPatches);
             batchPhotos = await inventoryListBatchPhotos(selectedBatchId).catch(() => []);
             if (inspectingItemId) {
                 inspectingItem = items.find((it) => it.id === inspectingItemId) || null;
@@ -915,8 +1009,11 @@
         globalError = "";
         try {
             await inventoryAnalyzeBatch(selectedBatchId, ids);
-            items = await inventoryListBatchItems(selectedBatchId);
-            globalStatus = `Analysis queued for ${ids.length} item(s). Vision worker is populating titles and price estimates.`;
+            const refreshed = await inventoryListBatchItems(selectedBatchId);
+            items = mergePolledItemsWithPending(refreshed, items, pendingPatches);
+            wasAnalyzing = true;
+            ensureAnalysisPolling();
+            globalStatus = `Analysis queued for ${ids.length} item(s). Commerce Agent is optimizing titles and market pricing.`;
         } catch (err) {
             globalError = err.message || "Failed to start analysis.";
         } finally {
@@ -942,7 +1039,10 @@
         globalError = "";
         try {
             await inventoryAnalyzeBatch(selectedBatchId, unconfirmedIds);
-            items = await inventoryListBatchItems(selectedBatchId);
+            const refreshed = await inventoryListBatchItems(selectedBatchId);
+            items = mergePolledItemsWithPending(refreshed, items, pendingPatches);
+            wasAnalyzing = true;
+            ensureAnalysisPolling();
             globalStatus = `Reprocessing ${unconfirmedIds.length} unconfirmed item(s). Seller-confirmed edits are preserved.`;
         } catch (err) {
             globalError = err.message || "Reprocessing failed.";
@@ -951,19 +1051,57 @@
         }
     }
 
-    function fixHighlightedFields() {
-        const target = items.find((it) => {
-            const l = it.listing || {};
-            return (
-                !l.title ||
-                !l.price ||
-                !l.cat ||
-                it.workflowStatus === "needs_review"
-            );
-        });
-        if (target) {
-            openItemInspector(target);
-            globalStatus = `Inspect item ${target.id.slice(0, 8)} to complete missing fields.`;
+    async function fixHighlightedFields(preferredItem = null) {
+        const targetInfo = findFirstMissingFieldTarget(
+            items,
+            preferredItem || inspectingItem,
+        );
+        if (!targetInfo) {
+            globalStatus = "All visible items already have required fields populated.";
+            return;
+        }
+        if (viewMode === "gallery") {
+            viewMode = "cards";
+        }
+        openItemInspector(targetInfo.item);
+        globalStatus = `Complete highlighted field for item ${targetInfo.item.id.slice(0, 8)}.`;
+        await tick();
+        const el =
+            typeof document !== "undefined"
+                ? document.getElementById(targetInfo.fieldId) ||
+                  document.getElementById("inspector-title-input")
+                : null;
+        if (el) {
+            el.scrollIntoView({ behavior: "smooth", block: "center" });
+            el.focus();
+        }
+    }
+
+    async function saveCurrentOrPending() {
+        globalError = "";
+        if (pendingPatches.size > 0) {
+            await flushPendingPatches();
+            if (autosaveStatus !== "error") {
+                globalStatus = "Saved your pending item edits.";
+            }
+            return;
+        }
+        if (inspectingItem) {
+            try {
+                actionLoading = true;
+                const refreshed = await inventoryGetItem(inspectingItem.id);
+                items = items.map((it) =>
+                    it.id === refreshed.id ? refreshed : it,
+                );
+                inspectingItem = refreshed;
+                globalStatus = "Item state synced and saved.";
+            } catch (err) {
+                globalError = err.message || "Unable to save item.";
+            } finally {
+                actionLoading = false;
+            }
+        } else {
+            globalStatus = "All item edits are already saved.";
         }
     }
 
@@ -1163,11 +1301,14 @@
             const result = await inventoryAnalyzeBatch(selectedBatchId, [
                 itemId,
             ]);
-            items = await inventoryListBatchItems(selectedBatchId);
+            const refreshed = await inventoryListBatchItems(selectedBatchId);
+            items = mergePolledItemsWithPending(refreshed, items, pendingPatches);
             if (inspectingItemId === itemId) {
                 inspectingItem =
                     items.find((item) => item.id === itemId) || inspectingItem;
             }
+            wasAnalyzing = true;
+            ensureAnalysisPolling();
             globalStatus =
                 "Photo analysis queued. HHT will populate the title and estimated price when it finishes.";
             return result;
@@ -1354,6 +1495,7 @@
             uploadError = "Upload at least one image.";
             return;
         }
+        const uploadedPhotoCount = uploadFiles.length;
         isUploading = true;
         uploadError = "";
         uploadPhase = "compressing";
@@ -1402,18 +1544,29 @@
                 },
             });
 
-            items = uploadResult.items;
+            items = mergePolledItemsWithPending(
+                uploadResult.items,
+                items,
+                pendingPatches,
+            );
             const newItemIds = items
                 .filter((item) => !existingItemIds.has(item.id))
                 .map((item) => item.id);
             if (newItemIds.length) {
                 await inventoryAnalyzeBatch(selectedBatchId, newItemIds);
-                items = await inventoryListBatchItems(selectedBatchId);
+                const latestAfterQueue = await inventoryListBatchItems(selectedBatchId);
+                items = mergePolledItemsWithPending(
+                    latestAfterQueue,
+                    items,
+                    pendingPatches,
+                );
+                wasAnalyzing = true;
+                ensureAnalysisPolling();
             }
             closeUploadModal();
             globalStatus = newItemIds.length
-                ? `Uploaded and grouped ${uploadFiles.length} photo(s). AI title and price analysis is now running.`
-                : `Successfully uploaded ${uploadFiles.length} photo(s) (under 10MB limit) and updated item groups.`;
+                ? `Uploaded and grouped ${uploadedPhotoCount} photo(s). AI title and price analysis is now running.`
+                : `Successfully uploaded ${uploadedPhotoCount} photo(s) (under 10MB limit) and updated item groups.`;
         } catch (err) {
             try {
                 await reloadBatchData();
@@ -1519,15 +1672,24 @@
                 await new Promise((resolve) => setTimeout(resolve, 1000));
                 const state = await inventoryReanalysisStatus(item.id).catch(() => null);
                 if (!state || state.status === "completed" || state.status === "failed") {
-                    if (state?.item) {
-                        items = items.map((it) => (it.id === item.id ? { ...it, ...state.item } : it));
-                    } else {
-                        const refreshed = await inventoryGetItem(item.id).catch(() => null);
-                        if (refreshed) {
-                            items = items.map((it) => (it.id === item.id ? refreshed : it));
+                    const refreshedItem = state?.item || (await inventoryGetItem(item.id).catch(() => null));
+                    if (refreshedItem) {
+                        const mergedList = mergePolledItemsWithPending(
+                            items.map((it) => (it.id === item.id ? refreshedItem : it)),
+                            items,
+                            pendingPatches,
+                        );
+                        items = mergedList;
+                        if (inspectingItemId === item.id) {
+                            inspectingItem =
+                                mergedList.find((it) => it.id === item.id) ||
+                                inspectingItem;
                         }
                     }
-                    if (state?.status === "completed") {
+                    if (state?.status === "failed") {
+                        globalError = state.error || "Re-analysis failed. Review error details and retry.";
+                        globalStatus = "";
+                    } else if (state?.status === "completed") {
                         globalStatus = `Re-analysis complete for ${item.listing?.title || item.id}.`;
                     }
                     break;
@@ -1650,6 +1812,33 @@
         </div>
 
         <div class="header-right">
+            <!-- Mobile Quick Upload & Analyze Actions (desktop uses bottom action bar) -->
+            <div class="mobile-header-actions">
+                <button
+                    type="button"
+                    class="batch-new-btn"
+                    on:click={openUploadModal}
+                    disabled={actionLoading}
+                >
+                    + Upload
+                </button>
+                {#if hasAnalyzing}
+                    <span class="text-xs font-bold text-blue-700 px-2 py-1 rounded bg-blue-50 border border-blue-200">
+                        Analyzing…
+                    </span>
+                {:else if hasGrouped}
+                    <button
+                        type="button"
+                        class="batch-new-btn"
+                        style="background:#0f172a;color:#fff;border-color:#0f172a;"
+                        on:click={analyzeSelectedOrBatch}
+                        disabled={actionLoading || items.length === 0}
+                    >
+                        Analyze
+                    </button>
+                {/if}
+            </div>
+
             <!-- Selected Count Badge -->
             {#if selectedItemIds.size > 0}
                 <span class="selection-badge">
@@ -1926,9 +2115,9 @@
         </div>
     </div>
 
-    <!-- Instruction Help Bar with View Mode Toggle -->
+    <!-- Instruction Help Bar with View Mode Toggle & Filters -->
     <div class="instruction-bar">
-        <div class="flex items-center gap-3">
+        <div class="instruction-help-copy flex items-center gap-3">
             <span class="text-xs text-slate-600 font-medium">
                 {viewMode === "gallery"
                     ? "Photo Gallery & Manual Grouping · Select photos to create, split, merge, or reorder item groups. All uploads are preserved."
@@ -1937,9 +2126,9 @@
                     : "CSV Draft Verification Table · 11-column spreadsheet for verifying draft export values."}
             </span>
         </div>
-        <div class="flex items-center gap-3">
+        <div class="toolbar-controls">
             <!-- View Mode Segmented Control -->
-            <div class="view-mode-toggle">
+            <div class="view-mode-toggle" role="tablist" aria-label="Workspace view mode">
                 <button
                     type="button"
                     class="view-toggle-btn"
@@ -1947,44 +2136,67 @@
                     on:click={() => (viewMode = "gallery")}
                     title="Visual photo gallery and manual grouping controls"
                 >
-                    <span class="mr-1">🖼️</span> Photo Gallery & Groups
+                    <span class="mr-1">🖼️</span><span class="view-label-desktop">Photo Gallery & Groups</span><span class="view-label-mobile">Gallery</span>
                 </button>
                 <button
                     type="button"
                     class="view-toggle-btn"
                     class:active={viewMode === "cards"}
                     on:click={() => (viewMode = "cards")}
-                    title="Visual card grid (MetaMuse style)"
+                    title="Visual card grid"
                 >
-                    <span class="mr-1">🎴</span> Cards
+                    <span class="mr-1">🎴</span><span>Cards</span>
                 </button>
                 <button
                     type="button"
                     class="view-toggle-btn"
                     class:active={viewMode === "table"}
                     on:click={() => (viewMode = "table")}
-                    title="11-column spreadsheet table for CSV verification"
+                    title="Spreadsheet table for CSV verification"
                 >
-                    <span class="mr-1">📊</span> Table
+                    <span class="mr-1">📊</span><span>Table</span>
                 </button>
             </div>
 
             <!-- Search & Filter Controls -->
-            <input
-                type="text"
-                class="search-input"
-                placeholder="Filter title, brand, category..."
-                bind:value={searchQuery}
-            />
-            <select class="filter-select" bind:value={statusFilter}>
-                <option value="all">All statuses</option>
-                <option value="incomplete">Incomplete fields</option>
-                <option value="needs_review">Needs Review</option>
-                <option value="ready_for_approval">Ready for Approval</option>
-                <option value="approved">Approved</option>
-                <option value="draft_submitted">Draft Submitted</option>
-            </select>
+            <div class="filter-inputs-row">
+                <input
+                    type="text"
+                    class="search-input"
+                    placeholder="Filter title, brand, category..."
+                    bind:value={searchQuery}
+                />
+                <select class="filter-select" bind:value={statusFilter} aria-label="Filter items by status">
+                    <option value="all">All statuses</option>
+                    <option value="incomplete">Incomplete fields</option>
+                    <option value="needs_review">Needs Review</option>
+                    <option value="ready_for_approval">Ready for Approval</option>
+                    <option value="approved">Approved</option>
+                    <option value="draft_submitted">Draft Submitted</option>
+                </select>
+            </div>
         </div>
+    </div>
+
+    <!-- Horizontally Scrollable Quick Filter Bar (mobile-friendly) -->
+    <div class="mobile-filter-pills" role="group" aria-label="Quick status filters">
+        {#each [
+            { id: "all", label: `All (${totalItemCount})` },
+            { id: "incomplete", label: "Incomplete" },
+            { id: "needs_review", label: `Needs Review (${needsReviewCount})` },
+            { id: "ready_for_approval", label: `Ready (${readyCount})` },
+            { id: "approved", label: `Approved (${approvedCount})` },
+            { id: "draft_submitted", label: `Drafts (${submittedCount})` },
+        ] as pill}
+            <button
+                type="button"
+                class="filter-pill-chip"
+                class:active={statusFilter === pill.id}
+                on:click={() => (statusFilter = pill.id)}
+            >
+                {pill.label}
+            </button>
+        {/each}
     </div>
 
     <!-- Alerts / Messages -->
@@ -2337,6 +2549,11 @@
                         {#each filteredItems as item (item.id)}
                             {@const listing = item.listing || {}}
                             {@const readiness = getItemReadiness(item)}
+                            {@const tiers = getPriceTiers(item)}
+                            {@const marketEv = getMarketPricingEvidence(item)}
+                            {@const titleCands = getTitleCandidateEntries(item)}
+                            {@const priceProv = formatProvenanceClassification(item.provenance?.price, listing.price)}
+                            {@const titleProv = formatProvenanceClassification(item.provenance?.title, listing.title)}
                             {@const isSelected = selectedItemIds.has(item.id)}
                             {@const isInspecting = inspectingItemId === item.id}
                             {@const statusInfo = getStatusBadge(
@@ -2431,6 +2648,17 @@
 
                                 <!-- Card Content -->
                                 <div class="card-content">
+                                    {#if listing.analysisStatus === "failed" || listing.analysisStatus === "timeout" || (item.workflowStatus === "needs_review" && listing.analysisError)}
+                                        <div class="p-2 rounded-md border border-rose-200 bg-rose-50 text-rose-800 text-xs">
+                                            <div class="font-bold text-rose-900">
+                                                ⚠️ Analysis {listing.analysisStatus === "timeout" ? "Timed Out" : "Failed"}
+                                            </div>
+                                            <p class="mt-0.5 leading-snug">
+                                                {listing.analysisError || "Analysis could not complete."}
+                                            </p>
+                                        </div>
+                                    {/if}
+
                                     <!-- Category Tag -->
                                     <div class="card-category-row">
                                         <button
@@ -2460,15 +2688,20 @@
                                         {/if}
                                     </div>
 
-                                    <!-- Listing Title with Character Count -->
+                                    <!-- Listing Title with Strategy & Character Count -->
                                     <div class="card-title-row">
                                         <div
-                                            class="flex items-center justify-between text-[11px] text-slate-400 mb-1"
+                                            class="flex items-center justify-between gap-1 text-[11px] text-slate-400 mb-1 flex-wrap"
                                         >
-                                            <span
-                                                class="font-medium text-slate-500"
-                                                >eBay Title</span
-                                            >
+                                            <div class="flex items-center gap-1.5">
+                                                <span
+                                                    class="font-medium text-slate-500"
+                                                    >eBay Title</span
+                                                >
+                                                <span class="prov-badge {titleProv.badgeClass}">
+                                                    {titleProv.shortLabel}
+                                                </span>
+                                            </div>
                                             <span
                                                 class="font-mono font-bold"
                                                 class:text-rose-600={(
@@ -2504,9 +2737,9 @@
                                                 )}
                                         />
 
-                                        {#if item.titleCandidates && Object.keys(item.titleCandidates).length > 1}
+                                        {#if titleCands.length > 0}
                                             <div
-                                                class="mt-1 flex items-center justify-between"
+                                                class="mt-1 flex items-center justify-between gap-2"
                                             >
                                                 <button
                                                     type="button"
@@ -2519,10 +2752,13 @@
                                                                 : item.id;
                                                     }}
                                                 >
-                                                    ✨ Alternative Titles ({Object.keys(
-                                                        item.titleCandidates,
-                                                    ).length})
+                                                    ✨ Title Strategies ({titleCands.length})
                                                 </button>
+                                                {#if listing.titleOptimization?.strategyLabel || listing.titleSeoMetadata?.strategyLabel}
+                                                    <span class="text-[10px] font-semibold {listing.titleOptimization?.isFallback ? 'text-amber-700' : 'text-emerald-700'}">
+                                                        {listing.titleOptimization?.isFallback ? 'AI fallback' : 'Demand SEO'}
+                                                    </span>
+                                                {/if}
                                             </div>
 
                                             {#if activeTitleCandidatesItemId === item.id}
@@ -2534,14 +2770,14 @@
                                                     >
                                                         Choose Title Option
                                                     </div>
-                                                    {#each Object.entries(item.titleCandidates) as [cKey, cand]}
+                                                    {#each titleCands as cand}
                                                         <button
                                                             type="button"
                                                             class="candidate-option-btn"
                                                             on:click={() =>
                                                                 selectTitleCandidate(
                                                                     item,
-                                                                    cKey,
+                                                                    cand.key,
                                                                 )}
                                                         >
                                                             <div
@@ -2549,7 +2785,7 @@
                                                             >
                                                                 <span
                                                                     class="capitalize"
-                                                                    >{cKey.replace(
+                                                                    >{cand.key.replace(
                                                                         "_",
                                                                         " ",
                                                                     )}</span
@@ -2562,8 +2798,7 @@
                                                             <p
                                                                 class="text-xs text-slate-900 mt-0.5"
                                                             >
-                                                                {cand.title ||
-                                                                    cand}
+                                                                {cand.title}
                                                             </p>
                                                         </button>
                                                     {/each}
@@ -2603,12 +2838,17 @@
                                     <!-- Price Display & Quick Tiers -->
                                     <div class="card-price-section">
                                         <div
-                                            class="flex items-center justify-between mb-1.5"
+                                            class="flex items-center justify-between gap-2 mb-1.5"
                                         >
-                                            <span
-                                                class="text-[11px] font-bold uppercase tracking-wider text-slate-500"
-                                                >Listing Price</span
-                                            >
+                                            <div>
+                                                <span
+                                                    class="text-[11px] font-bold uppercase tracking-wider text-slate-500 block"
+                                                    >Listing Price</span
+                                                >
+                                                <span class="prov-badge {priceProv.badgeClass}">
+                                                    {priceProv.shortLabel}
+                                                </span>
+                                            </div>
                                             <div
                                                 class="relative flex items-center"
                                             >
@@ -2641,22 +2881,44 @@
                                             </div>
                                         </div>
 
+                                        {#if marketEv.insufficient && (listing.price || marketEv.aiEstimatedPrice)}
+                                            <div class="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-1.5">
+                                                {marketEv.marketMessage}
+                                                {#if marketEv.aiEstimatedPrice}
+                                                    <span class="block font-normal text-amber-700">
+                                                        AI fallback estimate: ${marketEv.aiEstimatedPrice.toFixed(2)} (separate from market comps)
+                                                    </span>
+                                                {/if}
+                                            </div>
+                                        {:else if marketEv.soldCount > 0 || marketEv.activeCount > 0}
+                                            <div class="text-[10px] text-slate-600 mb-1.5 flex flex-wrap gap-2">
+                                                <span>
+                                                    Sold: <strong>{marketEv.soldCount > 0 ? `$${marketEv.soldPrice.toFixed(2)} (${marketEv.soldCount})` : "--"}</strong>
+                                                </span>
+                                                <span>
+                                                    Active: <strong>{marketEv.activeCount > 0 ? `$${marketEv.activePrice.toFixed(2)} (${marketEv.activeCount})` : "--"}</strong>
+                                                </span>
+                                                {#if marketEv.aiEstimatedPrice}
+                                                    <span>
+                                                        AI est: <strong>${marketEv.aiEstimatedPrice.toFixed(2)}</strong>
+                                                    </span>
+                                                {/if}
+                                            </div>
+                                        {/if}
+
                                         <!-- Fast 1-click Price Tiers -->
                                         <div class="card-price-tiers">
                                             <button
                                                 type="button"
                                                 class="price-tier-chip"
-                                                title="Quick sale price"
+                                                title="Fast sale price"
+                                                disabled={!tiers.quickSale}
                                                 on:click={() => {
-                                                    const p =
-                                                        item.quickSalePrice ||
-                                                        item.pricingTiers
-                                                            ?.quickSale?.price;
-                                                    if (p) {
+                                                    if (tiers.quickSale) {
                                                         handleInlineEdit(
                                                             item,
                                                             "price",
-                                                            parseFloat(p),
+                                                            tiers.quickSale,
                                                         );
                                                         handleInlineEdit(
                                                             item,
@@ -2667,31 +2929,26 @@
                                                 }}
                                             >
                                                 <span class="tier-lbl"
-                                                    >Quick</span
+                                                    >Fast Sale</span
                                                 >
                                                 <span class="tier-cost"
-                                                    >${item.quickSalePrice ||
-                                                        item.pricingTiers
-                                                            ?.quickSale
-                                                            ?.price ||
-                                                        "--"}</span
+                                                    >${tiers.quickSale !== null
+                                                        ? tiers.quickSale.toFixed(2)
+                                                        : "--"}</span
                                                 >
                                             </button>
                                             <button
                                                 type="button"
                                                 class="price-tier-chip active-tier"
                                                 title="Balanced price"
+                                                disabled={!tiers.balanced && !listing.price}
                                                 on:click={() => {
-                                                    const p =
-                                                        item.balancedPrice ||
-                                                        item.pricingTiers
-                                                            ?.balanced?.price ||
-                                                        listing.price;
-                                                    if (p) {
+                                                    const p = tiers.balanced || Number(listing.price);
+                                                    if (p > 0) {
                                                         handleInlineEdit(
                                                             item,
                                                             "price",
-                                                            parseFloat(p),
+                                                            p,
                                                         );
                                                         handleInlineEdit(
                                                             item,
@@ -2705,27 +2962,24 @@
                                                     >Balanced</span
                                                 >
                                                 <span class="tier-cost"
-                                                    >${item.balancedPrice ||
-                                                        item.pricingTiers
-                                                            ?.balanced?.price ||
-                                                        listing.price ||
-                                                        "--"}</span
+                                                    >${tiers.balanced !== null
+                                                        ? tiers.balanced.toFixed(2)
+                                                        : listing.price
+                                                          ? Number(listing.price).toFixed(2)
+                                                          : "--"}</span
                                                 >
                                             </button>
                                             <button
                                                 type="button"
                                                 class="price-tier-chip"
                                                 title="Premium margin price"
+                                                disabled={!tiers.premium}
                                                 on:click={() => {
-                                                    const p =
-                                                        item.premiumPrice ||
-                                                        item.pricingTiers
-                                                            ?.premium?.price;
-                                                    if (p) {
+                                                    if (tiers.premium) {
                                                         handleInlineEdit(
                                                             item,
                                                             "price",
-                                                            parseFloat(p),
+                                                            tiers.premium,
                                                         );
                                                         handleInlineEdit(
                                                             item,
@@ -2739,10 +2993,9 @@
                                                     >Premium</span
                                                 >
                                                 <span class="tier-cost"
-                                                    >${item.premiumPrice ||
-                                                        item.pricingTiers
-                                                            ?.premium?.price ||
-                                                        "--"}</span
+                                                    >${tiers.premium !== null
+                                                        ? tiers.premium.toFixed(2)
+                                                        : "--"}</span
                                                 >
                                             </button>
                                         </div>
@@ -3172,14 +3425,11 @@
                                                         >AI estimate</span
                                                     >
                                                 {/if}
-                                                {#if item.pricingOptions?.quickSale?.price}
+                                                {#if item.pricingOptions?.quick_sale?.price || item.pricingOptions?.quickSale?.price}
                                                     <span
                                                         class="text-slate-400"
-                                                        title="Quick Sale price"
-                                                        >· Q:${item
-                                                            .pricingOptions
-                                                            .quickSale
-                                                            .price}</span
+                                                        title="Fast Sale price"
+                                                        >· Q:${item.pricingOptions?.quick_sale?.price || item.pricingOptions?.quickSale?.price}</span
                                                     >
                                                 {/if}
                                                 {#if item.pricingOptions?.balanced?.price}
@@ -3323,15 +3573,30 @@
         <!-- Slide-Over Item Inspector Panel -->
         {#if inspectingItem}
             {@const inspReadiness = getItemReadiness(inspectingItem)}
-            <aside class="inspector-drawer">
+            {@const inspMarket = getMarketPricingEvidence(inspectingItem)}
+            {@const inspTiers = getPriceTiers(inspectingItem)}
+            {@const inspTitleCands = getTitleCandidateEntries(inspectingItem)}
+            {@const titleMeta = inspectingItem.listing?.titleOptimization || inspectingItem.listing?.titleSeoMetadata || {}}
+            {@const titleProvInfo = formatProvenanceClassification(inspectingItem.provenance?.title, inspectingItem.listing?.title)}
+            <aside class="inspector-drawer" aria-label="Item Inspector">
                 <div class="inspector-header">
-                    <div>
-                        <h3 class="text-base font-bold text-slate-900">
-                            Item Inspector
-                        </h3>
-                        <p class="text-xs text-slate-500">
-                            {inspectingItem.id.slice(0, 8)}
-                        </p>
+                    <div class="flex items-center gap-2">
+                        <button
+                            type="button"
+                            class="mobile-back-btn"
+                            on:click={closeItemInspector}
+                            aria-label="Back to item list"
+                        >
+                            ← Back
+                        </button>
+                        <div>
+                            <h3 class="text-base font-bold text-slate-900">
+                                Item Inspector
+                            </h3>
+                            <p class="text-xs text-slate-500">
+                                {inspectingItem.id.slice(0, 8)}
+                            </p>
+                        </div>
                     </div>
                     <div style="display: flex; gap: 8px; align-items: center;">
                         <button
@@ -3727,6 +3992,7 @@
                                 {/if}
                             </div>
                             <input
+                                id="inspector-brand-input"
                                 type="text"
                                 class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
                                 placeholder="e.g. Carhartt, Nike, Levi's..."
@@ -3734,6 +4000,29 @@
                                 on:input={(e) => {
                                     handleInlineEdit(inspectingItem, "brand", e.target.value);
                                     handleInlineEdit(inspectingItem, "confirmField", "brand");
+                                }}
+                            />
+                        </div>
+
+                        <!-- Size Input -->
+                        <div class="mb-2.5">
+                            <div class="flex items-center justify-between mb-0.5">
+                                <label for="inspector-size-input" class="text-xs font-semibold text-slate-700">
+                                    Size
+                                </label>
+                                {#if inspectingItem.provenance?.size?.sellerConfirmed}
+                                    <span class="text-[10px] text-emerald-700 font-bold">✓ Confirmed</span>
+                                {/if}
+                            </div>
+                            <input
+                                id="inspector-size-input"
+                                type="text"
+                                class="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                                placeholder="e.g. M, L, 10, N/A - bag..."
+                                value={inspectingItem.listing?.size || ""}
+                                on:input={(e) => {
+                                    handleInlineEdit(inspectingItem, "size", e.target.value);
+                                    handleInlineEdit(inspectingItem, "confirmField", "size");
                                 }}
                             />
                         </div>
@@ -3797,10 +4086,25 @@
 
                     <!-- Title & SKU Section -->
                     <div class="inspector-section">
-                        <div class="flex items-center justify-between mb-1">
-                            <h4 class="inspector-section-title mb-0">
-                                Title & SKU
-                            </h4>
+                        <div class="flex items-center justify-between gap-1 flex-wrap mb-1">
+                            <div class="flex items-center gap-1.5 flex-wrap">
+                                <h4 class="inspector-section-title mb-0">
+                                    Title & SKU
+                                </h4>
+                                <span class="prov-badge {titleProvInfo.badgeClass}">
+                                    {titleProvInfo.label}
+                                </span>
+                                {#if titleMeta.strategyLabel}
+                                    <span class="text-[10px] font-bold px-1.5 py-0.5 rounded {titleMeta.isFallback ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}">
+                                        {titleMeta.strategyLabel}
+                                    </span>
+                                {/if}
+                                {#if titleMeta.confidence}
+                                    <span class="conf-badge conf-{titleMeta.confidence}">
+                                        {titleMeta.confidence}
+                                    </span>
+                                {/if}
+                            </div>
                             <span
                                 class="text-xs font-semibold"
                                 class:text-rose-600={(
@@ -3815,6 +4119,7 @@
                             </span>
                         </div>
                         <input
+                            id="inspector-title-input"
                             type="text"
                             class="w-full text-xs p-2 border rounded-md text-slate-800 font-medium mb-1"
                             placeholder="Enter eBay listing title (1-80 characters)..."
@@ -3833,14 +4138,28 @@
                                 );
                             }}
                         />
-                        {#if (inspectingItem.titleCandidates || []).length > 1}
+                        {#if titleMeta.productReasoning}
+                            <p class="text-[11px] text-slate-600 mb-1.5">
+                                {titleMeta.productReasoning}
+                            </p>
+                        {/if}
+                        {#if titleMeta.keywordPriority?.length}
+                            <div class="flex flex-wrap gap-1 mb-1.5">
+                                {#each titleMeta.keywordPriority.slice(0, 6) as kp}
+                                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
+                                        {kp.term || kp}
+                                    </span>
+                                {/each}
+                            </div>
+                        {/if}
+                        {#if inspTitleCands.length > 0}
                             <div class="mt-1">
                                 <span
                                     class="text-[11px] text-slate-500 font-medium"
-                                    >Alternative suggested titles:</span
+                                    >Suggested title strategies:</span
                                 >
                                 <div class="flex flex-col gap-1 mt-1">
-                                    {#each inspectingItem.titleCandidates as cand}
+                                    {#each inspTitleCands as cand}
                                         <button
                                             type="button"
                                             class="text-left text-xs p-1.5 border rounded hover:bg-slate-50 text-slate-700 transition"
@@ -3848,7 +4167,7 @@
                                                 handleInlineEdit(
                                                     inspectingItem,
                                                     "title",
-                                                    cand,
+                                                    cand.title,
                                                 );
                                                 handleInlineEdit(
                                                     inspectingItem,
@@ -3857,7 +4176,11 @@
                                                 );
                                             }}
                                         >
-                                            {cand}
+                                            <div class="flex justify-between text-[10px] text-slate-500 font-semibold">
+                                                <span class="capitalize">{cand.key.replace("_", " ")}</span>
+                                                <span>{cand.length}/80</span>
+                                            </div>
+                                            <div class="text-slate-800 font-medium">{cand.title}</div>
                                         </button>
                                     {/each}
                                 </div>
@@ -3889,7 +4212,7 @@
 
                     <!-- Marketplace Pricing Evidence Section (Priority 2) -->
                     <div class="inspector-section bg-emerald-50/30 border border-emerald-200/80 rounded-lg p-3">
-                        <div class="flex items-center justify-between mb-1.5">
+                        <div class="flex items-center justify-between gap-1.5 flex-wrap mb-1.5">
                             <h4 class="inspector-section-title mb-0 flex items-center gap-1.5 text-emerald-950">
                                 <span>💰 Marketplace Pricing Evidence</span>
                             </h4>
@@ -3897,49 +4220,83 @@
                                 <span class="text-[11px] px-2 py-0.5 rounded font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
                                     ✓ Price Confirmed
                                 </span>
+                            {:else if inspMarket.insufficient}
+                                <span class="text-[11px] px-2 py-0.5 rounded font-bold bg-rose-100 text-rose-800 border border-rose-300">
+                                    AI Fallback — Confirmation Required
+                                </span>
                             {:else}
                                 <span class="text-[11px] px-2 py-0.5 rounded font-bold bg-amber-100 text-amber-800 border border-amber-300">
-                                    AI estimate — verify before approval
+                                    Market Evidence — Verify Price
                                 </span>
                             {/if}
                         </div>
 
-                        <!-- Data Sources Breakdown: Sold vs Active vs AI -->
-                        <div class="grid grid-cols-3 gap-2 mb-3 bg-white p-2.5 rounded-md border border-slate-200 text-center">
-                            <div class="p-1">
+                        {#if inspMarket.insufficient}
+                            <div class="mb-2.5 p-2 rounded border border-amber-300 bg-amber-50 text-amber-900 text-xs font-semibold">
+                                {inspMarket.marketMessage}
+                            </div>
+                        {/if}
+
+                        <!-- Data Sources Breakdown: Sold vs Active vs AI Fallback (Strictly Separated) -->
+                        <div class="grid grid-cols-3 gap-1.5 mb-2.5 bg-white p-2 rounded-md border border-slate-200 text-center">
+                            <div class="p-1 min-w-0">
                                 <span class="text-[10px] uppercase font-bold text-slate-500 block">Verified Sold</span>
                                 <span class="text-xs font-bold text-slate-900 block mt-0.5">
-                                    {inspectingItem.listing?.soldPrice ? `$${Number(inspectingItem.listing.soldPrice).toFixed(2)}` : (inspectingItem.provenance?.price?.source === 'exact_used_sold' ? `$${Number(inspectingItem.listing?.price || 0).toFixed(2)}` : '--')}
+                                    {inspMarket.soldCount > 0 && inspMarket.soldPrice !== null ? `$${inspMarket.soldPrice.toFixed(2)}` : "--"}
                                 </span>
-                                <span class="text-[9px] text-slate-400">Actual sales</span>
+                                <span class="text-[9px] text-slate-400 block">
+                                    {inspMarket.soldCount > 0 ? `${inspMarket.soldCount} sold ($${inspMarket.soldLow?.toFixed(2)}–$${inspMarket.soldHigh?.toFixed(2)})` : "No sold comps"}
+                                </span>
                             </div>
-                            <div class="p-1 border-x border-slate-100">
+                            <div class="p-1 border-x border-slate-100 min-w-0">
                                 <span class="text-[10px] uppercase font-bold text-slate-500 block">Active Comps</span>
                                 <span class="text-xs font-bold text-slate-900 block mt-0.5">
-                                    {inspectingItem.listing?.activeComparablePrice ? `$${Number(inspectingItem.listing.activeComparablePrice).toFixed(2)}` : '--'}
+                                    {inspMarket.activeCount > 0 && inspMarket.activePrice !== null ? `$${inspMarket.activePrice.toFixed(2)}` : "--"}
                                 </span>
-                                <span class="text-[9px] text-slate-400">Advisory asks</span>
+                                <span class="text-[9px] text-slate-400 block">
+                                    {inspMarket.activeCount > 0 ? `${inspMarket.activeCount} active ($${inspMarket.activeLow?.toFixed(2)}–$${inspMarket.activeHigh?.toFixed(2)})` : "No active comps"}
+                                </span>
                             </div>
-                            <div class="p-1">
+                            <div class="p-1 min-w-0">
                                 <span class="text-[10px] uppercase font-bold text-slate-500 block">AI Estimate</span>
                                 <span class="text-xs font-bold text-slate-900 block mt-0.5">
-                                    {inspectingItem.balancedPrice ? `$${Number(inspectingItem.balancedPrice).toFixed(2)}` : (inspectingItem.listing?.price ? `$${Number(inspectingItem.listing.price).toFixed(2)}` : '--')}
+                                    {inspMarket.aiEstimatedPrice !== null ? `$${inspMarket.aiEstimatedPrice.toFixed(2)}` : "--"}
                                 </span>
-                                <span class="text-[9px] text-slate-400">Algorithmic</span>
+                                <span class="text-[9px] text-slate-400 block">AI fallback (separate)</span>
                             </div>
                         </div>
 
-                        {#if inspectingItem.provenance?.price?.evidence || inspectingItem.pricingTiers?.balanced?.reason}
-                            <p class="text-[11px] text-slate-600 mb-2 italic">
-                                ℹ {inspectingItem.provenance?.price?.evidence || inspectingItem.pricingTiers?.balanced?.reason}
-                            </p>
-                        {/if}
+                        <div class="text-[11px] text-slate-600 mb-2 space-y-0.5">
+                            {#if inspectingItem.provenance?.price?.evidence}
+                                <p class="italic">
+                                    ℹ {inspectingItem.provenance.price.evidence}
+                                </p>
+                            {/if}
+                            <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-500">
+                                {#if inspMarket.pricingStrategy}
+                                    <span>Strategy: <strong>{inspMarket.pricingStrategy}</strong></span>
+                                {/if}
+                                {#if inspMarket.pricingConfidence}
+                                    <span>Confidence: <strong>{inspMarket.pricingConfidence}</strong></span>
+                                {/if}
+                                {#if inspMarket.demand?.currentDemandSignal}
+                                    <span>Demand: <strong>{inspMarket.demand.currentDemandSignal}</strong></span>
+                                {/if}
+                                {#if inspMarket.demand?.sellThroughSignal && inspMarket.demand.sellThroughSignal !== "unavailable"}
+                                    <span>Velocity: <strong>{inspMarket.demand.sellThroughSignal}</strong></span>
+                                {/if}
+                                {#if inspMarket.dataFreshness}
+                                    <span>Checked: <strong>{formatTime(inspMarket.dataFreshness)}</strong></span>
+                                {/if}
+                            </div>
+                        </div>
 
                         <!-- Final Price Input & Quantity -->
                         <div class="flex items-center gap-2 mb-2.5">
                             <div class="relative flex-1">
                                 <span class="absolute left-2.5 top-2 text-slate-400 text-sm">$</span>
                                 <input
+                                    id="inspector-price-input"
                                     type="number"
                                     step="0.01"
                                     min="0.01"
@@ -3971,47 +4328,48 @@
                             <button
                                 type="button"
                                 class="price-tier-btn"
-                                title="Fast inventory turnover (85% of base)"
+                                title={inspTiers.quickMeta?.reason || "Fast sale price"}
+                                disabled={!inspTiers.quickSale}
                                 on:click={() => {
-                                    const p = inspectingItem.quickSalePrice || inspectingItem.pricingTiers?.quickSale?.price || (inspectingItem.listing?.price ? (Number(inspectingItem.listing.price) * 0.85).toFixed(2) : null);
-                                    if (p) {
-                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
+                                    if (inspTiers.quickSale) {
+                                        handleInlineEdit(inspectingItem, "price", inspTiers.quickSale);
                                         handleInlineEdit(inspectingItem, "confirmField", "price");
                                     }
                                 }}
                             >
-                                <span class="tier-name">Quick Sale (-15%)</span>
-                                <span class="tier-val">${inspectingItem.quickSalePrice || inspectingItem.pricingTiers?.quickSale?.price || (inspectingItem.listing?.price ? (Number(inspectingItem.listing.price) * 0.85).toFixed(2) : "--")}</span>
+                                <span class="tier-name">Fast Sale</span>
+                                <span class="tier-val">${inspTiers.quickSale !== null ? inspTiers.quickSale.toFixed(2) : "--"}</span>
                             </button>
                             <button
                                 type="button"
                                 class="price-tier-btn"
-                                title="Balanced profit and velocity"
+                                title={inspTiers.balancedMeta?.reason || "Balanced profit and velocity"}
+                                disabled={!inspTiers.balanced && !inspectingItem.listing?.price}
                                 on:click={() => {
-                                    const p = inspectingItem.balancedPrice || inspectingItem.pricingTiers?.balanced?.price || inspectingItem.listing?.price;
-                                    if (p) {
-                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
+                                    const p = inspTiers.balanced || Number(inspectingItem.listing?.price);
+                                    if (p > 0) {
+                                        handleInlineEdit(inspectingItem, "price", p);
                                         handleInlineEdit(inspectingItem, "confirmField", "price");
                                     }
                                 }}
                             >
                                 <span class="tier-name">Balanced</span>
-                                <span class="tier-val">${inspectingItem.balancedPrice || inspectingItem.pricingTiers?.balanced?.price || inspectingItem.listing?.price || "--"}</span>
+                                <span class="tier-val">${inspTiers.balanced !== null ? inspTiers.balanced.toFixed(2) : (inspectingItem.listing?.price ? Number(inspectingItem.listing.price).toFixed(2) : "--")}</span>
                             </button>
                             <button
                                 type="button"
                                 class="price-tier-btn"
-                                title="Maximum margin (+15% of base)"
+                                title={inspTiers.premiumMeta?.reason || "Upper market margin tier"}
+                                disabled={!inspTiers.premium}
                                 on:click={() => {
-                                    const p = inspectingItem.premiumPrice || inspectingItem.pricingTiers?.premium?.price || (inspectingItem.listing?.price ? (Number(inspectingItem.listing.price) * 1.15).toFixed(2) : null);
-                                    if (p) {
-                                        handleInlineEdit(inspectingItem, "price", parseFloat(p));
+                                    if (inspTiers.premium) {
+                                        handleInlineEdit(inspectingItem, "price", inspTiers.premium);
                                         handleInlineEdit(inspectingItem, "confirmField", "price");
                                     }
                                 }}
                             >
-                                <span class="tier-name">Premium (+15%)</span>
-                                <span class="tier-val">${inspectingItem.premiumPrice || inspectingItem.pricingTiers?.premium?.price || (inspectingItem.listing?.price ? (Number(inspectingItem.listing.price) * 1.15).toFixed(2) : "--")}</span>
+                                <span class="tier-name">Premium</span>
+                                <span class="tier-val">${inspTiers.premium !== null ? inspTiers.premium.toFixed(2) : "--"}</span>
                             </button>
                         </div>
                     </div>
@@ -4062,6 +4420,7 @@
                         </div>
                         <div class="relative mb-2">
                             <input
+                                id="inspector-category-input"
                                 type="text"
                                 class="w-full text-xs p-2 border rounded text-slate-800"
                                 placeholder="Search eBay category (e.g. vintage jacket, boots)..."
@@ -4525,24 +4884,23 @@
                         </p>
 
                         <div class="space-y-3">
-                            {#each ["title", "price", "brand", "size", "cat", "cnote"] as fKey}
-                                {@const fVal = inspectingItem.listing?.[fKey]}
-                                {@const fProv =
-                                    inspectingItem.provenance?.[fKey] || {}}
+                            {#each ["title", "price", "brand", "size", "cat", "cnote", "demand", "marketEvidence"] as fKey}
+                                {@const fVal = inspectingItem.listing?.[fKey] ?? (fKey === "demand" ? inspectingItem.listing?.demandMetrics?.currentDemandSignal : fKey === "marketEvidence" ? inspectingItem.listing?.marketMessage || (inspectingItem.listing?.activeSampleSize ? `${inspectingItem.listing.activeSampleSize} active comps` : "") : "")}
+                                {@const fProv = inspectingItem.provenance?.[fKey] || {}}
+                                {@const provClass = formatProvenanceClassification(fProv, fVal)}
                                 <div class="provenance-card">
                                     <div
-                                        class="flex items-center justify-between"
+                                        class="flex items-center justify-between gap-1.5 flex-wrap"
                                     >
                                         <span
                                             class="font-bold text-xs uppercase text-slate-600"
                                             >{fKey}</span
                                         >
-                                        <div class="flex items-center gap-1.5">
+                                        <div class="flex items-center gap-1.5 flex-wrap">
                                             <span
-                                                class="prov-badge prov-{fProv.source ||
-                                                    'missing'}"
+                                                class="prov-badge {provClass.badgeClass}"
                                             >
-                                                {fProv.source || "missing"}
+                                                {provClass.label}
                                             </span>
                                             {#if fProv.confidence}
                                                 <span
@@ -4554,7 +4912,7 @@
                                         </div>
                                     </div>
                                     <div
-                                        class="text-sm text-slate-800 font-medium mt-1 truncate"
+                                        class="text-sm text-slate-800 font-medium mt-1 break-words"
                                     >
                                         {fVal || "(Empty)"}
                                     </div>
@@ -4565,29 +4923,31 @@
                                             {fProv.evidence}
                                         </p>
                                     {/if}
-                                    <div
-                                        class="mt-2 flex items-center justify-between pt-1 border-t border-slate-100"
-                                    >
-                                        <label
-                                            class="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer"
+                                    {#if ["title", "price", "brand", "size", "cat", "cnote"].includes(fKey)}
+                                        <div
+                                            class="mt-2 flex items-center justify-between pt-1 border-t border-slate-100"
                                         >
-                                            <input
-                                                type="checkbox"
-                                                checked={fProv.sellerConfirmed ===
-                                                    true}
-                                                on:change={(e) => {
-                                                    if (e.target.checked) {
-                                                        handleInlineEdit(
-                                                            inspectingItem,
-                                                            "confirmField",
-                                                            fKey,
-                                                        );
-                                                    }
-                                                }}
-                                            />
-                                            <span>Seller Confirmed</span>
-                                        </label>
-                                    </div>
+                                            <label
+                                                class="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer"
+                                            >
+                                                <input
+                                                    type="checkbox"
+                                                    checked={fProv.sellerConfirmed ===
+                                                        true}
+                                                    on:change={(e) => {
+                                                        if (e.target.checked) {
+                                                            handleInlineEdit(
+                                                                inspectingItem,
+                                                                "confirmField",
+                                                                fKey,
+                                                            );
+                                                        }
+                                                    }}
+                                                />
+                                                <span>Seller Confirmed</span>
+                                            </label>
+                                        </div>
+                                    {/if}
                                 </div>
                             {/each}
                         </div>
@@ -4608,13 +4968,77 @@
                         ></textarea>
                     </div>
                 </div>
+
+                <!-- Sticky Inspector Footer Actions (ensures mobile reachability to Save & Approve without horizontal scroll) -->
+                <div class="inspector-footer">
+                    <button
+                        type="button"
+                        class="card-action-btn-secondary flex-1"
+                        on:click={saveCurrentOrPending}
+                        disabled={actionLoading}
+                    >
+                        Save
+                    </button>
+                    {#if inspectingItem.workflowStatus !== "approved" && inspectingItem.workflowStatus !== "draft_submitted" && inspectingItem.workflowStatus !== "draft_result_available"}
+                        <button
+                            type="button"
+                            class="card-action-btn-approve flex-1"
+                            on:click={() => approveSingleItem(inspectingItem)}
+                            disabled={actionLoading}
+                        >
+                            Approve ✓
+                        </button>
+                    {/if}
+                    <button
+                        type="button"
+                        class="card-action-btn-secondary"
+                        on:click={closeItemInspector}
+                    >
+                        Close
+                    </button>
+                </div>
             </aside>
         {/if}
     </div>
 
-    <!-- Sticky Bottom Action Bar with State-Dependent Main Action (Requirements 4, 5, 7) -->
+    <!-- Sticky Bottom Action Bar: Desktop full bar + Mobile 4-action sticky footer (Review item, Save, Approve, Export) -->
     <div class="bottom-action-bar">
-        <div class="action-bar-inner">
+        <div class="mobile-sticky-footer">
+            <button
+                type="button"
+                class="mobile-footer-btn mobile-footer-review"
+                on:click={() => fixHighlightedFields()}
+                disabled={actionLoading || items.length === 0}
+            >
+                Review item
+            </button>
+            <button
+                type="button"
+                class="mobile-footer-btn mobile-footer-save"
+                on:click={saveCurrentOrPending}
+                disabled={actionLoading}
+            >
+                {autosaveStatus === "saving" ? "Saving…" : "Save"}
+            </button>
+            <button
+                type="button"
+                class="mobile-footer-btn mobile-footer-approve"
+                on:click={approveSelected}
+                disabled={actionLoading || items.length === 0}
+            >
+                Approve
+            </button>
+            <button
+                type="button"
+                class="mobile-footer-btn mobile-footer-export"
+                on:click={handleDownloadDraftCsv}
+                disabled={exportCsvLoading}
+            >
+                {exportCsvLoading ? "Export…" : "Export"}
+            </button>
+        </div>
+
+        <div class="action-bar-inner desktop-action-bar">
             <!-- Dedicated Upload Photos entry point (Requirement 6) -->
             <button
                 type="button"
@@ -6090,21 +6514,95 @@
         text-transform: uppercase;
     }
 
-    .prov-photo_evidence {
+    .mobile-header-actions {
+        display: none;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .mobile-back-btn {
+        display: none;
+        min-height: 36px;
+        padding: 4px 10px;
+        font-size: 12px;
+        font-weight: 700;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #f8fafc;
+        color: #0f172a;
+        cursor: pointer;
+    }
+
+    .inspector-footer {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-top: 1px solid #e2e8f0;
+        background: #ffffff;
+        position: sticky;
+        bottom: 0;
+        z-index: 5;
+    }
+
+    .toolbar-controls {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+
+    .filter-inputs-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .view-label-mobile {
+        display: none;
+    }
+
+    .view-label-desktop {
+        display: inline;
+    }
+
+    .mobile-filter-pills {
+        display: none;
+    }
+
+    .mobile-sticky-footer {
+        display: none;
+    }
+
+    .prov-photo_evidence,
+    .prov-observed_photo_fact {
         background: #dbeafe;
         color: #1e40af;
     }
-    .prov-ai_estimate {
+    .prov-ai_inference {
         background: #e0e7ff;
         color: #3730a3;
+    }
+    .prov-ai_estimate,
+    .prov-fallback_estimate {
+        background: #fef3c7;
+        color: #92400e;
+        border: 1px solid #fcd34d;
+    }
+    .prov-market_sold_comp,
+    .prov-market_active_comp,
+    .prov-demand_signal {
+        background: #d1fae5;
+        color: #065f46;
+        border: 1px solid #6ee7b7;
     }
     .prov-seller_input {
         background: #f3e8ff;
         color: #6b21a8;
     }
     .prov-missing {
-        background: #fef3c7;
-        color: #92400e;
+        background: #f1f5f9;
+        color: #64748b;
     }
 
     .conf-badge {
@@ -6535,5 +7033,320 @@
     .action-btn-secondary-export:disabled {
         opacity: 0.5;
         cursor: not-allowed;
+    }
+
+    /* Mobile Workspace Responsive Layout (320px, 375px, 390px, 430px) */
+    @media (max-width: 768px) {
+        .workspace-root {
+            padding: 12px 10px 84px;
+            border-radius: 8px;
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
+            overflow-x: hidden;
+            box-sizing: border-box;
+        }
+
+        .workspace-header {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 8px;
+            padding-bottom: 10px;
+        }
+
+        .header-titles h2 {
+            font-size: 18px;
+            line-height: 1.2;
+        }
+
+        .header-right {
+            justify-content: space-between;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .mobile-header-actions {
+            display: inline-flex;
+        }
+
+        .subtab-toggle-container {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 10px;
+        }
+
+        .subtab-pill-box {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            width: 100%;
+        }
+
+        .subtab-pill {
+            padding: 7px 8px;
+            font-size: 12px;
+            text-align: center;
+        }
+
+        .batch-selector-box {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+            width: 100%;
+        }
+
+        .batch-selector-box label {
+            grid-column: 1 / -1;
+        }
+
+        .batch-select {
+            grid-column: 1 / -1;
+            width: 100%;
+            min-width: 0;
+        }
+
+        .batch-actions-dropdown-container,
+        .batch-actions-trigger {
+            width: 100%;
+        }
+
+        .instruction-bar {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 8px;
+        }
+
+        .instruction-help-copy {
+            display: none;
+        }
+
+        .toolbar-controls {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 8px;
+            width: 100%;
+        }
+
+        .view-mode-toggle {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            width: 100%;
+        }
+
+        .view-toggle-btn {
+            justify-content: center;
+            padding: 7px 6px;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .view-label-desktop {
+            display: none;
+        }
+
+        .view-label-mobile {
+            display: inline;
+        }
+
+        .filter-inputs-row {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 6px;
+            width: 100%;
+        }
+
+        .search-input,
+        .filter-select {
+            width: 100%;
+            min-width: 0;
+            max-width: 100%;
+            box-sizing: border-box;
+        }
+
+        .mobile-filter-pills {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            padding: 2px 0 4px;
+            scrollbar-width: none;
+        }
+
+        .mobile-filter-pills::-webkit-scrollbar {
+            display: none;
+        }
+
+        .filter-pill-chip {
+            flex: 0 0 auto;
+            min-height: 30px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            border: 1px solid #cbd5e1;
+            background: #f8fafc;
+            color: #475569;
+            font-size: 11px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .filter-pill-chip.active {
+            background: #0f172a;
+            color: #ffffff;
+            border-color: #0f172a;
+        }
+
+        .batch-lifecycle-summary {
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            padding: 6px 8px;
+        }
+
+        .lifecycle-chip {
+            flex: 0 0 auto;
+            white-space: nowrap;
+        }
+
+        .spreadsheet-container {
+            flex-direction: column;
+            border: none;
+            min-height: auto;
+            overflow: visible;
+        }
+
+        .cards-grid-container {
+            padding: 4px 0;
+            max-height: none;
+            overflow-y: visible;
+            background: transparent;
+        }
+
+        .cards-grid {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 12px;
+        }
+
+        .listing-card {
+            min-width: 0;
+            width: 100%;
+            max-width: 100%;
+            box-sizing: border-box;
+        }
+
+        .card-category-btn {
+            max-width: calc(100% - 88px);
+        }
+
+        .card-footer {
+            flex-wrap: wrap;
+            gap: 6px;
+            padding: 10px;
+        }
+
+        .card-action-btn-secondary,
+        .card-action-btn-approve,
+        .card-action-btn-retry {
+            flex: 1 1 auto;
+            text-align: center;
+        }
+
+        /* Full-width Item Inspector Drawer on Mobile */
+        .inspector-drawer {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            max-width: 100vw;
+            height: 100dvh;
+            z-index: 1000;
+            border-left: none;
+            border-radius: 0;
+            box-sizing: border-box;
+        }
+
+        .mobile-header-actions {
+        display: none;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .mobile-back-btn {
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .inspector-header {
+            padding: 10px 12px;
+            flex-shrink: 0;
+        }
+
+        .inspector-body {
+            flex: 1;
+            max-height: none;
+            padding: 12px;
+            overflow-x: hidden;
+        }
+
+        .candidate-dropdown {
+            width: 100%;
+            max-width: calc(100vw - 40px);
+        }
+
+        /* Sticky Mobile Footer: Review item, Save, Approve, Export */
+        .bottom-action-bar {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 900;
+            background: rgba(255, 255, 255, 0.98);
+            backdrop-filter: blur(6px);
+            padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+            border-top: 1px solid #cbd5e1;
+            box-shadow: 0 -4px 12px rgba(15, 23, 42, 0.08);
+        }
+
+        .desktop-action-bar {
+            display: none;
+        }
+
+        .mobile-sticky-footer {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 6px;
+            width: 100%;
+        }
+
+        .mobile-footer-btn {
+            min-height: 40px;
+            padding: 6px 4px;
+            border-radius: 8px;
+            font-size: 11px;
+            font-weight: 700;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            border: 1px solid #cbd5e1;
+            background: #ffffff;
+            color: #0f172a;
+            cursor: pointer;
+        }
+
+        .mobile-footer-review {
+            background: #0f172a;
+            border-color: #0f172a;
+            color: #ffffff;
+        }
+
+        .mobile-footer-approve {
+            background: #0f766e;
+            border-color: #0f766e;
+            color: #ffffff;
+        }
+
+        .mobile-footer-export {
+            background: #f0fdfa;
+            border-color: #0f766e;
+            color: #0f766e;
+        }
     }
 </style>
