@@ -53,8 +53,6 @@ services:
       - "5173:5173"
     environment:
       VITE_PUBLIC_API_URL: "http://localhost:8080"
-      VITE_SUPABASE_URL: "${SUPABASE_URL:-}"
-      VITE_SUPABASE_PUBLISHABLE_KEY: "${SUPABASE_PUBLISHABLE_KEY:-}"
     volumes:
       - ./frontend:/app/frontend
       - frontend_node_modules:/app/frontend/node_modules
