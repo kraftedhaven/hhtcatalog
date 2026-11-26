@@ -33,7 +33,7 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
             os.environ,
             {
                 "COMMERCE_AGENT_DB": self.db_file.name,
-                "SUPABASE_URL": "https://project.supabase.co",
+                "NEON_AUTH_URL": "https://ep-test.neonauth.us-east-1.aws.neon.tech/neondb/auth",
                 "EBAY_DRAFTS_ENABLED": "true",
                 "EBAY_MUTATIONS_ENABLED": "true",
             },
@@ -220,10 +220,10 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
         def auth_seller_b():
             # pyrefly: ignore[missing-import]
             from flask import g
-            g.supabase_user = {"sub": self.user_b}
+            g.neon_user = {"sub": self.user_b}
 
         with mock.patch("app.authenticate_request", side_effect=auth_seller_b), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_b, "auth_user_id": self.user_b}):
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_b, "auth_user_id": self.user_b}):
             res = client.get("/api/ebay/feed/tasks/feed-task-a-exclusive")
             self.assertEqual(res.status_code, 403)
             self.assertIn("do not have access", res.get_json()["error"])
@@ -269,10 +269,10 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
 
         def auth_seller_a():
             from flask import g
-            g.supabase_user = {"sub": self.user_a}
+            g.neon_user = {"sub": self.user_a}
 
         with mock.patch("app.authenticate_request", side_effect=auth_seller_a), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_a, "auth_user_id": self.user_a}):
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_a, "auth_user_id": self.user_a}):
             res_del_str = self.client.delete(f"/api/inventory/items/{item['id']}", json={"allowDestructive": "true"})
             self.assertEqual(res_del_str.status_code, 400)
             self.assertIn("boolean", res_del_str.get_json()["error"].lower())
@@ -410,11 +410,11 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
 
         def auth_seller_a():
             from flask import g
-            g.supabase_user = {"sub": self.user_a}
+            g.neon_user = {"sub": self.user_a}
 
         completed_task = {"taskId": "task-ambig-poll", "status": "COMPLETED", "uploadSummary": {"successCount": 1, "failureCount": 0}}
         with mock.patch("app.authenticate_request", side_effect=auth_seller_a), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_a, "auth_user_id": self.user_a}), \
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_a, "auth_user_id": self.user_a}), \
              mock.patch("hht_app.inventory_workspace.get_feed_task_details", return_value=completed_task):
             res = client.post(f"/api/inventory/items/{item['id']}/submission/reconcile", json={"resolution": "poll"})
         self.assertEqual(res.status_code, 200)
@@ -535,10 +535,10 @@ class IntegrityReleaseBlockersTests(unittest.TestCase):
 
         def auth_seller_b():
             from flask import g
-            g.supabase_user = {"sub": self.user_b}
+            g.neon_user = {"sub": self.user_b}
 
         with mock.patch("app.authenticate_request", side_effect=auth_seller_b), \
-             mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": self.seller_b, "auth_user_id": self.user_b}):
+             mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": self.seller_b, "auth_user_id": self.user_b}):
             res = self.client.post(
                 f"/api/inventory/items/{item_b['id']}/submission/reconcile",
                 json={"resolution": "poll", "feedTaskId": "task-owner-a"},

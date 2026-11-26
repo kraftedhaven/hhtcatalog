@@ -1,25 +1,28 @@
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 import jwt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import app as hht_app
-from hht_app import commerce_agent
-from hht_app.supabase_auth import authenticate_request
+from hht_app import commerce_agent, inventory_workspace
+from hht_app.neon_auth import authenticate_request
 
 
 class JwtVerificationTests(unittest.TestCase):
     def setUp(self):
-        self.old_url = os.environ.get("SUPABASE_URL")
-        os.environ["SUPABASE_URL"] = "https://project.supabase.co"
+        self.old_url = os.environ.get("NEON_AUTH_URL")
+        os.environ["NEON_AUTH_URL"] = "https://ep-test.neonauth.us-east-1.aws.neon.tech/neondb/auth"
 
     def tearDown(self):
         if self.old_url is None:
-            os.environ.pop("SUPABASE_URL", None)
+            os.environ.pop("NEON_AUTH_URL", None)
         else:
-            os.environ["SUPABASE_URL"] = self.old_url
+            os.environ["NEON_AUTH_URL"] = self.old_url
 
     def test_missing_jwt_is_401(self):
         response = hht_app.app.test_client().post("/api/commerce/actions/action/apply")
@@ -47,8 +50,8 @@ class JwtVerificationTests(unittest.TestCase):
             "/api/commerce/actions/action/apply",
             headers={"Authorization": "Bearer invalid"},
         ):
-            with mock.patch("hht_app.supabase_auth.PyJWKClient") as jwks, mock.patch(
-                "hht_app.supabase_auth.jwt.decode", side_effect=error
+            with mock.patch("hht_app.neon_auth._jwks") as jwks, mock.patch(
+                "hht_app.neon_auth.jwt.decode", side_effect=error
             ):
                 jwks.return_value.get_signing_key_from_jwt.return_value.key = object()
                 response, status = authenticate_request()
@@ -67,6 +70,11 @@ class JwtVerificationTests(unittest.TestCase):
 
 class SellerOwnershipTests(unittest.TestCase):
     def setUp(self):
+        db_environment = mock.patch.dict(os.environ, {
+            "DATABASE_URL": "", "SUPABASE_DATABASE_URL": "", "POSTGRES_URL": "",
+        })
+        db_environment.start()
+        self.addCleanup(db_environment.stop)
         self.db_file = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
         self.db_file.close()
         self.old_db = os.environ.get("COMMERCE_AGENT_DB")
@@ -122,6 +130,40 @@ class SellerOwnershipTests(unittest.TestCase):
             os.environ.pop("COMMERCE_AGENT_DB", None)
         else:
             os.environ["COMMERCE_AGENT_DB"] = self.old_db
+
+    def test_inventory_requires_verified_explicit_neon_link(self):
+        batch = inventory_workspace.create_batch(self.seller_id, "Existing inventory")
+        inventory_workspace.create_batch(self.other_seller_id, "Other seller inventory")
+        origin = "https://ep-test.neonauth.us-east-1.aws.neon.tech"
+        key = Ed25519PrivateKey.generate()
+
+        with mock.patch.dict(os.environ, {
+            "NEON_AUTH_URL": f"{origin}/neondb/auth",
+            "NEON_AUTH_LINKED_USER_ID": "neon-linked",
+            "NEON_AUTH_LINKED_SELLER_ID": self.seller_id,
+            "SELLER_BOOTSTRAP_AUTH_USER_ID": "neon-unlinked",
+            "EBAY_MUTATIONS_ENABLED": "false",
+        }), mock.patch("hht_app.neon_auth._jwks") as jwks:
+            jwks.return_value.get_signing_key_from_jwt.return_value = SimpleNamespace(key=key.public_key())
+            client = hht_app.app.test_client()
+            for subject, verified, status in (
+                ("neon-linked", True, 200),
+                ("neon-linked", False, 403),
+                ("neon-unlinked", True, 403),
+                (self.other_auth_user_id, True, 403),
+            ):
+                with self.subTest(subject=subject, verified=verified):
+                    token = jwt.encode({
+                        "sub": subject,
+                        "iss": origin,
+                        "aud": origin,
+                        "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+                        "emailVerified": verified,
+                    }, key, algorithm="EdDSA")
+                    response = client.get("/api/inventory/batches", headers={"Authorization": f"Bearer {token}"})
+                    self.assertEqual(response.status_code, status, response.get_json())
+                    if status == 200:
+                        self.assertEqual([row["id"] for row in response.get_json()["result"]], [batch["id"]])
 
     def _approved_action(self):
         return commerce_agent.approve_recommendation(

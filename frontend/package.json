@@ -23,6 +23,6 @@
     "vite": "^5.0.0"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.117.2"
+    "@neondatabase/auth": "0.6.0-beta"
   }
 }

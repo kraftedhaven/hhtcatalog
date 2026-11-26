@@ -134,11 +134,11 @@ class MergePipelineTests(unittest.TestCase):
 
     def test_listing_analysis_start_returns_202_and_seller_scoped_job(self):
         def authenticate():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
         with mock.patch.object(app, "authenticate_request", side_effect=authenticate), mock.patch.object(
-            app.commerce_agent, "ensure_seller_identity", return_value={"id": "seller-id"}
+            app.commerce_agent, "linked_neon_seller", return_value={"id": "seller-id"}
         ), mock.patch.object(app.commerce_agent, "start_listing_analysis_job", return_value={
             "jobId": "job-1", "status": "queued", "kind": "listing_analysis",
         }) as start:
@@ -153,11 +153,11 @@ class MergePipelineTests(unittest.TestCase):
 
     def test_listing_analysis_poll_hides_unowned_job(self):
         def authenticate():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
         with mock.patch.object(app, "authenticate_request", side_effect=authenticate), mock.patch.object(
-            app.commerce_agent, "ensure_seller_identity", return_value={"id": "seller-id"}
+            app.commerce_agent, "linked_neon_seller", return_value={"id": "seller-id"}
         ), mock.patch.object(app.commerce_agent, "active_import_job", return_value=None):
             response = self.client.get("/api/analysis/jobs/not-owned")
         self.assertEqual(response.status_code, 404)
@@ -947,11 +947,11 @@ class MergePipelineTests(unittest.TestCase):
 
     def test_ebay_draft_endpoint_returns_result(self):
         def authenticated():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
         with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
-            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+            "app.commerce_agent.linked_neon_seller", return_value={"id": "seller-id"}
         ), mock.patch("app.commerce_agent.ebay_mutations_enabled", return_value=True), mock.patch(
             "app.create_ebay_draft", return_value={"status": "draft_created", "offerId": "offer-1", "published": False}
         ) as create:
@@ -978,11 +978,11 @@ class MergePipelineTests(unittest.TestCase):
         job = {"jobId": "job-1", "status": "queued", "kind": "full_enrichment", "readOnly": True}
         page = {"page": 2, "pageSize": 25, "total": 26, "totalPages": 2, "items": [{"listingId": "123", "enrichment": {"status": "processed"}}]}
         def authenticated():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
         with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
-            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+            "app.commerce_agent.linked_neon_seller", return_value={"id": "seller-id"}
         ), mock.patch("app.commerce_agent.start_full_catalog_enrichment_job", return_value=job) as start, mock.patch(
             "app.commerce_agent.enriched_catalog_page", return_value=page
         ) as catalog:
@@ -998,11 +998,11 @@ class MergePipelineTests(unittest.TestCase):
     def test_recommendation_page_route_returns_fixed_page_shape(self):
         page = {"page": 1, "pageSize": 25, "total": 30, "totalPages": 2, "items": [{"recommendationId": "r1"}]}
         def authenticated():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
         with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
-            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+            "app.commerce_agent.linked_neon_seller", return_value={"id": "seller-id"}
         ), mock.patch("app.commerce_agent.recommendations_page", return_value=page) as paged:
             response = self.client.get("/api/commerce/recommendations/page?status=Pending&page=1&pageSize=25")
         self.assertEqual(response.status_code, 200)
@@ -1297,11 +1297,11 @@ class MergePipelineTests(unittest.TestCase):
 
     def test_draft_feed_endpoint_returns_task(self):
         def authenticated():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
         with env(EBAY_DRAFTS_ENABLED="true"), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
-            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+            "app.commerce_agent.linked_neon_seller", return_value={"id": "seller-id"}
         ), mock.patch.object(app.inventory_workspace, "submit_approved_drafts", return_value={"status": "submitted", "feedTaskId": "task-123"}) as submit:
             response = self.client.post("/api/ebay/draft-feed", json={"itemIds": ["item-123"]})
         self.assertEqual(response.status_code, 200)
@@ -1310,12 +1310,12 @@ class MergePipelineTests(unittest.TestCase):
 
     def test_draft_feed_endpoint_is_not_blocked_by_live_mutation_flag(self):
         def authenticated():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
         with mock.patch.dict(os.environ, {"EBAY_DRAFTS_ENABLED": "true", "EBAY_MUTATIONS_ENABLED": "false"}), mock.patch(
             "app.authenticate_request", side_effect=authenticated
-        ), mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}), mock.patch(
+        ), mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": "seller-id"}), mock.patch(
             "app.inventory_workspace.submit_approved_drafts", side_effect=ValueError("EBAY_MUTATIONS_ENABLED is false")
         ) as submit:
             response = self.client.post("/api/ebay/draft-feed", json={"itemIds": ["item-123"]})
@@ -1325,11 +1325,11 @@ class MergePipelineTests(unittest.TestCase):
 
     def test_draft_feed_endpoint_requires_draft_flag_absent(self):
         def authenticated():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
         with env(), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
-            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+            "app.commerce_agent.linked_neon_seller", return_value={"id": "seller-id"}
         ), mock.patch("app.upload_seller_hub_draft_csv") as upload:
             response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Test", "price": 10}]})
         self.assertEqual(response.status_code, 403)
@@ -1338,20 +1338,20 @@ class MergePipelineTests(unittest.TestCase):
 
     def test_draft_feed_endpoint_rejects_arbitrary_payloads(self):
         def authenticated():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
-        with env(EBAY_DRAFTS_ENABLED="true"), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}):
+        with env(EBAY_DRAFTS_ENABLED="true"), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": "seller-id"}):
             response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Test", "price": 10}]})
         self.assertEqual(response.status_code, 400)
         self.assertIn("persisted itemIds", response.get_json()["error"])
 
     def test_draft_feed_requires_persisted_item_ids(self):
         def authenticated():
-            app.g.supabase_user = {"sub": "seller-user"}
+            app.g.neon_user = {"sub": "seller-user"}
             return None
 
-        with env(EBAY_DRAFTS_ENABLED="true"), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch("app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}):
+        with env(EBAY_DRAFTS_ENABLED="true"), mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch("app.commerce_agent.linked_neon_seller", return_value={"id": "seller-id"}):
             response = self.client.post("/api/ebay/draft-feed", json={"items": [{"title": "Short"}]})
         self.assertEqual(response.status_code, 400)
         self.assertIn("persisted itemIds", response.get_json()["error"])

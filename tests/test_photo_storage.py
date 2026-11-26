@@ -30,7 +30,7 @@ class PhotoStorageTests(unittest.TestCase):
             self.assertEqual(_photo_url_ttl_seconds(), 3600)
 
     def test_photo_storage_status_requires_authentication(self):
-        with mock.patch.dict(os.environ, {"SUPABASE_URL": "https://example.supabase.co"}):
+        with mock.patch.dict(os.environ, {"NEON_AUTH_URL": "https://ep-test.neonauth.us-east-1.aws.neon.tech/neondb/auth"}):
             response = flask_app.test_client().get("/api/photos/storage")
         self.assertEqual(response.status_code, 401)
 
@@ -119,7 +119,7 @@ class PhotoStorageTests(unittest.TestCase):
 
     def test_photo_batch_returns_successes_and_failures_per_file(self):
         def authenticate():
-            g.supabase_user = {"sub": "user"}
+            g.neon_user = {"sub": "user"}
 
         def store(**kwargs):
             if kwargs["filename"] == "failed.jpg":
@@ -127,7 +127,7 @@ class PhotoStorageTests(unittest.TestCase):
             return {"assetId": "saved"}
 
         with mock.patch("app.authenticate_request", side_effect=authenticate), mock.patch(
-            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller"}
+            "app.commerce_agent.linked_neon_seller", return_value={"id": "seller"}
         ), mock.patch("app.store_photo", side_effect=store):
             response = flask_app.test_client().post(
                 "/api/photos",
@@ -158,12 +158,12 @@ class PhotoStorageTests(unittest.TestCase):
 
     def test_photo_upload_returns_successes_and_failures_for_partial_batch(self):
         def authenticated():
-            app_module.g.supabase_user = {"sub": "seller-user"}
+            app_module.g.neon_user = {"sub": "seller-user"}
             return None
 
         stored_asset = {"assetId": "asset-1", "ebayUrl": "https://example.com/photo.webp"}
         with mock.patch("app.authenticate_request", side_effect=authenticated), mock.patch(
-            "app.commerce_agent.ensure_seller_identity", return_value={"id": "seller-id"}
+            "app.commerce_agent.linked_neon_seller", return_value={"id": "seller-id"}
         ), mock.patch("app.store_photo", side_effect=[
             stored_asset,
             PhotoStorageError("Upload failed.", 502, "upload"),
