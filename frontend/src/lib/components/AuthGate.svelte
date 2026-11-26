@@ -7,6 +7,7 @@
     let sellerAccess = false;
     let email = "";
     let password = "";
+    let otp = "";
     let mode = "sign-in";
     let session = null;
     let loading = true;
@@ -43,6 +44,20 @@
         message = "";
         submitting = true;
         try {
+            if (mode === "verify") {
+                const result = await auth.emailOtp.verifyEmail({
+                    email: email.trim(),
+                    otp: otp.trim(),
+                });
+                if (result.error) throw new Error(result.error.message);
+                otp = "";
+                await refreshSession();
+                if (!session) {
+                    mode = "sign-in";
+                    message = "Email verified. You can now sign in.";
+                }
+                return;
+            }
             const credentials = { email, password };
             const result = mode === "sign-in"
                 ? await auth.signIn.email(credentials)
@@ -51,12 +66,46 @@
                     name: email.split("@")[0],
                     callbackURL: window.location.origin,
                 });
-            if (result.error) throw new Error(result.error.message);
+            if (result.error) {
+                if (result.error.code === "EMAIL_NOT_VERIFIED" || /verif/i.test(result.error.message || "")) {
+                    await auth.emailOtp.sendVerificationOtp({ email: email.trim(), type: "email-verification" });
+                    mode = "verify";
+                    message = "Enter the verification code sent to your email.";
+                }
+                throw new Error(result.error.message);
+            }
             password = "";
             await refreshSession();
             if (mode === "sign-up" && !session) {
-                message = "Check your email to confirm your account, then return here to sign in.";
+                await auth.emailOtp.sendVerificationOtp({ email: email.trim(), type: "email-verification" });
+                mode = "verify";
+                message = "Enter the verification code sent to your email.";
             }
+        } catch (cause) {
+            error = cause.message;
+        } finally {
+            submitting = false;
+        }
+    }
+
+    async function sendVerificationCode() {
+        error = "";
+        message = "";
+        const targetEmail = (email || session?.user?.email || "").trim();
+        if (!targetEmail) {
+            error = "Enter your email address first.";
+            return;
+        }
+        submitting = true;
+        try {
+            const result = await auth.emailOtp.sendVerificationOtp({
+                email: targetEmail,
+                type: "email-verification",
+            });
+            if (result.error) throw new Error(result.error.message);
+            email = targetEmail;
+            mode = "verify";
+            message = "Verification code sent. Check your email and enter the code below.";
         } catch (cause) {
             error = cause.message;
         } finally {
@@ -100,6 +149,21 @@
             <section class="auth-panel">
                 <h1>Seller access required</h1>
                 <p>{error || "Verify your Neon account and have it linked to your existing HHT seller record."}</p>
+                {#if session.user && !session.user.emailVerified}
+                    <form on:submit|preventDefault={async () => {
+                        email = session.user.email;
+                        mode = "verify";
+                        await submit();
+                    }}>
+                        <label>
+                            Verification code
+                            <input type="text" inputmode="numeric" bind:value={otp} placeholder="6-digit code" required />
+                        </label>
+                        {#if message}<p class="auth-message">{message}</p>{/if}
+                        <button class="primary" type="submit" disabled={submitting}>Verify email</button>
+                        <button class="mode-toggle" type="button" disabled={submitting} on:click={sendVerificationCode}>Send verification code</button>
+                    </form>
+                {/if}
                 <button type="button" on:click={() => window.location.reload()}>Check access again</button>
             </section>
         </main>
@@ -108,7 +172,7 @@
     <main class="auth-shell">
         <section class="auth-panel">
             <p class="eyebrow">HHT CATALOG</p>
-            <h1>{mode === "sign-in" ? "Sign in" : "Create account"}</h1>
+            <h1>{mode === "sign-in" ? "Sign in" : mode === "sign-up" ? "Create account" : "Verify email"}</h1>
             <p>Use your approved account to access catalog tools and seller operations.</p>
 
             <form on:submit|preventDefault={submit}>
@@ -116,16 +180,36 @@
                     Email
                     <input type="email" bind:value={email} autocomplete="email" required />
                 </label>
-                <label>
-                    Password
-                    <input type="password" bind:value={password} autocomplete={mode === "sign-in" ? "current-password" : "new-password"} minlength="8" required />
-                </label>
+                {#if mode === "verify"}
+                    <label>
+                        Verification code
+                        <input type="text" inputmode="numeric" bind:value={otp} autocomplete="one-time-code" placeholder="Enter 6-digit code" required />
+                    </label>
+                {:else}
+                    <label>
+                        Password
+                        <input type="password" bind:value={password} autocomplete={mode === "sign-in" ? "current-password" : "new-password"} minlength="8" required />
+                    </label>
+                {/if}
                 {#if error}<p class="auth-error">{error}</p>{/if}
                 {#if message}<p class="auth-message">{message}</p>{/if}
                 <button class="primary" type="submit" disabled={submitting}>
-                    {submitting ? "Please wait..." : mode === "sign-in" ? "Sign in" : "Create account"}
+                    {submitting ? "Please wait..." : mode === "sign-in" ? "Sign in" : mode === "sign-up" ? "Create account" : "Verify code"}
                 </button>
+                {#if mode === "verify"}
+                    <button class="mode-toggle" type="button" disabled={submitting} on:click={sendVerificationCode}>
+                        Resend verification code
+                    </button>
+                {/if}
             </form>
+
+            <button class="mode-toggle" type="button" disabled={submitting} on:click={() => {
+                mode = mode === "verify" ? "sign-in" : "verify";
+                error = "";
+                message = "";
+            }}>
+                {mode === "verify" ? "Back to sign in" : "Have a verification code? Verify email"}
+            </button>
 
             <button class="mode-toggle" type="button" disabled={submitting} on:click={() => {
                 mode = mode === "sign-in" ? "sign-up" : "sign-in";
