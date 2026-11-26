@@ -7263,13 +7263,7 @@
             box-sizing: border-box;
         }
 
-        .mobile-header-actions {
-        display: none;
-        align-items: center;
-        gap: 6px;
-    }
-
-    .mobile-back-btn {
+        .mobile-back-btn {
             display: inline-flex;
             align-items: center;
         }
