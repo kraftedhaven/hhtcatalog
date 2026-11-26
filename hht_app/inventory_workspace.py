@@ -1100,6 +1100,60 @@ def _execute_patch_item_update(
         )
 
 
+_PRESERVED_ENRICHMENT_KEYS = (
+    "aiEstimatedPrice",
+    "visionEstimatedPrice",
+    "soldPricing",
+    "soldComparableSummary",
+    "soldPrice",
+    "soldSampleSize",
+    "activeListingEstimate",
+    "activeComparablePrice",
+    "activeSampleSize",
+    "lowActivePrice",
+    "highActivePrice",
+    "pricingRecommendation",
+    "pricingSource",
+    "pricingStrategy",
+    "pricingSearchKeywords",
+    "insufficientMarketEvidence",
+    "marketMessage",
+    "demandMetrics",
+    "titleSeoMetadata",
+    "titleOptimization",
+    "commerceAgent",
+    "itemSpecificRecommendations",
+    "analysisStatus",
+    "analysisError",
+    "categoryName",
+    "sellerEditedTitle",
+    "sellerEditedPrice",
+    "sellerEditedMetadata",
+    "measurements",
+    "labelOcr",
+    "serialNumber",
+    "madeIn",
+    "itemSpecifics",
+    "quantity",
+)
+
+
+def _extract_preserved_metadata(listing: dict[str, Any]) -> dict[str, Any]:
+    """Capture Commerce Agent and non-schema metadata before normalize_listing()."""
+    return {
+        key: listing[key]
+        for key in _PRESERVED_ENRICHMENT_KEYS
+        if key in listing
+    }
+
+
+def _restore_preserved_metadata(listing: dict[str, Any], preserved: dict[str, Any]) -> None:
+    """Restore Commerce Agent and non-schema metadata dropped by normalize_listing()."""
+    for key, value in preserved.items():
+        if key not in listing or listing[key] in ("", None):
+            listing[key] = value
+
+
 def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     """Patch editable item fields with seller provenance tracking and auto re-validation."""
     if not seller_id:
@@ -1203,8 +1257,10 @@ def patch_item(item_id: str, seller_id: str, patch: dict[str, Any]) -> dict[str,
     saved_category_name = listing.get("categoryName")
     saved_cid = listing.get("cid")
 
-    # Auto-normalize listing attributes
+    # Auto-normalize listing attributes while preserving Commerce Agent metadata
+    preserved_meta = _extract_preserved_metadata(listing)
     listing = normalize_listing(listing)
+    _restore_preserved_metadata(listing, preserved_meta)
 
     # Restore exact seller-edited values
     if seller_edited_title and saved_title:

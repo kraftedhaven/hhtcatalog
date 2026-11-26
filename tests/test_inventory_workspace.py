@@ -1536,6 +1536,53 @@ class InventoryWorkspaceTests(unittest.TestCase):
         for f_key in ("title", "price", "brand", "size", "cat", "cid"):
             self.assertTrue(reanalyzed["provenance"][f_key]["sellerConfirmed"])
 
+    def test_patch_item_preserves_commerce_agent_metadata(self):
+        """Inline edits and field confirmations preserve persisted market & Commerce Agent metadata."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Patch Metadata Preservation", grouping_mode="1")
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "shirt.jpg", "previewUrl": "https://example.com/shirt.jpg", "storageUrl": "https://example.com/shirt.jpg"}
+        ])
+        item = inventory_workspace.list_batch_items(batch["id"], self.seller_id)[0]
+        inventory_workspace.prepopulate_item_from_analysis(
+            item["id"],
+            self.seller_id,
+            {
+                "listing": {
+                    "title": "Chaps Color Block Polo Shirt",
+                    "brand": "Chaps",
+                    "type": "Polo Shirt",
+                    "size": "L",
+                    "cat": "57990",
+                    "cid": "3000",
+                    "price": 20.0,
+                    "aiEstimatedPrice": 18.0,
+                    "activeListingEstimate": {
+                        "provider": "ebay_browse",
+                        "kind": "active_comparable",
+                        "status": "ok",
+                        "keyword": "Chaps Polo Shirt",
+                        "sampleSize": 12,
+                        "lowActivePrice": 14.0,
+                        "medianActivePrice": 20.0,
+                        "highActivePrice": 35.0,
+                    },
+                }
+            },
+        )
+        patched = inventory_workspace.patch_item(
+            item["id"],
+            self.seller_id,
+            {"title": "Chaps Vintage Color Block Polo Shirt L", "confirmField": "cat"},
+        )
+        l = patched["listing"]
+        self.assertEqual(l["activeSampleSize"], 12)
+        self.assertEqual(l["activeComparablePrice"], 20.0)
+        self.assertEqual(l["aiEstimatedPrice"], 18.0)
+        self.assertIn("pricingRecommendation", l)
+        self.assertIn("demandMetrics", l)
+        self.assertIn("commerceAgent", l)
+        self.assertFalse(l["insufficientMarketEvidence"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -151,6 +151,10 @@ test('mergePolledItemsWithPending preserves unsaved edits and findFirstMissingFi
     const target = findFirstMissingFieldTarget(merged);
     assert.equal(target.item.id, 'item-1');
     assert.equal(target.fieldId, 'inspector-category-input');
+
+    const evtTarget = findFirstMissingFieldTarget(merged, { type: 'click', target: {} });
+    assert.equal(evtTarget.item.id, 'item-1');
+    assert.equal(evtTarget.fieldId, 'inspector-category-input');
 });
 
 test('inventory API contract includes seller-scoped persistence operations', () => {

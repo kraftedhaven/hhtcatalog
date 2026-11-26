@@ -215,9 +215,12 @@
     // Analysis auto-polling state while batch items are queued or running
     let analysisPollTimer = null;
     let analysisPollInFlight = false;
+    let activePollRequestId = 0;
     let wasAnalyzing = false;
 
     function stopAnalysisPolling() {
+        activePollRequestId += 1;
+        analysisPollInFlight = false;
         if (analysisPollTimer) {
             clearInterval(analysisPollTimer);
             analysisPollTimer = null;
@@ -233,9 +236,14 @@
 
     async function pollBatchAnalysisResults() {
         if (analysisPollInFlight || !selectedBatchId) return;
+        const requestBatchId = selectedBatchId;
+        const requestId = ++activePollRequestId;
         analysisPollInFlight = true;
         try {
-            const freshItems = await inventoryListBatchItems(selectedBatchId);
+            const freshItems = await inventoryListBatchItems(requestBatchId);
+            if (requestId !== activePollRequestId || selectedBatchId !== requestBatchId) {
+                return;
+            }
             const merged = mergePolledItemsWithPending(
                 freshItems,
                 items,
@@ -280,7 +288,9 @@
             // Transient poll failure should not wipe edits or stop retries unless batch changes
             console.warn("Analysis status poll deferred:", err);
         } finally {
-            analysisPollInFlight = false;
+            if (requestId === activePollRequestId) {
+                analysisPollInFlight = false;
+            }
         }
     }
 
@@ -342,25 +352,38 @@
         inspectingItem = null;
         inspectingItemId = "";
         try {
-            selectedBatch =
+            const loadedBatch =
                 batches.find((b) => b.id === batchId) ||
                 (await inventoryGetBatch(batchId));
-            items = await inventoryListBatchItems(batchId);
-            proposal = await latestInventoryGroupProposal(batchId).catch(() => null);
-            batchPhotos = await inventoryListBatchPhotos(batchId).catch(() => []);
+            const loadedItems = await inventoryListBatchItems(batchId);
+            if (selectedBatchId !== batchId) return;
+            selectedBatch = loadedBatch;
+            items = loadedItems;
+            const loadedProposal = await latestInventoryGroupProposal(batchId).catch(() => null);
+            const loadedPhotos = await inventoryListBatchPhotos(batchId).catch(() => []);
+            if (selectedBatchId !== batchId) return;
+            proposal = loadedProposal;
+            batchPhotos = loadedPhotos;
         } catch (err) {
-            globalError = err.message || "Failed to load batch items.";
+            if (selectedBatchId === batchId) {
+                globalError = err.message || "Failed to load batch items.";
+            }
         } finally {
-            batchLoading = false;
+            if (selectedBatchId === batchId) {
+                batchLoading = false;
+            }
         }
     }
 
     async function reloadBatchData() {
-        if (!selectedBatchId) return;
+        const requestBatchId = selectedBatchId;
+        if (!requestBatchId) return;
         try {
-            const latest = await inventoryListBatchItems(selectedBatchId);
+            const latest = await inventoryListBatchItems(requestBatchId);
+            const latestPhotos = await inventoryListBatchPhotos(requestBatchId).catch(() => []);
+            if (selectedBatchId !== requestBatchId) return;
             items = mergePolledItemsWithPending(latest, items, pendingPatches);
-            batchPhotos = await inventoryListBatchPhotos(selectedBatchId).catch(() => []);
+            batchPhotos = latestPhotos;
             if (inspectingItemId) {
                 inspectingItem = items.find((it) => it.id === inspectingItemId) || null;
             }
@@ -1052,9 +1075,15 @@
     }
 
     async function fixHighlightedFields(preferredItem = null) {
+        const validPreferred =
+            preferredItem &&
+            typeof preferredItem === "object" &&
+            typeof preferredItem.id === "string"
+                ? preferredItem
+                : null;
         const targetInfo = findFirstMissingFieldTarget(
             items,
-            preferredItem || inspectingItem,
+            validPreferred || inspectingItem,
         );
         if (!targetInfo) {
             globalStatus = "All visible items already have required fields populated.";
@@ -5072,7 +5101,7 @@
                     type="button"
                     class="action-btn-primary"
                     style="background: #e11d48;"
-                    on:click={fixHighlightedFields}
+                    on:click={() => fixHighlightedFields()}
                     disabled={actionLoading}
                 >
                     Fix highlighted fields
