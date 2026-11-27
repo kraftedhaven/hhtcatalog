@@ -318,6 +318,16 @@ class UnifiedCommerceAgentTests(unittest.TestCase):
         self.assertIn("#12", galaxy["recommendedTitle"])
         self.assertIn("100%", galaxy["recommendedTitle"])
 
+    def test_title_optimizer_preserves_repeated_dimension_specs(self):
+        jeans = optimize_title({"title": "Levi's 501 Jeans 32 x 32", "brand": "Levi's", "type": "Jeans"})
+        self.assertIn("32 x 32", jeans["recommendedTitle"])
+        self.assertIn("501", jeans["recommendedTitle"])
+        self.assertEqual(jeans["recommendedTitle"].count("Levi's"), 1)
+        self.assertEqual(jeans["recommendedTitle"].count("Jeans"), 1)
+
+        miumiu = optimize_title({"title": "Miu Miu Leather Handbag", "type": "Handbag", "mat": "Leather"})
+        self.assertIn("Miu Miu", miumiu["recommendedTitle"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -225,7 +225,10 @@ def _clean_values(item: dict[str, Any], category_name: str = "") -> dict[str, st
     return values
 
 
-_TITLE_TOKEN_RE = re.compile(r"#?[^\W_]+(?:['\u2019&./-][^\W_]+)*[+%]?")
+_TITLE_TOKEN_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?|#?[^\W_]+(?:['\u2019&./-][^\W_]+)*[+%]?",
+    re.I,
+)
 
 
 def _token_words(text: str) -> list[str]:
@@ -241,14 +244,21 @@ def _should_skip_token(cleaned: str, excluded_words: set[str], seen_cf: set[str]
     return low in excluded_words
 
 
-def _unique_novel_tokens(text: str, excluded_words: set[str], limit: int) -> list[str]:
+def _unique_novel_tokens(
+    text: str,
+    excluded_words: set[str],
+    limit: int,
+    *,
+    dedup_self: bool = True,
+) -> list[str]:
     tokens: list[str] = []
     seen_cf: set[str] = set()
     for cleaned in _TITLE_TOKEN_RE.findall(text):
         if _should_skip_token(cleaned, excluded_words, seen_cf):
             continue
         tokens.append(cleaned)
-        seen_cf.add(cleaned.casefold())
+        if dedup_self:
+            seen_cf.add(cleaned.casefold())
         if len(tokens) >= limit:
             break
     return tokens
@@ -267,7 +277,7 @@ def _extra_descriptor_tokens(current: str, values: dict[str, str]) -> list[str]:
     if lowered in GENERIC_TITLES and _has_product_noun(values):
         return []
     excluded_words = set(_token_words(" ".join(values.values())))
-    return _unique_novel_tokens(current, excluded_words, 16)
+    return _unique_novel_tokens(current, excluded_words, 16, dedup_self=False)
 
 
 def _should_preserve_identifying_title(values: dict[str, str], current: str) -> bool:
@@ -283,15 +293,15 @@ def _extract_market_tokens(queries: list[str], values: dict[str, str]) -> list[s
     return _unique_novel_tokens(" ".join(queries), excluded_words, 3)
 
 
-def _append_tokens_dedup(parts: list[str], tokens: list[str]) -> list[str]:
+def _append_tokens_dedup(parts: list[str], tokens: list[str], *, dedup_within: bool = True) -> list[str]:
     seen_words = {w for part in parts for w in _token_words(part)}
     for token in tokens:
-        words = _token_words(token)
-        word_set = set(words)
+        word_set = set(_token_words(token))
         if word_set and word_set <= seen_words:
             continue
         parts.append(token)
-        seen_words.update(word_set)
+        if dedup_within:
+            seen_words.update(word_set)
     return parts
 
 
@@ -303,7 +313,7 @@ def _build_candidate_title(
     brand_prefix = values.get("brand", "")
     parts: list[str] = []
     _append_tokens_dedup(parts, [values[k] for k in keys if k in values])
-    _append_tokens_dedup(parts, token_bundle["extras"])
+    _append_tokens_dedup(parts, token_bundle["extras"], dedup_within=False)
     _append_tokens_dedup(parts, token_bundle["market"])
     current = token_bundle["current"]
     if token_bundle.get("preserve") or not parts:
