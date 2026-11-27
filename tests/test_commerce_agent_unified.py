@@ -132,6 +132,35 @@ class UnifiedCommerceAgentTests(unittest.TestCase):
         )
         self.assertNotIn("title", audit["proposed"])
 
+    def test_reanalysis_seeds_unconfirmed_title_from_new_analysis_and_preserves_confirmed_title(self):
+        with_new_title = commerce_agent.run_commerce_agent_optimization(
+            {"title": "Nike Red Shirt", "brand": "Nike", "color": "Red", "type": "Shirt"},
+            raw_ai_listing={"title": "Adidas Blue Shirt", "brand": "Adidas", "color": "Blue", "type": "Shirt"},
+            fetch_live_market=False,
+        )
+        self.assertIn("Adidas", with_new_title["listing"]["title"])
+        self.assertIn("Blue", with_new_title["listing"]["title"])
+        self.assertNotIn("Nike", with_new_title["listing"]["title"])
+        self.assertNotIn("Red", with_new_title["listing"]["title"])
+
+        with_attrs_only = commerce_agent.run_commerce_agent_optimization(
+            {"title": "Nike Red Shirt", "brand": "Nike", "color": "Red", "type": "Shirt"},
+            raw_ai_listing={"brand": "Adidas", "color": "Blue", "type": "Shirt"},
+            fetch_live_market=False,
+        )
+        self.assertIn("Adidas", with_attrs_only["listing"]["title"])
+        self.assertIn("Blue", with_attrs_only["listing"]["title"])
+        self.assertNotIn("Nike", with_attrs_only["listing"]["title"])
+        self.assertNotIn("Red", with_attrs_only["listing"]["title"])
+
+        confirmed = commerce_agent.run_commerce_agent_optimization(
+            {"title": "Nike Red Shirt", "brand": "Nike", "color": "Red", "type": "Shirt"},
+            raw_ai_listing={"title": "Adidas Blue Shirt", "brand": "Adidas", "color": "Blue", "type": "Shirt"},
+            existing_provenance={"title": {"source": "seller_input", "sellerConfirmed": True}},
+            fetch_live_market=False,
+        )
+        self.assertEqual(confirmed["listing"]["title"], "Nike Red Shirt")
+
 
 if __name__ == "__main__":
     unittest.main()

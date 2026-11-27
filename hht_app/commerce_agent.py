@@ -2464,6 +2464,23 @@ def _resolve_market_evidence_inputs(
     return clean_sold, clean_active, raw_ai_est, keywords
 
 
+def _select_title_seed(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    confirmed: set[str],
+) -> str:
+    working_title = str(working.get("title") or "").strip()
+    if "title" in confirmed:
+        return working_title
+    analyzed_title = str(raw_ai.get("title") or "").strip()
+    if analyzed_title:
+        return analyzed_title
+    for key in ("brand", "model", "type", "color"):
+        if raw_ai.get(key):
+            return ""
+    return working_title
+
+
 def _run_title_step(
     working: dict[str, Any],
     raw_ai: dict[str, Any],
@@ -2472,7 +2489,7 @@ def _run_title_step(
     market_context: dict[str, Any],
     now: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    seed_title = str(working.get("title") or raw_ai.get("title") or "").strip()
+    seed_title = _select_title_seed(working, raw_ai, confirmed)
     title_seed = {
         **working, "title": seed_title,
         "sellerEditedTitle": False, "sellerEditedPrice": False, "sellerEditedMetadata": False,
