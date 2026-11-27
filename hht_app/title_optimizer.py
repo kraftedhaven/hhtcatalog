@@ -225,7 +225,7 @@ def _clean_values(item: dict[str, Any], category_name: str = "") -> dict[str, st
     return values
 
 
-_TITLE_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['&./-][A-Za-z0-9]+)*")
+_TITLE_TOKEN_RE = re.compile(r"#?[^\W_]+(?:['\u2019&./-][^\W_]+)*[+%]?")
 
 
 def _token_words(text: str) -> list[str]:

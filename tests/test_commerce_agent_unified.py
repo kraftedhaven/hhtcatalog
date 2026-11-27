@@ -307,6 +307,17 @@ class UnifiedCommerceAgentTests(unittest.TestCase):
         size_and_model = optimize_title({"title": "Nike Shoes Size 10.5", "brand": "Nike", "size": "10", "model": "5"})
         self.assertIn("10.5", size_and_model["recommendedTitle"])
 
+    def test_title_optimizer_preserves_unicode_letters_in_descriptors(self):
+        pokemon = optimize_title({"title": "Nintendo Pokémon Pikachu Card", "brand": "Nintendo", "type": "Trading Card"})
+        self.assertIn("Pokémon", pokemon["recommendedTitle"])
+        self.assertIn("Pikachu", pokemon["recommendedTitle"])
+        self.assertNotIn("Pok mon", pokemon["recommendedTitle"])
+
+        galaxy = optimize_title({"title": "Samsung Galaxy S24+ #12 100%", "brand": "Samsung", "type": "Phone"})
+        self.assertIn("S24+", galaxy["recommendedTitle"])
+        self.assertIn("#12", galaxy["recommendedTitle"])
+        self.assertIn("100%", galaxy["recommendedTitle"])
+
 
 if __name__ == "__main__":
     unittest.main()
