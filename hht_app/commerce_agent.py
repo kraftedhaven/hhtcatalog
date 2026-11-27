@@ -34,11 +34,18 @@ except ImportError:  # Local SQLite fallback remains available without psycopg.
 from .ebay_auth import EbayAuthError, seller_access_token
 from .ebay_active import EbayActiveError, fetch_active_listings, fetch_listing_detail
 from .ebay_drafts import EbayDraftError, update_ebay_offer
-from .schema import normalize_listing
+from .schema import fit_title, normalize_listing
 from .evidence import evidence_for_listing, evidence_summary, has_confirmed_value, normalize_evidence
 from .ebay_taxonomy import validate_listing
 from .title_optimizer import optimize_title
-from .market_metrics import demand_score, pricing_recommendation, seller_recovery_metrics, sold_price_summary
+from .market_metrics import (
+    INSUFFICIENT_MARKET_MESSAGE,
+    demand_score,
+    pricing_recommendation,
+    sanitize_market_evidence,
+    seller_recovery_metrics,
+    sold_price_summary,
+)
 from .analysis_contract import canonical_analysis_run
 
 logger = logging.getLogger(__name__)
@@ -2070,6 +2077,827 @@ def _same_price(current: float, proposed: float) -> bool:
     return abs(current - proposed) < 0.01
 
 
+CANONICAL_PROVENANCE_SOURCES = frozenset({
+    "seller_input",
+    "observed_photo_fact",
+    "ai_inference",
+    "market_sold_comp",
+    "market_active_comp",
+    "demand_signal",
+    "fallback_estimate",
+})
+
+_NON_VALUE_STRINGS = {"", "not visible", "unknown", "n/a", "none"}
+
+_OBSERVED_FACT_MARKERS = {
+    "known from image",
+    "photo tag",
+    "observed_photo_fact",
+    "photo_evidence",
+}
+
+_ATTRIBUTE_EXTRACT_KEYS = (
+    "brand", "model", "size", "color", "dept", "type", "style", "theme",
+    "mat", "pat", "slv", "nk", "sea", "occ", "st", "vin", "madeIn",
+    "serialNumber", "measurements", "cnote",
+)
+
+_SUPPLEMENTAL_TEXT_KEYS = ("desc", "notes", "labelOcr", "conditionNotes")
+
+
+def _provenance_entry(
+    source: str,
+    confidence: str,
+    evidence: str,
+    *,
+    seller_confirmed: bool = False,
+    legacy_source: str = "",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "source": source,
+        "confidence": confidence,
+        "evidence": evidence,
+        "sellerConfirmed": bool(seller_confirmed),
+    }
+    if legacy_source:
+        entry["legacySource"] = legacy_source
+    if isinstance(extra, dict):
+        entry.update(extra)
+    return entry
+
+
+def _parse_money_float(value: Any) -> float:
+    try:
+        parsed = float(str(value or 0).replace("$", "").replace(",", "").strip())
+        return round(parsed, 2) if parsed > 0 else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _has_usable_ai_value(val: str) -> bool:
+    if not val:
+        return False
+    return val.casefold() not in _NON_VALUE_STRINGS
+
+
+def _is_missing_field_value(working: dict[str, Any], key: str) -> bool:
+    return not str(working.get(key) or "").strip()
+
+
+def _infer_category_from_attributes(working: dict[str, Any], raw_ai: dict[str, Any]) -> str:
+    has_signal = bool(working.get("type") or working.get("brand"))
+    if not has_signal:
+        return ""
+    try:
+        probe = normalize_listing({
+            "title": str(working.get("title") or raw_ai.get("title") or ""),
+            "type": str(working.get("type") or ""),
+            "brand": str(working.get("brand") or ""),
+        })
+        return str(probe.get("cat") or "")
+    except Exception:
+        return ""
+
+
+def _should_set_category(confirmed: set[str]) -> bool:
+    return "cat" not in confirmed and "categoryName" not in confirmed
+
+
+def _apply_category_defaults(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    provenance: dict[str, Any],
+    confirmed: set[str],
+    now: str,
+) -> None:
+    if _should_set_category(confirmed):
+        cat = str(raw_ai.get("cat") or working.get("cat") or "").strip()
+        cat_name = str(raw_ai.get("categoryName") or working.get("categoryName") or "").strip()
+        cat = cat or _infer_category_from_attributes(working, raw_ai)
+        if cat:
+            working["cat"] = cat
+            if cat_name:
+                working["categoryName"] = cat_name
+            provenance["cat"] = _provenance_entry(
+                "ai_inference", "medium", f"Suggested eBay Category: {cat_name or cat} (ID {cat})",
+                legacy_source="ai_estimate", extra={"timestamp": now},
+            )
+    _apply_condition_defaults(working, raw_ai, confirmed)
+
+
+def _apply_condition_defaults(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    confirmed: set[str],
+) -> None:
+    if "cid" in confirmed or "condition" in confirmed:
+        return
+    for key in ("cid", "condition"):
+        val = str(raw_ai.get(key) or "").strip()
+        if val:
+            working[key] = val
+
+
+def _attribute_provenance(ai_val: str, raw_prov_map: dict[str, Any], key: str, now: str) -> dict[str, Any]:
+    raw_prov = raw_prov_map.get(key)
+    prov_src = raw_prov.get("source") if isinstance(raw_prov, dict) else (raw_prov or "")
+    is_observed = str(prov_src).strip().casefold() in _OBSERVED_FACT_MARKERS
+    source = "observed_photo_fact" if is_observed else "ai_inference"
+    conf = "high" if is_observed else "medium"
+    ev = f"Observed in item photos: '{ai_val}'" if is_observed else f"AI visual inference: '{ai_val}'"
+    legacy = "photo_evidence" if is_observed else "ai_estimate"
+    return _provenance_entry(source, conf, ev, legacy_source=legacy, extra={"timestamp": now})
+
+
+def _merge_supplemental_text_fields(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    provenance: dict[str, Any],
+    confirmed: set[str],
+) -> None:
+    """Apply unconfirmed descriptive text fields (desc, notes, OCR, conditionNotes)."""
+    for key in _SUPPLEMENTAL_TEXT_KEYS:
+        if key in confirmed:
+            continue
+        ai_val = str(raw_ai.get(key) or "").strip()
+        if not ai_val:
+            continue
+        working[key] = ai_val
+        provenance.setdefault(
+            key,
+            _provenance_entry("ai_inference", "medium", f"Analyzed {key} text."),
+        )
+
+
+def _usable_specific_list(raw_list: list[Any]) -> list[str] | None:
+    cleaned: list[str] = []
+    for entry in raw_list:
+        text = str(entry or "").strip()
+        if _has_usable_ai_value(text) and text not in cleaned:
+            cleaned.append(text)
+    return cleaned or None
+
+
+def _usable_specific_value(raw_val: Any) -> Any:
+    if isinstance(raw_val, list):
+        return _usable_specific_list(raw_val)
+    text = str(raw_val or "").strip()
+    return text if _has_usable_ai_value(text) else None
+
+
+def _is_specific_confirmed(
+    label: str,
+    existing_key: str,
+    confirmed: set[str],
+    provenance: dict[str, Any],
+) -> bool:
+    for key in (label, existing_key):
+        if not key:
+            continue
+        if key in confirmed:
+            return True
+        entry = provenance.get(key)
+        if isinstance(entry, dict) and entry.get("sellerConfirmed") is True:
+            return True
+    return False
+
+
+def _merge_single_specific(
+    merged: dict[str, Any],
+    existing_ci: dict[str, str],
+    provenance: dict[str, Any],
+    entry: tuple[Any, Any, set[str]],
+) -> None:
+    raw_key, raw_val, confirmed = entry
+    label = str(raw_key or "").strip()
+    if not label:
+        return
+    existing_key = existing_ci.get(label.casefold(), "")
+    if _is_specific_confirmed(label, existing_key, confirmed, provenance):
+        return
+    cleaned = _usable_specific_value(raw_val)
+    if cleaned is None:
+        return
+    if existing_key and existing_key != label:
+        merged.pop(existing_key, None)
+    merged[label] = cleaned
+    existing_ci[label.casefold()] = label
+    provenance[label] = _provenance_entry(
+        "ai_inference", "medium", f"Analyzed item specific '{label}'.", legacy_source="ai_estimate"
+    )
+
+
+def _merge_item_specifics(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    provenance: dict[str, Any],
+    confirmed: set[str],
+) -> None:
+    if "itemSpecifics" in confirmed:
+        return
+    raw_specs = raw_ai.get("itemSpecifics")
+    if not isinstance(raw_specs, dict) or not raw_specs:
+        return
+    existing = working.get("itemSpecifics")
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    existing_ci = {str(k).casefold(): str(k) for k in merged}
+    for raw_key, raw_val in raw_specs.items():
+        _merge_single_specific(merged, existing_ci, provenance, (raw_key, raw_val, confirmed))
+    if not merged:
+        return
+    working["itemSpecifics"] = merged
+    provenance.setdefault(
+        "itemSpecifics",
+        _provenance_entry("ai_inference", "medium", "Analyzed category item specifics.", legacy_source="ai_estimate"),
+    )
+
+
+def _merge_attribute_evidence(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    confirmed: set[str],
+) -> None:
+    raw_ev = raw_ai.get("attributeEvidence")
+    if not isinstance(raw_ev, dict) or not raw_ev:
+        return
+    existing_ev = working.get("attributeEvidence")
+    merged_ev = dict(existing_ev) if isinstance(existing_ev, dict) else {}
+    for key, value in raw_ev.items():
+        if key not in confirmed and isinstance(value, dict):
+            merged_ev[key] = value
+    if merged_ev:
+        working["attributeEvidence"] = merged_ev
+
+
+def _merge_visual_attributes(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    provenance: dict[str, Any],
+    confirmed: set[str],
+    now: str,
+) -> None:
+    raw_prov = raw_ai.get("provenance")
+    raw_prov_map = raw_prov if isinstance(raw_prov, dict) else {}
+    for key in _ATTRIBUTE_EXTRACT_KEYS:
+        if key in confirmed:
+            continue
+        ai_val = str(raw_ai.get(key) or "").strip()
+        if _has_usable_ai_value(ai_val):
+            working[key] = ai_val
+            provenance[key] = _attribute_provenance(ai_val, raw_prov_map, key, now)
+        elif _is_missing_field_value(working, key):
+            provenance[key] = _provenance_entry(
+                "missing", "none", "Not observed in photos; seller confirmation required.", extra={"timestamp": now}
+            )
+    _merge_supplemental_text_fields(working, raw_ai, provenance, confirmed)
+    _merge_item_specifics(working, raw_ai, provenance, confirmed)
+    _merge_attribute_evidence(working, raw_ai, confirmed)
+    _apply_category_defaults(working, raw_ai, provenance, confirmed, now)
+
+
+def _build_item_specific_recommendations(working: dict[str, Any]) -> list[dict[str, str]]:
+    aspect_pairs = (
+        ("Brand", "brand"),
+        ("Model", "model"),
+        ("Type", "type"),
+        ("Style", "style"),
+        ("Department", "dept"),
+        ("Size", "size"),
+        ("Color", "color"),
+        ("Material", "mat"),
+        ("Pattern", "pat"),
+    )
+    recs: list[dict[str, str]] = []
+    for label, field_key in aspect_pairs:
+        val = str(working.get(field_key) or "").strip()
+        if val and val.casefold() not in _NON_VALUE_STRINGS:
+            recs.append({"aspect": label, "value": val, "field": field_key})
+        else:
+            recs.append({"aspect": label, "value": "", "field": field_key, "status": "needs_seller_confirmation"})
+    return recs
+
+
+def _build_pricing_options(pricing_rec: dict[str, Any], now: str) -> dict[str, Any]:
+    if pricing_rec.get("status") == "error" or not pricing_rec.get("balancedPrice"):
+        return {}
+    provenance_src = str(pricing_rec.get("provenanceSource") or "fallback_estimate")
+    confidence = str(pricing_rec.get("pricingConfidence") or "low")
+    is_fallback = bool(pricing_rec.get("isFallback"))
+    strategy = str(pricing_rec.get("pricingStrategy") or "")
+    freshness = str(pricing_rec.get("dataFreshness") or now)
+    quick = round(float(pricing_rec["fastSalePrice"]), 2)
+    balanced = round(float(pricing_rec["balancedPrice"]), 2)
+    premium = round(float(pricing_rec["premiumPrice"]), 2)
+    reason_prefix = (
+        f"{INSUFFICIENT_MARKET_MESSAGE} AI fallback estimate only: "
+        if is_fallback
+        else f"Market-backed ({pricing_rec.get('pricingSource', '')}, {int(pricing_rec.get('sampleSize') or 0)} comps): "
+    )
+    return {
+        "quick_sale": {
+            "price": quick,
+            "label": "Fast sale",
+            "confidence": confidence,
+            "source": provenance_src,
+            "strategy": strategy,
+            "isFallback": is_fallback,
+            "timestamp": freshness,
+            "reason": f"{reason_prefix}Competitive pricing for faster sell-through.",
+        },
+        "balanced": {
+            "price": balanced,
+            "label": "Balanced",
+            "confidence": confidence,
+            "source": provenance_src,
+            "strategy": strategy,
+            "isFallback": is_fallback,
+            "timestamp": freshness,
+            "reason": str(pricing_rec.get("adjustmentReason") or f"{reason_prefix}Balanced target price."),
+        },
+        "premium": {
+            "price": premium,
+            "label": "Premium",
+            "confidence": "low" if is_fallback else confidence,
+            "source": provenance_src,
+            "strategy": strategy,
+            "isFallback": is_fallback,
+            "timestamp": freshness,
+            "reason": f"{reason_prefix}Upper competitive margin tier.",
+        },
+    }
+
+
+def _is_entry_seller_confirmed(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("sellerConfirmed") is True:
+        return True
+    return entry.get("source") == "seller_input" and entry.get("sellerConfirmed") is not False
+
+
+def _collect_confirmed_fields(
+    working: dict[str, Any],
+    prov: dict[str, Any],
+    seller_confirmed_fields: set[str] | None,
+) -> set[str]:
+    confirmed: set[str] = set(seller_confirmed_fields or ())
+    for key, entry in prov.items():
+        if _is_entry_seller_confirmed(entry):
+            confirmed.add(str(key))
+    if working.get("sellerEditedTitle") is True:
+        confirmed.add("title")
+    if working.get("sellerEditedPrice") is True:
+        confirmed.add("price")
+    if "cat" in confirmed:
+        confirmed.add("categoryName")
+    if "cid" in confirmed or "condition" in confirmed:
+        confirmed.update({"cid", "condition"})
+    return confirmed
+
+
+def _needs_active_browse(candidate_active: Any) -> bool:
+    if not isinstance(candidate_active, dict):
+        return True
+    return int(candidate_active.get("sampleSize") or 0) <= 0
+
+
+def _merge_browse_result(working: dict[str, Any], browse_res: dict[str, Any], candidate_sold: Any, candidate_active: Any) -> tuple[Any, Any]:
+    active_est = browse_res.get("activeListingEstimate")
+    if isinstance(active_est, dict):
+        candidate_active = active_est
+    keywords = browse_res.get("pricingSearchKeywords")
+    if keywords:
+        working["pricingSearchKeywords"] = keywords
+    has_sold = isinstance(candidate_sold, dict) and candidate_sold.get("status") == "ok"
+    if not has_sold:
+        candidate_sold = browse_res.get("soldPricing") or candidate_sold
+    return candidate_sold, candidate_active
+
+
+def _fetch_live_market_candidates(
+    working: dict[str, Any],
+    candidate_sold: Any,
+    candidate_active: Any,
+    raw_ai_est: float,
+) -> tuple[Any, Any]:
+    try:
+        from .ebay_pricing import _browse_configured, enrich_with_ebay_active_pricing
+
+        if not _needs_active_browse(candidate_active) or not _browse_configured():
+            return candidate_sold, candidate_active
+        probe_input = {**working}
+        if raw_ai_est > 0:
+            probe_input["aiEstimatedPrice"] = raw_ai_est
+            probe_input["price"] = raw_ai_est
+        browse_res = enrich_with_ebay_active_pricing(probe_input, timeout=4.0)
+        return _merge_browse_result(working, browse_res, candidate_sold, candidate_active)
+    except Exception:
+        logger.debug("Live eBay active browse lookup skipped or unavailable", exc_info=True)
+        return candidate_sold, candidate_active
+
+
+def _apply_default_condition_note(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    prov: dict[str, Any],
+    confirmed: set[str],
+    now: str,
+) -> None:
+    if "cnote" in confirmed:
+        return
+    if str(working.get("cnote") or "").strip():
+        return
+    working["cnote"] = str(raw_ai.get("cnote") or "Pre-owned in good condition.")
+    prov["cnote"] = _provenance_entry(
+        "ai_inference", "medium", "Default pre-owned condition note; verify against photos.",
+        legacy_source="ai_estimate", extra={"timestamp": now},
+    )
+
+
+def _extract_raw_ai_estimate(raw_ai: dict[str, Any], working: dict[str, Any]) -> float:
+    raw_src = str(raw_ai.get("pricingSource") or working.get("pricingSource") or "").strip()
+    ai_price_fallback = 0 if raw_src == "active_comparable" else raw_ai.get("price")
+    for val in (
+        raw_ai.get("aiEstimatedPrice"),
+        raw_ai.get("visionEstimatedPrice"),
+        ai_price_fallback,
+        working.get("aiEstimatedPrice"),
+        working.get("visionEstimatedPrice"),
+    ):
+        parsed = _parse_money_float(val)
+        if parsed > 0:
+            return parsed
+    return 0.0
+
+
+def _first_dict_value(*items: Any) -> dict[str, Any] | None:
+    for item in items:
+        if isinstance(item, dict) and item:
+            return item
+    return None
+
+
+def _resolve_market_evidence_inputs(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    fetch_live_market: bool,
+) -> tuple[dict[str, Any], dict[str, Any], float, str]:
+    raw_ai_est = _extract_raw_ai_estimate(raw_ai, working)
+    candidate_sold = _first_dict_value(
+        raw_ai.get("soldComparableSummary"), raw_ai.get("soldPricing"),
+        working.get("soldComparableSummary"), working.get("soldPricing"),
+    )
+    candidate_active = _first_dict_value(raw_ai.get("activeListingEstimate"), working.get("activeListingEstimate"))
+
+    if fetch_live_market:
+        candidate_sold, candidate_active = _fetch_live_market_candidates(
+            working, candidate_sold, candidate_active, raw_ai_est
+        )
+    if not isinstance(candidate_sold, dict) or not candidate_sold:
+        candidate_sold = sold_price_summary(working)
+
+    clean_sold, clean_active = sanitize_market_evidence(
+        candidate_sold if isinstance(candidate_sold, dict) else None,
+        candidate_active if isinstance(candidate_active, dict) else None,
+    )
+    keywords = ""
+    for k_src in (raw_ai.get("pricingSearchKeywords"), clean_active.get("keyword"), clean_sold.get("query"), working.get("pricingSearchKeywords")):
+        if str(k_src or "").strip():
+            keywords = str(k_src).strip()
+            break
+    if keywords:
+        working["pricingSearchKeywords"] = keywords
+    return clean_sold, clean_active, raw_ai_est, keywords
+
+
+def _select_title_seed(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    confirmed: set[str],
+) -> str:
+    working_title = str(working.get("title") or "").strip()
+    if "title" in confirmed:
+        return working_title
+    analyzed_title = str(raw_ai.get("title") or "").strip()
+    if analyzed_title:
+        return analyzed_title
+    for key in ("brand", "model", "type", "color"):
+        if raw_ai.get(key):
+            return ""
+    return working_title
+
+
+def _run_title_step(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    prov: dict[str, Any],
+    confirmed: set[str],
+    market_context: dict[str, Any],
+    now: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    seed_title = _select_title_seed(working, raw_ai, confirmed)
+    title_seed = {
+        **working, "title": seed_title,
+        "sellerEditedTitle": False, "sellerEditedPrice": False, "sellerEditedMetadata": False,
+    }
+    cat_hint = str(working.get("categoryName") or working.get("cat") or "")
+    title_plan = optimize_title(title_seed, category_name=cat_hint, market_context=market_context)
+    candidates = {
+        c_name: dict(c_data)
+        for c_name, c_data in (title_plan.get("candidates") or {}).items()
+        if isinstance(c_data, dict) and c_data.get("title")
+    }
+    raw_best = str(title_plan.get("title") or title_plan.get("recommendedTitle") or seed_title).strip()
+    best_title = fit_title(raw_best, str(working.get("brand") or "")) if raw_best else ""
+    if "title" not in confirmed and best_title:
+        working["title"] = best_title
+        prov["title"] = _provenance_entry(
+            str(title_plan.get("provenanceSource") or "fallback_estimate"),
+            str(title_plan.get("confidence") or "low"),
+            str(title_plan.get("reason") or "Title optimization."),
+            seller_confirmed=False, legacy_source="ai_estimate",
+            extra={
+                "strategy": title_plan.get("strategy"), "strategyLabel": title_plan.get("strategyLabel"),
+                "isFallback": bool(title_plan.get("isFallback")), "timestamp": title_plan.get("timestamp") or now,
+            },
+        )
+    working["titleSeoMetadata"] = title_plan.get("seoMetadata", {})
+    working["titleOptimization"] = {
+        "strategy": title_plan.get("strategy"), "strategyLabel": title_plan.get("strategyLabel"),
+        "isFallback": bool(title_plan.get("isFallback")), "confidence": title_plan.get("confidence"),
+        "provenanceSource": title_plan.get("provenanceSource"), "keywordPriority": title_plan.get("keywordPriority", []),
+        "keywordEvidence": title_plan.get("keywordEvidence", []), "productReasoning": title_plan.get("productReasoning", ""),
+        "timestamp": title_plan.get("timestamp") or now,
+    }
+    return title_plan, candidates
+
+
+def _sync_comp_summary_fields(working: dict[str, Any], clean_sold: dict[str, Any], clean_active: dict[str, Any]) -> tuple[int, int]:
+    sold_count = int(clean_sold.get("sampleSize") or 0) if clean_sold.get("status") == "ok" else 0
+    active_count = int(clean_active.get("sampleSize") or 0) if clean_active.get("status") == "ok" else 0
+    working["soldPricing"] = clean_sold
+    working["soldComparableSummary"] = clean_sold
+    working["soldSampleSize"] = sold_count
+    if sold_count > 0:
+        working["soldPrice"] = clean_sold["medianSoldPrice"]
+    else:
+        working.pop("soldPrice", None)
+
+    working["activeListingEstimate"] = clean_active
+    working["activeSampleSize"] = active_count
+    if active_count > 0:
+        working["activeComparablePrice"] = clean_active["medianActivePrice"]
+        working["lowActivePrice"] = clean_active["lowActivePrice"]
+        working["highActivePrice"] = clean_active["highActivePrice"]
+    else:
+        working.pop("activeComparablePrice", None)
+    return sold_count, active_count
+
+
+def _sync_price_provenance(
+    working: dict[str, Any],
+    prov: dict[str, Any],
+    confirmed: set[str],
+    pricing_rec: dict[str, Any],
+    now: str,
+) -> None:
+    if "price" in confirmed:
+        return
+    balanced = pricing_rec.get("balancedPrice")
+    if not balanced:
+        prov["price"] = _provenance_entry("missing", "none", INSUFFICIENT_MARKET_MESSAGE, extra={"timestamp": now})
+        return
+    working["price"] = f"{float(balanced):.2f}"
+    prov["price"] = _provenance_entry(
+        str(pricing_rec.get("provenanceSource") or "fallback_estimate"),
+        str(pricing_rec.get("pricingConfidence") or "low"),
+        str(pricing_rec.get("adjustmentReason") or INSUFFICIENT_MARKET_MESSAGE),
+        seller_confirmed=False,
+        legacy_source=str(pricing_rec.get("pricingSource") or "ai_estimate"),
+        extra={
+            "strategy": pricing_rec.get("pricingStrategy"),
+            "isFallback": bool(pricing_rec.get("isFallback")),
+            "timestamp": pricing_rec.get("dataFreshness") or now,
+        },
+    )
+
+
+def _sync_market_demand_provenance(
+    prov: dict[str, Any],
+    demand: dict[str, Any],
+    pricing_rec: dict[str, Any],
+    sold_count: int,
+    active_count: int,
+    now: str,
+) -> None:
+    prov["demand"] = _provenance_entry(
+        str(demand.get("provenanceSource") or "fallback_estimate"),
+        str(demand.get("confidence") or "low"),
+        str(demand.get("explanation") or INSUFFICIENT_MARKET_MESSAGE),
+        extra={"timestamp": demand.get("dataFreshness") or now},
+    )
+    if sold_count > 0:
+        market_src = "market_sold_comp"
+    elif active_count > 0:
+        market_src = "market_active_comp"
+    else:
+        market_src = "fallback_estimate"
+    prov["marketEvidence"] = _provenance_entry(
+        market_src,
+        str(pricing_rec.get("pricingConfidence") or "low"),
+        str(pricing_rec.get("adjustmentReason") or INSUFFICIENT_MARKET_MESSAGE),
+        extra={"timestamp": pricing_rec.get("dataFreshness") or now},
+    )
+
+
+def _apply_market_and_pricing_fields(
+    working: dict[str, Any],
+    prov: dict[str, Any],
+    confirmed: set[str],
+    clean_sold: dict[str, Any],
+    clean_active: dict[str, Any],
+    demand: dict[str, Any],
+    raw_ai_est: float,
+    now: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    pricing_seed = {**working}
+    if "price" not in confirmed:
+        pricing_seed["price"] = 0
+    if raw_ai_est > 0:
+        pricing_seed["aiEstimatedPrice"] = raw_ai_est
+
+    pricing_rec = pricing_recommendation(pricing_seed, sold_summary=clean_sold, active_summary=clean_active, demand=demand)
+    pricing_options = _build_pricing_options(pricing_rec, now)
+    sold_count, active_count = _sync_comp_summary_fields(working, clean_sold, clean_active)
+
+    ai_est = pricing_rec.get("aiEstimatedPrice")
+    working["aiEstimatedPrice"] = ai_est if ai_est else (raw_ai_est if raw_ai_est > 0 else None)
+    working["pricingRecommendation"] = pricing_rec
+    working["pricingSource"] = str(pricing_rec.get("pricingSource") or "")
+    working["pricingStrategy"] = str(pricing_rec.get("pricingStrategy") or "")
+    insufficient = bool(pricing_rec.get("insufficientMarketEvidence", True))
+    working["insufficientMarketEvidence"] = insufficient
+    fallback_msg = INSUFFICIENT_MARKET_MESSAGE if insufficient else ""
+    working["marketMessage"] = str(pricing_rec.get("marketMessage") or fallback_msg)
+    working["demandMetrics"] = demand
+
+    _sync_price_provenance(working, prov, confirmed, pricing_rec, now)
+    _sync_market_demand_provenance(prov, demand, pricing_rec, sold_count, active_count, now)
+    return pricing_rec, pricing_options
+
+
+def _assemble_commerce_agent_report(
+    working: dict[str, Any],
+    title_plan: dict[str, Any],
+    clean_sold: dict[str, Any],
+    clean_active: dict[str, Any],
+    demand: dict[str, Any],
+    pricing_rec: dict[str, Any],
+    confirmed: set[str],
+    now: str,
+) -> dict[str, Any]:
+    return {
+        "pipelineVersion": "2.0",
+        "executedAt": now,
+        "seoTitle": working.get("title") or title_plan.get("recommendedTitle") or "",
+        "titleLimit": MAX_TITLE_LENGTH,
+        "titleStrategy": title_plan.get("strategy"),
+        "titleStrategyLabel": title_plan.get("strategyLabel"),
+        "titleConfidence": title_plan.get("confidence"),
+        "titleIsFallback": bool(title_plan.get("isFallback")),
+        "keywordPriority": title_plan.get("keywordPriority", []),
+        "keywordEvidence": title_plan.get("keywordEvidence", []),
+        "productReasoning": title_plan.get("productReasoning", ""),
+        "soldComparableSummary": clean_sold,
+        "activeCompetitionSummary": clean_active,
+        "sellThroughSignal": demand.get("sellThroughSignal", "unavailable"),
+        "sellThroughRate": demand.get("sellThroughRate"),
+        "currentDemandStatus": demand.get("currentDemandStatus"),
+        "currentDemandSignal": demand.get("currentDemandSignal"),
+        "seasonalDemandSignal": demand.get("seasonalDemand"),
+        "fastSalePrice": pricing_rec.get("fastSalePrice"),
+        "balancedPrice": pricing_rec.get("balancedPrice"),
+        "premiumPrice": pricing_rec.get("premiumPrice"),
+        "aiEstimatedPrice": working.get("aiEstimatedPrice"),
+        "marketRecommendedPrice": pricing_rec.get("marketRecommendedPrice"),
+        "pricingStrategy": pricing_rec.get("pricingStrategy"),
+        "pricingConfidence": pricing_rec.get("pricingConfidence"),
+        "insufficientMarketEvidence": working["insufficientMarketEvidence"],
+        "marketMessage": working["marketMessage"],
+        "fallbackStatus": "fallback_estimate" if pricing_rec.get("isFallback") else "market_backed",
+        "evidenceTimestamp": pricing_rec.get("dataFreshness") or now,
+        "itemSpecificRecommendations": _build_item_specific_recommendations(working),
+        "sellerConfirmedPreserved": sorted(confirmed),
+    }
+
+
+_MARKET_IDENTITY_KEYS = ("brand", "model", "type", "color", "size", "cat")
+_STALE_MARKET_CACHE_KEYS = (
+    "soldComparableSummary",
+    "soldPricing",
+    "activeListingEstimate",
+    "pricingSearchKeywords",
+    "marketEvidenceIdentity",
+)
+
+
+def _identity_signature(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in _MARKET_IDENTITY_KEYS:
+        val = str(item.get(key) or "").strip()
+        if _has_usable_ai_value(val):
+            parts.append(f"{key}={val.casefold()}")
+    return "|".join(parts)
+
+
+def _clear_stale_market_cache(working: dict[str, Any], clear_ai_estimate: bool) -> None:
+    for key in _STALE_MARKET_CACHE_KEYS:
+        working.pop(key, None)
+    if clear_ai_estimate:
+        working.pop("aiEstimatedPrice", None)
+        working.pop("visionEstimatedPrice", None)
+
+
+def _invalidate_market_if_identity_changed(
+    working: dict[str, Any],
+    prior_identity: str,
+    has_raw_ai: bool,
+) -> str:
+    current_identity = _identity_signature(working)
+    stored_identity = str(working.get("marketEvidenceIdentity") or "")
+    prior_changed = bool(prior_identity) and prior_identity != current_identity
+    stored_changed = bool(stored_identity) and stored_identity != current_identity
+    if prior_changed or stored_changed:
+        _clear_stale_market_cache(working, clear_ai_estimate=has_raw_ai and prior_changed)
+    return current_identity
+
+
+def _prepare_working_attributes(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    prov: dict[str, Any],
+    confirmed: set[str],
+    now: str,
+) -> None:
+    prior_identity = _identity_signature(working)
+    if raw_ai:
+        _merge_visual_attributes(working, raw_ai, prov, confirmed, now)
+    current_identity = _invalidate_market_if_identity_changed(working, prior_identity, bool(raw_ai))
+    if current_identity:
+        working["marketEvidenceIdentity"] = current_identity
+
+
+def run_commerce_agent_optimization(
+    listing: dict[str, Any],
+    *,
+    raw_ai_listing: dict[str, Any] | None = None,
+    existing_provenance: dict[str, Any] | None = None,
+    seller_confirmed_fields: set[str] | None = None,
+    fetch_live_market: bool = True,
+) -> dict[str, Any]:
+    """Execute the unified Commerce Agent optimization pipeline cleanly across modular steps."""
+    now = utc_now()
+    working = dict(listing or {})
+    raw_ai = dict(raw_ai_listing) if isinstance(raw_ai_listing, dict) else {}
+    prov = dict(existing_provenance) if isinstance(existing_provenance, dict) else {}
+    confirmed = _collect_confirmed_fields(working, prov, seller_confirmed_fields)
+    _prepare_working_attributes(working, raw_ai, prov, confirmed, now)
+
+    clean_sold, clean_active, raw_ai_est, keywords = _resolve_market_evidence_inputs(working, raw_ai, fetch_live_market)
+    demand = demand_score(working, sold_summary=clean_sold, active_summary=clean_active)
+    sold_count = int(clean_sold.get("sampleSize") or 0) if clean_sold.get("status") == "ok" else 0
+    active_count = int(clean_active.get("sampleSize") or 0) if clean_active.get("status") == "ok" else 0
+
+    title_plan, title_candidates = _run_title_step(
+        working, raw_ai, prov, confirmed,
+        {"soldSummary": clean_sold, "activeSummary": clean_active, "soldSampleSize": sold_count,
+         "activeSampleSize": active_count, "keyword": keywords, "demand": demand},
+        now,
+    )
+    pricing_rec, pricing_options = _apply_market_and_pricing_fields(
+        working, prov, confirmed, clean_sold, clean_active, demand, raw_ai_est, now
+    )
+    _apply_default_condition_note(working, raw_ai, prov, confirmed, now)
+
+    report = _assemble_commerce_agent_report(
+        working, title_plan, clean_sold, clean_active, demand, pricing_rec, confirmed, now
+    )
+    working["commerceAgent"] = report
+    return {
+        "listing": working,
+        "provenance": prov,
+        "pricingRecommendation": pricing_rec,
+        "pricingOptions": pricing_options,
+        "titlePlan": title_plan,
+        "titleCandidates": title_candidates,
+        "demand": demand,
+        "soldSummary": clean_sold,
+        "activeSummary": clean_active,
+        "commerceAgentReport": report,
+    }
+
+
 def _title_candidate(item: dict[str, Any]) -> str:
     """Build a conservative, category-aware title from confirmed listing fields."""
     current = str(item.get("title") or "").strip()
@@ -2095,8 +2923,26 @@ def _title_candidate(item: dict[str, Any]) -> str:
 def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     proposed: dict[str, Any] = {}
+    sold = sold_price_summary(item)
+    clean_sold, clean_active = sanitize_market_evidence(
+        sold if isinstance(sold, dict) else None,
+        item.get("activeListingEstimate") if isinstance(item.get("activeListingEstimate"), dict) else None,
+    )
+    demand = demand_score(item, sold_summary=clean_sold, active_summary=clean_active)
+    market_context = {
+        "soldSummary": clean_sold,
+        "activeSummary": clean_active,
+        "soldSampleSize": int(clean_sold.get("sampleSize") or 0) if clean_sold.get("status") == "ok" else 0,
+        "activeSampleSize": int(clean_active.get("sampleSize") or 0) if clean_active.get("status") == "ok" else 0,
+        "keyword": str(item.get("pricingSearchKeywords") or clean_sold.get("query") or clean_active.get("keyword") or ""),
+        "demand": demand,
+    }
     title = str(item.get("title") or "").strip()
-    title_plan = optimize_title(item)
+    title_plan = optimize_title(
+        item,
+        category_name=str(item.get("categoryName") or ""),
+        market_context=market_context,
+    )
     if not title or len(title) < 35:
         findings.append({"field": "title", "severity": "medium", "message": "Title is short and may be missing searchable product attributes."})
         candidate = title_plan.get("title") or _title_candidate(item)
@@ -2128,15 +2974,34 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
         findings.append({"field": "taxonomy", "severity": "high", "message": taxonomy.get("message", "Seller category review required.")})
     elif taxonomy.get("status") == "unavailable":
         findings.append({"field": "taxonomy", "severity": "medium", "message": taxonomy.get("message", "Taxonomy unavailable; seller category review remains advisory.")})
-    sold = sold_price_summary(item)
-    pricing = pricing_recommendation(item, sold_summary=sold)
+    pricing = pricing_recommendation(item, sold_summary=sold, active_summary=clean_active if clean_active.get("status") == "ok" else None, demand=demand)
     if pricing.get("status") == "error":
         findings.append({"field": "price", "severity": "high", "message": pricing.get("message", "Seller must enter a numeric price.")})
     elif _safe_price_proposal(item, pricing):
         proposed["price"] = pricing["recommendedPrice"]
         findings.append({"field": "price", "severity": "medium", "message": f"Suggested price candidate: ${pricing['recommendedPrice']:.2f} from {pricing['pricingSource']}. Approval required before eBay update."})
-    demand = demand_score(item)
     evidence = evidence_for_listing(item)
+    commerce_report = {
+        "pipelineVersion": "2.0",
+        "executedAt": utc_now(),
+        "seoTitle": proposed.get("title") or title_plan.get("recommendedTitle") or title,
+        "titleStrategy": title_plan.get("strategy"),
+        "titleConfidence": title_plan.get("confidence"),
+        "titleIsFallback": bool(title_plan.get("isFallback")),
+        "keywordPriority": title_plan.get("keywordPriority", []),
+        "keywordEvidence": title_plan.get("keywordEvidence", []),
+        "soldComparableSummary": clean_sold,
+        "activeCompetitionSummary": clean_active,
+        "fastSalePrice": pricing.get("fastSalePrice"),
+        "balancedPrice": pricing.get("balancedPrice"),
+        "premiumPrice": pricing.get("premiumPrice"),
+        "insufficientMarketEvidence": bool(pricing.get("insufficientMarketEvidence", True)),
+        "marketMessage": pricing.get("marketMessage") or INSUFFICIENT_MARKET_MESSAGE,
+        "sellThroughSignal": demand.get("sellThroughSignal", "unavailable"),
+        "currentDemandSignal": demand.get("currentDemandSignal"),
+        "seasonalDemandSignal": demand.get("seasonalDemand"),
+        "evidenceTimestamp": pricing.get("dataFreshness"),
+    }
     note_only_review = bool(findings and not proposed)
     score = max(0, min(100, 100 - sum(18 if f["severity"] == "high" else 10 for f in findings)))
     classification = "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs Optimization" if score >= 50 else "High Priority"
@@ -2144,7 +3009,23 @@ def audit_listing(item: dict[str, Any]) -> dict[str, Any]:
         classification = "Needs Review"
     confidence = "low" if note_only_review else "high" if findings and all(f["field"] not in {"cat", "price"} for f in findings) else "medium"
     reason = "; ".join(f["message"] for f in findings) or "No material listing quality issue was identified from the imported data."
-    return {"score": score, "classification": classification, "findings": findings, "proposed": proposed, "reason": reason, "confidence": confidence, "risk": "high" if any(f["severity"] == "high" for f in findings) or note_only_review else "low", "evidence": evidence_summary(item), "taxonomy": taxonomy, "soldPricing": pricing, "soldComparableSummary": sold, "demand": demand, "titleCandidates": title_plan.get("candidates", {}), "titleSeoMetadata": title_plan.get("seoMetadata", {})}
+    return {
+        "score": score,
+        "classification": classification,
+        "findings": findings,
+        "proposed": proposed,
+        "reason": reason,
+        "confidence": confidence,
+        "risk": "high" if any(f["severity"] == "high" for f in findings) or note_only_review else "low",
+        "evidence": evidence_summary(item),
+        "taxonomy": taxonomy,
+        "soldPricing": pricing,
+        "soldComparableSummary": sold,
+        "demand": demand,
+        "titleCandidates": title_plan.get("candidates", {}),
+        "titleSeoMetadata": title_plan.get("seoMetadata", {}),
+        "commerceAgentReport": commerce_report,
+    }
 
 
 def audit_all(seller_id: str | None = None) -> dict[str, Any]:
@@ -2171,7 +3052,7 @@ def audit_all(seller_id: str | None = None) -> dict[str, Any]:
             version_row = db.execute("SELECT COALESCE(MAX(version_number), 0) AS version FROM recommendations WHERE listing_row_id=?", (row["id"],)).fetchone()
             version_number = int(version_row["version"] if version_row else 0) + 1
             recommendation_id = str(uuid.uuid4())
-            stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "soldComparableSummary": audit["soldComparableSummary"], "demandMetrics": audit["demand"], "titleCandidates": audit["titleCandidates"], "titleSeoMetadata": audit["titleSeoMetadata"]}
+            stored_current = {**item, "attributeEvidence": audit["evidence"], "taxonomyValidation": audit["taxonomy"], "soldPricing": audit["soldPricing"], "soldComparableSummary": audit["soldComparableSummary"], "demandMetrics": audit["demand"], "titleCandidates": audit["titleCandidates"], "titleSeoMetadata": audit["titleSeoMetadata"], "commerceAgent": audit.get("commerceAgentReport", {})}
             db.execute("INSERT INTO recommendations(id,listing_row_id,current_json,proposed_json,findings_json,score,classification,reason,confidence,risk,status,created_at,updated_at,version_number,is_current,seller_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (recommendation_id, row["id"], _json(stored_current), _json(audit["proposed"]), _json(audit["findings"]), audit["score"], audit["classification"], audit["reason"], audit["confidence"], audit["risk"], "Pending", now, now, version_number, True if db.postgres else 1, row["seller_id"] if "seller_id" in row.keys() else seller_id))
             results.append({"recommendationId": recommendation_id, "listing": stored_current, **audit, "status": "Pending", "version": version_number, "isCurrent": True})
     return {"count": len(results), "results": results}

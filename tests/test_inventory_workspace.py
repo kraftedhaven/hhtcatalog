@@ -131,10 +131,11 @@ class InventoryWorkspaceTests(unittest.TestCase):
             item["id"], self.seller_id, analysis_mock, preserve_seller_edits=True
         )
 
-        # Confirm AI prepopulated fields
+        # Confirm AI prepopulated fields with canonical provenance
         self.assertEqual(populated["listing"]["brand"], "Nike")
         self.assertEqual(populated["listing"]["size"], "L")
-        self.assertEqual(populated["provenance"]["brand"]["source"], "photo_evidence")
+        self.assertEqual(populated["provenance"]["brand"]["source"], "observed_photo_fact")
+        self.assertEqual(populated["provenance"]["brand"]["legacySource"], "photo_evidence")
         self.assertEqual(populated["provenance"]["brand"]["confidence"], "high")
         self.assertFalse(populated["provenance"]["brand"]["sellerConfirmed"])
 
@@ -174,7 +175,8 @@ class InventoryWorkspaceTests(unittest.TestCase):
         self.assertIn("quick_sale", enriched["pricingOptions"])
         self.assertEqual(enriched["listing"]["researchClues"]["comparablePrice"], "$54.99")
         self.assertEqual(enriched["listing"]["price"], "54.99")
-        self.assertEqual(enriched["provenance"]["price"]["source"], "ai_estimate")
+        self.assertEqual(enriched["provenance"]["price"]["source"], "fallback_estimate")
+        self.assertEqual(enriched["provenance"]["price"]["legacySource"], "ai_estimate")
         self.assertEqual(enriched["provenance"]["type"]["source"], "seller_input")
         self.assertEqual(enriched["workflowStatus"], "needs_review")
 
@@ -1370,6 +1372,263 @@ class InventoryWorkspaceTests(unittest.TestCase):
             })
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.get_json()["result"]["photoCount"], 2)
+
+    def test_grouped_item_invokes_commerce_agent_and_preserves_active_comps_tiers(self):
+        """Grouped new-inventory items invoke Commerce Agent optimization, preserve active comps,
+        compute distinct Fast Sale / Balanced / Premium tiers, and keep AI estimate separate."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Commerce Agent Active Comps", grouping_mode="1")
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "polo.jpg", "previewUrl": "https://example.com/polo.jpg", "storageUrl": "https://example.com/polo.jpg"}
+        ])
+        item = inventory_workspace.list_batch_items(batch["id"], self.seller_id)[0]
+
+        analysis_payload = {
+            "listing": {
+                "title": "Green Polo Shirt",
+                "brand": "Chaps by Ralph Lauren",
+                "model": "Color Block",
+                "type": "Polo Shirt",
+                "size": "M",
+                "color": "Green Gray",
+                "mat": "100% Cotton",
+                "cat": "57990",
+                "cid": "3000",
+                "price": 20.0,
+                "aiEstimatedPrice": 24.50,
+                "pricingSource": "active_comparable",
+                "pricingSearchKeywords": "Chaps by Ralph Lauren Polo Shirt M 100% Cotton Color Block",
+                "activeListingEstimate": {
+                    "provider": "ebay_browse",
+                    "kind": "active_comparable",
+                    "status": "ok",
+                    "keyword": "Chaps by Ralph Lauren Polo Shirt M 100% Cotton Color Block",
+                    "sampleSize": 25,
+                    "lowActivePrice": 12.0,
+                    "medianActivePrice": 20.0,
+                    "highActivePrice": 77.88,
+                    "p25ActivePrice": 16.0,
+                    "p75ActivePrice": 29.99,
+                },
+                "soldPricing": {"status": "not_configured", "sampleSize": 0},
+                "provenance": {"brand": "Known from image", "size": "Known from image"},
+            }
+        }
+
+        updated = inventory_workspace.prepopulate_item_from_analysis(
+            item["id"], self.seller_id, analysis_payload, preserve_seller_edits=True
+        )
+        listing = updated["listing"]
+        self.assertEqual(updated["workflowStatus"], "needs_review")
+        self.assertLessEqual(len(listing["title"]), 80)
+        self.assertIn("Chaps by Ralph Lauren", listing["title"])
+        self.assertNotEqual(listing["title"], "Green Polo Shirt")
+        self.assertEqual(updated["provenance"]["title"]["source"], "demand_signal")
+        self.assertFalse(listing["titleOptimization"]["isFallback"])
+
+        # Preserves real active comps instead of dropping them & separates AI fallback estimate
+        self.assertEqual(listing["activeSampleSize"], 25)
+        self.assertEqual(listing["activeComparablePrice"], 20.0)
+        self.assertEqual(listing["aiEstimatedPrice"], 24.5)
+        self.assertFalse(listing["insufficientMarketEvidence"])
+        self.assertEqual(updated["provenance"]["price"]["source"], "market_active_comp")
+
+        # Distinct Fast Sale < Balanced < Premium pricing tiers exposed consistently
+        self.assertEqual(updated["quickSalePrice"], 16.0)
+        self.assertEqual(updated["balancedPrice"], 20.0)
+        self.assertEqual(updated["premiumPrice"], 29.99)
+        self.assertEqual(updated["pricingOptions"]["quick_sale"]["price"], 16.0)
+        self.assertEqual(updated["pricingOptions"]["balanced"]["price"], 20.0)
+        self.assertEqual(updated["pricingOptions"]["premium"]["price"], 29.99)
+
+        # Does not hallucinate sold count or sell-through when only active comps exist
+        self.assertNotIn("soldPrice", listing)
+        self.assertEqual(listing["demandMetrics"]["sellThroughSignal"], "unavailable")
+        self.assertIsNone(listing["demandMetrics"]["sellThroughRate"])
+        self.assertEqual(listing["demandMetrics"]["seasonalDemand"]["status"], "unsupported")
+
+    def test_insufficient_market_evidence_keeps_ai_estimate_separate_and_blocks_fake_comps(self):
+        """When neither sold nor active comps exist, item records explicit fallback status & message."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Fallback Batch", grouping_mode="1")
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "item.jpg", "previewUrl": "https://example.com/item.jpg", "storageUrl": "https://example.com/item.jpg"}
+        ])
+        item = inventory_workspace.list_batch_items(batch["id"], self.seller_id)[0]
+
+        updated = inventory_workspace.prepopulate_item_from_analysis(
+            item["id"],
+            self.seller_id,
+            {
+                "listing": {
+                    "title": "Unknown Vintage Sweatshirt",
+                    "type": "Sweatshirt",
+                    "color": "Gray",
+                    "price": "20.00",
+                    "provenance": {"color": "Inferred"},
+                }
+            },
+            preserve_seller_edits=True,
+        )
+        listing = updated["listing"]
+        self.assertTrue(listing["insufficientMarketEvidence"])
+        self.assertEqual(listing["marketMessage"], "Insufficient market evidence — seller confirmation required.")
+        self.assertEqual(listing["aiEstimatedPrice"], 20.0)
+        self.assertIsNone(listing["pricingRecommendation"]["marketRecommendedPrice"])
+        self.assertEqual(updated["provenance"]["price"]["source"], "fallback_estimate")
+        self.assertEqual(updated["provenance"]["title"]["source"], "fallback_estimate")
+        self.assertTrue(listing["titleOptimization"]["isFallback"])
+
+    def test_seller_confirmed_fields_survive_commerce_agent_reanalysis(self):
+        """Confirmed title, price, brand, size, condition, and category survive re-analysis."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Seller Protected Reanalysis", grouping_mode="1")
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "jacket.jpg", "previewUrl": "https://example.com/jacket.jpg", "storageUrl": "https://example.com/jacket.jpg"}
+        ])
+        item = inventory_workspace.list_batch_items(batch["id"], self.seller_id)[0]
+
+        inventory_workspace.patch_item(
+            item["id"],
+            self.seller_id,
+            {
+                "title": "Seller Confirmed Carhartt Detroit Jacket J97",
+                "price": "165.00",
+                "brand": "Carhartt",
+                "size": "XL",
+                "cid": "3000",
+                "cat": "57988",
+                "categoryName": "Men's Coats & Jackets",
+                "confirmAll": True,
+            },
+        )
+
+        reanalyzed = inventory_workspace.prepopulate_item_from_analysis(
+            item["id"],
+            self.seller_id,
+            {
+                "listing": {
+                    "title": "Different AI Title Should Be Ignored",
+                    "price": "40.00",
+                    "brand": "WrongBrand",
+                    "size": "S",
+                    "cid": "1000",
+                    "cat": "15687",
+                    "categoryName": "Wrong Category",
+                    "soldComparableSummary": {
+                        "status": "ok",
+                        "pricingSource": "exact_used_sold",
+                        "sampleSize": 5,
+                        "lowSoldPrice": 90.0,
+                        "medianSoldPrice": 120.0,
+                        "highSoldPrice": 150.0,
+                        "query": "Carhartt J97",
+                    },
+                }
+            },
+            preserve_seller_edits=True,
+        )
+        l = reanalyzed["listing"]
+        self.assertEqual(l["title"], "Seller Confirmed Carhartt Detroit Jacket J97")
+        self.assertEqual(l["price"], "165.00")
+        self.assertEqual(l["brand"], "Carhartt")
+        self.assertEqual(l["size"], "XL")
+        self.assertEqual(l["cid"], "3000")
+        self.assertEqual(l["cat"], "57988")
+        self.assertEqual(l["categoryName"], "Men's Coats & Jackets")
+        for f_key in ("title", "price", "brand", "size", "cat", "cid"):
+            self.assertTrue(reanalyzed["provenance"][f_key]["sellerConfirmed"])
+
+    def test_patch_item_preserves_commerce_agent_metadata(self):
+        """Inline edits and field confirmations preserve persisted market & Commerce Agent metadata."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Patch Metadata Preservation", grouping_mode="1")
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "shirt.jpg", "previewUrl": "https://example.com/shirt.jpg", "storageUrl": "https://example.com/shirt.jpg"}
+        ])
+        item = inventory_workspace.list_batch_items(batch["id"], self.seller_id)[0]
+        inventory_workspace.prepopulate_item_from_analysis(
+            item["id"],
+            self.seller_id,
+            {
+                "listing": {
+                    "title": "Chaps Color Block Polo Shirt",
+                    "brand": "Chaps",
+                    "type": "Polo Shirt",
+                    "size": "L",
+                    "cat": "57990",
+                    "cid": "3000",
+                    "price": 20.0,
+                    "aiEstimatedPrice": 18.0,
+                    "activeListingEstimate": {
+                        "provider": "ebay_browse",
+                        "kind": "active_comparable",
+                        "status": "ok",
+                        "keyword": "Chaps Polo Shirt",
+                        "sampleSize": 12,
+                        "lowActivePrice": 14.0,
+                        "medianActivePrice": 20.0,
+                        "highActivePrice": 35.0,
+                    },
+                }
+            },
+        )
+        patched = inventory_workspace.patch_item(
+            item["id"],
+            self.seller_id,
+            {"title": "Chaps Vintage Color Block Polo Shirt L", "confirmField": "cat"},
+        )
+        l = patched["listing"]
+        self.assertEqual(l["activeSampleSize"], 12)
+        self.assertEqual(l["activeComparablePrice"], 20.0)
+        self.assertEqual(l["aiEstimatedPrice"], 18.0)
+        self.assertIn("pricingRecommendation", l)
+        self.assertIn("demandMetrics", l)
+        self.assertIn("commerceAgent", l)
+        self.assertFalse(l["insufficientMarketEvidence"])
+
+    def test_reanalysis_retains_unconfirmed_desc_and_notes_while_protecting_confirmed(self):
+        """Persisted analysis/reanalysis applies analyzed desc and notes unless seller-confirmed."""
+        batch = inventory_workspace.create_batch(self.seller_id, name="Reanalysis Desc Batch", grouping_mode="1")
+        inventory_workspace.register_batch_photos(batch["id"], self.seller_id, [
+            {"filename": "sweater.jpg", "previewUrl": "https://example.com/sweater.jpg", "storageUrl": "https://example.com/sweater.jpg"}
+        ])
+        item = inventory_workspace.list_batch_items(batch["id"], self.seller_id)[0]
+
+        first = inventory_workspace.prepopulate_item_from_analysis(
+            item["id"],
+            self.seller_id,
+            {
+                "listing": {
+                    "title": "Wool Crewneck Sweater",
+                    "brand": "Pendleton",
+                    "type": "Sweater",
+                    "desc": "Soft Virgin Wool crewneck sweater in dark green.",
+                    "notes": "No moth holes observed in photos.",
+                }
+            },
+        )
+        self.assertEqual(first["listing"]["desc"], "Soft Virgin Wool crewneck sweater in dark green.")
+        self.assertEqual(first["listing"]["notes"], "No moth holes observed in photos.")
+
+        # Confirm desc only; re-analysis updates notes without clobbering confirmed desc
+        inventory_workspace.patch_item(
+            item["id"],
+            self.seller_id,
+            {"desc": "Seller Verified Virgin Wool Sweater Description", "confirmField": "desc"},
+        )
+        second = inventory_workspace.prepopulate_item_from_analysis(
+            item["id"],
+            self.seller_id,
+            {
+                "listing": {
+                    "title": "Pendleton Wool Crewneck Sweater",
+                    "brand": "Pendleton",
+                    "type": "Sweater",
+                    "desc": "AI overwrite should be blocked",
+                    "notes": "Updated inspection note: ribbed cuffs clean.",
+                }
+            },
+            preserve_seller_edits=True,
+        )
+        self.assertEqual(second["listing"]["desc"], "Seller Verified Virgin Wool Sweater Description")
+        self.assertEqual(second["listing"]["notes"], "Updated inspection note: ribbed cuffs clean.")
 
 
 if __name__ == "__main__":

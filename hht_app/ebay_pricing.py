@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime, timezone
 import os
 import statistics
 import time
@@ -18,11 +19,28 @@ DEFAULT_SITE_ID = "0"
 _token_cache: dict[str, Any] = {"token": "", "expires_at": 0.0, "environment": ""}
 
 
+def _parse_float(value: Any) -> float:
+    try:
+        parsed = float(str(value or 0).replace("$", "").replace(",", "").strip())
+        return round(parsed, 2) if parsed > 0 else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def enrich_with_ebay_active_pricing(listing: dict[str, Any], timeout: float = 5.0) -> dict[str, Any]:
     result = dict(listing)
     keywords = active_listing_keywords(result)
     result["pricingSearchKeywords"] = keywords
-    result["aiEstimatedPrice"] = result.get("price") or 0.0
+    raw_ai_price = _parse_float(
+        result.get("aiEstimatedPrice")
+        or result.get("visionEstimatedPrice")
+        or (0 if result.get("sellerEditedPrice") is True else result.get("price"))
+    )
+    if raw_ai_price > 0:
+        result["aiEstimatedPrice"] = raw_ai_price
+        result.setdefault("visionEstimatedPrice", raw_ai_price)
+    else:
+        result["aiEstimatedPrice"] = 0.0
     sold_summary = sold_price_summary(result)
     result["soldPricing"] = sold_summary
     base_pricing = pricing_recommendation(result, sold_summary=sold_summary)
@@ -42,6 +60,12 @@ def enrich_with_ebay_active_pricing(listing: dict[str, Any], timeout: float = 5.
         result["pricingError"] = exc.to_public()
         result["notes"] = _append_note(result.get("notes"), f"eBay Browse pricing unavailable ({exc.category}); AI price estimate kept. Search active listings: {keywords}.")
         return result
+
+    if summary["sampleSize"] > 0:
+        result["activeComparablePrice"] = summary["medianActivePrice"]
+        result["activeSampleSize"] = summary["sampleSize"]
+        result["lowActivePrice"] = summary["lowActivePrice"]
+        result["highActivePrice"] = summary["highActivePrice"]
 
     if summary["sampleSize"] < 3:
         result["activeListingEstimate"] = summary
@@ -212,24 +236,36 @@ def _active_listing_price(item: Any, expected_category: str) -> float | None:
 
 
 def _active_summary(keywords: str, prices: list[float]) -> dict[str, Any]:
+    freshness = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if not prices:
         return {
             "provider": "ebay_browse",
             "kind": "active_comparable",
+            "status": "no_matches",
             "keyword": keywords,
             "sampleSize": 0,
             "medianActivePrice": 0.0,
             "lowActivePrice": 0.0,
             "highActivePrice": 0.0,
+            "p25ActivePrice": 0.0,
+            "p75ActivePrice": 0.0,
+            "dataFreshness": freshness,
         }
+    count = len(prices)
+    p25 = round(float(prices[max(0, int((count - 1) * 0.25))]), 2)
+    p75 = round(float(prices[min(count - 1, int((count - 1) * 0.75))]), 2)
     return {
         "provider": "ebay_browse",
         "kind": "active_comparable",
+        "status": "ok",
         "keyword": keywords,
-        "sampleSize": len(prices),
+        "sampleSize": count,
         "medianActivePrice": round(float(statistics.median(prices)), 2),
         "lowActivePrice": round(float(prices[0]), 2),
         "highActivePrice": round(float(prices[-1]), 2),
+        "p25ActivePrice": p25,
+        "p75ActivePrice": p75,
+        "dataFreshness": freshness,
     }
 
 
