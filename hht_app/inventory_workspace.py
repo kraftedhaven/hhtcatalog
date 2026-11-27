@@ -1116,6 +1116,7 @@ _PRESERVED_ENRICHMENT_KEYS = (
     "pricingSource",
     "pricingStrategy",
     "pricingSearchKeywords",
+    "marketEvidenceIdentity",
     "insufficientMarketEvidence",
     "marketMessage",
     "demandMetrics",
@@ -1574,6 +1575,25 @@ def prepopulate_item_from_analysis(
     return get_item(item_id, seller_id)
 
 
+_IDENTITY_CLUE_KEYS = frozenset({
+    "title", "observedTitle", "brand", "size", "color", "itemType", "model", "material", "category",
+})
+_MARKET_CACHE_FIELDS = (
+    "soldComparableSummary",
+    "soldPricing",
+    "activeListingEstimate",
+    "pricingSearchKeywords",
+    "marketEvidenceIdentity",
+)
+
+
+def _clear_cached_market_evidence(listing: dict[str, Any], clean_clues: dict[str, Any]) -> None:
+    if not (clean_clues.keys() & _IDENTITY_CLUE_KEYS):
+        return
+    for key in _MARKET_CACHE_FIELDS:
+        listing.pop(key, None)
+
+
 def enrich_item_from_research_clues(
     item_id: str, seller_id: str, clues: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1635,6 +1655,7 @@ def enrich_item_from_research_clues(
     comparable_price = float(price_match.group(0).replace(",", "")) if price_match else None
     if comparable_price and comparable_price > 0:
         listing["aiEstimatedPrice"] = comparable_price
+    _clear_cached_market_evidence(listing, clean)
 
     seller_confirmed = {
         k for k, p in provenance.items()

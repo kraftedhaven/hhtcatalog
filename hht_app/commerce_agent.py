@@ -2255,8 +2255,10 @@ def _is_specific_confirmed(
     for key in (label, existing_key):
         if not key:
             continue
+        if key in confirmed:
+            return True
         entry = provenance.get(key)
-        if key in confirmed or (isinstance(entry, dict) and entry.get("sellerConfirmed") is True):
+        if isinstance(entry, dict) and entry.get("sellerConfirmed") is True:
             return True
     return False
 
@@ -2790,6 +2792,62 @@ def _assemble_commerce_agent_report(
     }
 
 
+_MARKET_IDENTITY_KEYS = ("brand", "model", "type", "color", "size", "cat")
+_STALE_MARKET_CACHE_KEYS = (
+    "soldComparableSummary",
+    "soldPricing",
+    "activeListingEstimate",
+    "pricingSearchKeywords",
+    "marketEvidenceIdentity",
+)
+
+
+def _identity_signature(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in _MARKET_IDENTITY_KEYS:
+        val = str(item.get(key) or "").strip()
+        if _has_usable_ai_value(val):
+            parts.append(f"{key}={val.casefold()}")
+    return "|".join(parts)
+
+
+def _clear_stale_market_cache(working: dict[str, Any], clear_ai_estimate: bool) -> None:
+    for key in _STALE_MARKET_CACHE_KEYS:
+        working.pop(key, None)
+    if clear_ai_estimate:
+        working.pop("aiEstimatedPrice", None)
+        working.pop("visionEstimatedPrice", None)
+
+
+def _invalidate_market_if_identity_changed(
+    working: dict[str, Any],
+    prior_identity: str,
+    has_raw_ai: bool,
+) -> str:
+    current_identity = _identity_signature(working)
+    stored_identity = str(working.get("marketEvidenceIdentity") or "")
+    prior_changed = bool(prior_identity) and prior_identity != current_identity
+    stored_changed = bool(stored_identity) and stored_identity != current_identity
+    if prior_changed or stored_changed:
+        _clear_stale_market_cache(working, clear_ai_estimate=has_raw_ai and prior_changed)
+    return current_identity
+
+
+def _prepare_working_attributes(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    prov: dict[str, Any],
+    confirmed: set[str],
+    now: str,
+) -> None:
+    prior_identity = _identity_signature(working)
+    if raw_ai:
+        _merge_visual_attributes(working, raw_ai, prov, confirmed, now)
+    current_identity = _invalidate_market_if_identity_changed(working, prior_identity, bool(raw_ai))
+    if current_identity:
+        working["marketEvidenceIdentity"] = current_identity
+
+
 def run_commerce_agent_optimization(
     listing: dict[str, Any],
     *,
@@ -2804,9 +2862,7 @@ def run_commerce_agent_optimization(
     raw_ai = dict(raw_ai_listing) if isinstance(raw_ai_listing, dict) else {}
     prov = dict(existing_provenance) if isinstance(existing_provenance, dict) else {}
     confirmed = _collect_confirmed_fields(working, prov, seller_confirmed_fields)
-
-    if raw_ai:
-        _merge_visual_attributes(working, raw_ai, prov, confirmed, now)
+    _prepare_working_attributes(working, raw_ai, prov, confirmed, now)
 
     clean_sold, clean_active, raw_ai_est, keywords = _resolve_market_evidence_inputs(working, raw_ai, fetch_live_market)
     demand = demand_score(working, sold_summary=clean_sold, active_summary=clean_active)

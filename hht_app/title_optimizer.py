@@ -37,6 +37,9 @@ GENERIC_TITLES = {
     "review needed item",
 }
 
+_PRODUCT_NOUN_KEYS = {"type", "model", "category"}
+_NON_PRODUCT_GENERIC_TITLES = {"item", "clothing", "apparel", "review needed item"}
+
 DEFAULT_FILLER_VALUES = {"all seasons", "casual", "regular", "no", "pre-owned"}
 
 ATTRIBUTE_WEIGHTS = {
@@ -245,8 +248,17 @@ def _unique_novel_tokens(text: str, excluded_cf: str, limit: int) -> list[str]:
     return tokens
 
 
+def _has_product_noun(values: dict[str, str]) -> bool:
+    return bool(values.keys() & _PRODUCT_NOUN_KEYS)
+
+
 def _extra_descriptor_tokens(current: str, values: dict[str, str]) -> list[str]:
-    if not current or current.strip().casefold() in GENERIC_TITLES:
+    if not current:
+        return []
+    lowered = current.strip().casefold()
+    if lowered in _NON_PRODUCT_GENERIC_TITLES:
+        return []
+    if lowered in GENERIC_TITLES and _has_product_noun(values):
         return []
     return _unique_novel_tokens(current, " ".join(values.values()).casefold(), 16)
 
@@ -350,11 +362,12 @@ def _build_candidates(
     current = candidate_ctx["current"]
     confidence = candidate_ctx["confidence"]
     preserve = bool(candidate_ctx.get("preserve"))
+    quick_extras = [] if _has_product_noun(values) else extras
     candidates: dict[str, dict[str, Any]] = {}
 
     for name, keys, reason, base_score in _STRATEGY_SPECS:
         bundle = {
-            "extras": {"quick_sale": []}.get(name, extras),
+            "extras": {"quick_sale": quick_extras}.get(name, extras),
             "market": market_tokens,
             "current": current,
             "preserve": preserve,

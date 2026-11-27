@@ -7,6 +7,7 @@ os.environ.setdefault("DEMO_MODE", "true")
 os.environ.setdefault("EBAY_MUTATIONS_ENABLED", "false")
 
 from hht_app import commerce_agent
+from hht_app.schema import normalize_listing
 from hht_app.title_optimizer import optimize_title
 
 
@@ -228,6 +229,60 @@ class UnifiedCommerceAgentTests(unittest.TestCase):
         self.assertEqual(dict_and_cond_protected["listing"]["itemSpecifics"], {"Brand": "KeptWholeDict"})
         self.assertEqual(dict_and_cond_protected["listing"]["condition"], "Pre-owned - Good")
         self.assertEqual(dict_and_cond_protected["listing"]["cid"], "3000")
+
+    def test_title_optimizer_retains_generic_product_noun_when_type_missing(self):
+        shirt = optimize_title(normalize_listing({"title": "Shirt", "color": "Red", "size": "L"}))
+        self.assertIn("Shirt", shirt["recommendedTitle"])
+        self.assertNotEqual(shirt["recommendedTitle"], "Red L")
+        for cand in shirt["candidates"].values():
+            self.assertIn("Shirt", cand["title"])
+
+        placeholder = optimize_title({"title": "Review Needed Item", "color": "Red", "size": "L"})
+        self.assertNotIn("Review Needed Item", placeholder["recommendedTitle"])
+
+        with_type = optimize_title({"title": "Bag", "brand": "Coach", "type": "Handbag", "color": "Brown"})
+        self.assertNotIn("Bag", with_type["recommendedTitle"].split())
+
+    def test_reanalysis_and_identity_change_invalidate_cached_comparables(self):
+        stale_item = {
+            "title": "Nike Red Shirt",
+            "brand": "Nike",
+            "color": "Red",
+            "type": "Shirt",
+            "pricingSearchKeywords": "Nike Red Shirt",
+            "activeListingEstimate": {
+                "status": "ok",
+                "sampleSize": 5,
+                "medianActivePrice": 25.0,
+                "lowActivePrice": 20.0,
+                "highActivePrice": 30.0,
+                "keyword": "Nike Red Shirt",
+            },
+        }
+        reanalyzed = commerce_agent.run_commerce_agent_optimization(
+            stale_item,
+            raw_ai_listing={"title": "Adidas Blue Shirt", "brand": "Adidas", "color": "Blue", "type": "Shirt"},
+            fetch_live_market=False,
+        )
+        self.assertNotIn("Nike", reanalyzed["listing"]["title"])
+        self.assertNotIn("Red", reanalyzed["listing"]["title"])
+        self.assertEqual(reanalyzed["activeSummary"]["sampleSize"], 0)
+        self.assertTrue(reanalyzed["pricingRecommendation"]["insufficientMarketEvidence"])
+        self.assertNotIn("Nike", reanalyzed["listing"].get("pricingSearchKeywords", ""))
+
+        edited_in_place = commerce_agent.run_commerce_agent_optimization(
+            {
+                **stale_item,
+                "brand": "Adidas",
+                "color": "Blue",
+                "marketEvidenceIdentity": "brand=nike|type=shirt|color=red",
+            },
+            raw_ai_listing=None,
+            fetch_live_market=False,
+        )
+        self.assertEqual(edited_in_place["activeSummary"]["sampleSize"], 0)
+        self.assertTrue(edited_in_place["pricingRecommendation"]["insufficientMarketEvidence"])
+        self.assertIn("brand=adidas", edited_in_place["listing"]["marketEvidenceIdentity"])
 
 
 if __name__ == "__main__":
