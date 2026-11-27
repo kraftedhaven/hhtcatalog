@@ -284,6 +284,17 @@ class UnifiedCommerceAgentTests(unittest.TestCase):
         self.assertTrue(edited_in_place["pricingRecommendation"]["insufficientMarketEvidence"])
         self.assertIn("brand=adidas", edited_in_place["listing"]["marketEvidenceIdentity"])
 
+    def test_title_optimizer_preserves_single_character_identifiers(self):
+        ps5 = optimize_title({"title": "Sony PlayStation 5", "brand": "Sony", "color": "White"})
+        self.assertIn("5", ps5["recommendedTitle"].split())
+        self.assertIn("PlayStation", ps5["recommendedTitle"].split())
+
+        ps5_storage = optimize_title({"title": "Sony PlayStation 5", "brand": "Sony", "size": "500GB"})
+        self.assertIn("5", ps5_storage["recommendedTitle"].split())
+
+        jordan1 = optimize_title({"title": "Nike Air Jordan 1", "brand": "Nike", "color": "Red"})
+        self.assertIn("1", jordan1["recommendedTitle"].split())
+
 
 if __name__ == "__main__":
     unittest.main()

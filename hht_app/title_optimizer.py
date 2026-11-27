@@ -225,21 +225,26 @@ def _clean_values(item: dict[str, Any], category_name: str = "") -> dict[str, st
     return values
 
 
-def _should_skip_token(cleaned: str, excluded_cf: str, seen_cf: set[str]) -> bool:
-    if len(cleaned) < 2:
+def _token_words(text: str) -> list[str]:
+    return [w.casefold() for w in re.findall(r"[A-Za-z0-9']+", text)]
+
+
+def _should_skip_token(cleaned: str, excluded_words: set[str], seen_cf: set[str]) -> bool:
+    if not cleaned:
         return True
     low = cleaned.casefold()
-    if low in excluded_cf or low in STOP:
+    if low in STOP or low in seen_cf:
         return True
-    return low in seen_cf
+    words = set(_token_words(cleaned))
+    return bool(words) and words <= excluded_words
 
 
-def _unique_novel_tokens(text: str, excluded_cf: str, limit: int) -> list[str]:
+def _unique_novel_tokens(text: str, excluded_words: set[str], limit: int) -> list[str]:
     tokens: list[str] = []
     seen_cf: set[str] = set()
     for raw in re.findall(r"[A-Za-z0-9'&-]+", text):
         cleaned = raw.strip("-'&")
-        if _should_skip_token(cleaned, excluded_cf, seen_cf):
+        if _should_skip_token(cleaned, excluded_words, seen_cf):
             continue
         tokens.append(cleaned)
         seen_cf.add(cleaned.casefold())
@@ -260,7 +265,8 @@ def _extra_descriptor_tokens(current: str, values: dict[str, str]) -> list[str]:
         return []
     if lowered in GENERIC_TITLES and _has_product_noun(values):
         return []
-    return _unique_novel_tokens(current, " ".join(values.values()).casefold(), 16)
+    excluded_words = set(_token_words(" ".join(values.values())))
+    return _unique_novel_tokens(current, excluded_words, 16)
 
 
 def _should_preserve_identifying_title(values: dict[str, str], current: str) -> bool:
@@ -272,11 +278,8 @@ def _should_preserve_identifying_title(values: dict[str, str], current: str) -> 
 
 
 def _extract_market_tokens(queries: list[str], values: dict[str, str]) -> list[str]:
-    return _unique_novel_tokens(" ".join(queries), " ".join(values.values()).casefold(), 3)
-
-
-def _token_words(text: str) -> list[str]:
-    return [w.casefold() for w in re.findall(r"[A-Za-z0-9']+", text)]
+    excluded_words = set(_token_words(" ".join(values.values())))
+    return _unique_novel_tokens(" ".join(queries), excluded_words, 3)
 
 
 def _append_tokens_dedup(parts: list[str], tokens: list[str]) -> list[str]:
