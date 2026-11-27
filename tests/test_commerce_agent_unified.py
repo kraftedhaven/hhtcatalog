@@ -161,6 +161,74 @@ class UnifiedCommerceAgentTests(unittest.TestCase):
         )
         self.assertEqual(confirmed["listing"]["title"], "Nike Red Shirt")
 
+    def test_reanalysis_merges_unconfirmed_item_specifics_condition_and_preserves_confirmed(self):
+        unconfirmed = commerce_agent.run_commerce_agent_optimization(
+            {
+                "title": "Polo Shirt",
+                "condition": "Pre-owned",
+                "cid": "3000",
+                "itemSpecifics": {"Brand": "OldBrand", "neckline": "Crew"},
+                "attributeEvidence": {"brand": {"value": "OldBrand", "confidence": "low"}},
+            },
+            raw_ai_listing={
+                "title": "Ralph Lauren Rugby Shirt",
+                "condition": "New with tags",
+                "cid": "1000",
+                "itemSpecifics": {
+                    "Brand": "Ralph Lauren",
+                    "Neckline": "Collared",
+                    "Sleeve Length": "Long Sleeve",
+                    "Features": ["Heavyweight", "Embroidered Crest"],
+                    "Ignored": "Not visible",
+                },
+                "attributeEvidence": {"brand": {"value": "Ralph Lauren", "confidence": "high"}},
+            },
+            fetch_live_market=False,
+        )
+        merged_specs = unconfirmed["listing"]["itemSpecifics"]
+        self.assertEqual(merged_specs["Brand"], "Ralph Lauren")
+        self.assertEqual(merged_specs["Neckline"], "Collared")
+        self.assertNotIn("neckline", merged_specs)
+        self.assertEqual(merged_specs["Sleeve Length"], "Long Sleeve")
+        self.assertEqual(merged_specs["Features"], ["Heavyweight", "Embroidered Crest"])
+        self.assertNotIn("Ignored", merged_specs)
+        self.assertEqual(unconfirmed["listing"]["condition"], "New with tags")
+        self.assertEqual(unconfirmed["listing"]["cid"], "1000")
+        self.assertEqual(unconfirmed["listing"]["attributeEvidence"]["brand"]["value"], "Ralph Lauren")
+
+        aspect_protected = commerce_agent.run_commerce_agent_optimization(
+            {
+                "title": "Shirt",
+                "itemSpecifics": {"Brand": "CustomSellerBrand", "Sleeve Length": "Short Sleeve"},
+            },
+            raw_ai_listing={
+                "itemSpecifics": {"Brand": "AIUpdatedBrand", "Sleeve Length": "Long Sleeve"},
+            },
+            existing_provenance={"Brand": {"source": "seller_input", "sellerConfirmed": True}},
+            fetch_live_market=False,
+        )
+        self.assertEqual(aspect_protected["listing"]["itemSpecifics"]["Brand"], "CustomSellerBrand")
+        self.assertEqual(aspect_protected["listing"]["itemSpecifics"]["Sleeve Length"], "Long Sleeve")
+
+        dict_and_cond_protected = commerce_agent.run_commerce_agent_optimization(
+            {
+                "title": "Shirt",
+                "condition": "Pre-owned - Good",
+                "cid": "3000",
+                "itemSpecifics": {"Brand": "KeptWholeDict"},
+            },
+            raw_ai_listing={
+                "condition": "New with tags",
+                "cid": "1000",
+                "itemSpecifics": {"Brand": "ShouldNotReplace", "Sleeve Length": "Long Sleeve"},
+            },
+            seller_confirmed_fields={"itemSpecifics", "cid"},
+            fetch_live_market=False,
+        )
+        self.assertEqual(dict_and_cond_protected["listing"]["itemSpecifics"], {"Brand": "KeptWholeDict"})
+        self.assertEqual(dict_and_cond_protected["listing"]["condition"], "Pre-owned - Good")
+        self.assertEqual(dict_and_cond_protected["listing"]["cid"], "3000")
+
 
 if __name__ == "__main__":
     unittest.main()

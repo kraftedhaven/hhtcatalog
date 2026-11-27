@@ -2164,12 +2164,6 @@ def _should_set_category(confirmed: set[str]) -> bool:
     return "cat" not in confirmed and "categoryName" not in confirmed
 
 
-def _should_set_condition(cid: str, confirmed: set[str]) -> bool:
-    if not cid:
-        return False
-    return "cid" not in confirmed and "condition" not in confirmed
-
-
 def _apply_category_defaults(
     working: dict[str, Any],
     raw_ai: dict[str, Any],
@@ -2189,9 +2183,20 @@ def _apply_category_defaults(
                 "ai_inference", "medium", f"Suggested eBay Category: {cat_name or cat} (ID {cat})",
                 legacy_source="ai_estimate", extra={"timestamp": now},
             )
-    cid = str(raw_ai.get("cid") or working.get("cid") or "").strip()
-    if _should_set_condition(cid, confirmed):
-        working["cid"] = cid
+    _apply_condition_defaults(working, raw_ai, confirmed)
+
+
+def _apply_condition_defaults(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    confirmed: set[str],
+) -> None:
+    if "cid" in confirmed or "condition" in confirmed:
+        return
+    for key in ("cid", "condition"):
+        val = str(raw_ai.get(key) or "").strip()
+        if val:
+            working[key] = val
 
 
 def _attribute_provenance(ai_val: str, raw_prov_map: dict[str, Any], key: str, now: str) -> dict[str, Any]:
@@ -2225,6 +2230,104 @@ def _merge_supplemental_text_fields(
         )
 
 
+def _usable_specific_list(raw_list: list[Any]) -> list[str] | None:
+    cleaned: list[str] = []
+    for entry in raw_list:
+        text = str(entry or "").strip()
+        if _has_usable_ai_value(text) and text not in cleaned:
+            cleaned.append(text)
+    return cleaned or None
+
+
+def _usable_specific_value(raw_val: Any) -> Any:
+    if isinstance(raw_val, list):
+        return _usable_specific_list(raw_val)
+    text = str(raw_val or "").strip()
+    return text if _has_usable_ai_value(text) else None
+
+
+def _is_specific_confirmed(
+    label: str,
+    existing_key: str,
+    confirmed: set[str],
+    provenance: dict[str, Any],
+) -> bool:
+    for key in (label, existing_key):
+        if not key:
+            continue
+        entry = provenance.get(key)
+        if key in confirmed or (isinstance(entry, dict) and entry.get("sellerConfirmed") is True):
+            return True
+    return False
+
+
+def _merge_single_specific(
+    merged: dict[str, Any],
+    existing_ci: dict[str, str],
+    provenance: dict[str, Any],
+    entry: tuple[Any, Any, set[str]],
+) -> None:
+    raw_key, raw_val, confirmed = entry
+    label = str(raw_key or "").strip()
+    if not label:
+        return
+    existing_key = existing_ci.get(label.casefold(), "")
+    if _is_specific_confirmed(label, existing_key, confirmed, provenance):
+        return
+    cleaned = _usable_specific_value(raw_val)
+    if cleaned is None:
+        return
+    if existing_key and existing_key != label:
+        merged.pop(existing_key, None)
+    merged[label] = cleaned
+    existing_ci[label.casefold()] = label
+    provenance[label] = _provenance_entry(
+        "ai_inference", "medium", f"Analyzed item specific '{label}'.", legacy_source="ai_estimate"
+    )
+
+
+def _merge_item_specifics(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    provenance: dict[str, Any],
+    confirmed: set[str],
+) -> None:
+    if "itemSpecifics" in confirmed:
+        return
+    raw_specs = raw_ai.get("itemSpecifics")
+    if not isinstance(raw_specs, dict) or not raw_specs:
+        return
+    existing = working.get("itemSpecifics")
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    existing_ci = {str(k).casefold(): str(k) for k in merged}
+    for raw_key, raw_val in raw_specs.items():
+        _merge_single_specific(merged, existing_ci, provenance, (raw_key, raw_val, confirmed))
+    if not merged:
+        return
+    working["itemSpecifics"] = merged
+    provenance.setdefault(
+        "itemSpecifics",
+        _provenance_entry("ai_inference", "medium", "Analyzed category item specifics.", legacy_source="ai_estimate"),
+    )
+
+
+def _merge_attribute_evidence(
+    working: dict[str, Any],
+    raw_ai: dict[str, Any],
+    confirmed: set[str],
+) -> None:
+    raw_ev = raw_ai.get("attributeEvidence")
+    if not isinstance(raw_ev, dict) or not raw_ev:
+        return
+    existing_ev = working.get("attributeEvidence")
+    merged_ev = dict(existing_ev) if isinstance(existing_ev, dict) else {}
+    for key, value in raw_ev.items():
+        if key not in confirmed and isinstance(value, dict):
+            merged_ev[key] = value
+    if merged_ev:
+        working["attributeEvidence"] = merged_ev
+
+
 def _merge_visual_attributes(
     working: dict[str, Any],
     raw_ai: dict[str, Any],
@@ -2246,6 +2349,8 @@ def _merge_visual_attributes(
                 "missing", "none", "Not observed in photos; seller confirmation required.", extra={"timestamp": now}
             )
     _merge_supplemental_text_fields(working, raw_ai, provenance, confirmed)
+    _merge_item_specifics(working, raw_ai, provenance, confirmed)
+    _merge_attribute_evidence(working, raw_ai, confirmed)
     _apply_category_defaults(working, raw_ai, provenance, confirmed, now)
 
 
