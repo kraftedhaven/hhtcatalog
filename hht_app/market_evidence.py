@@ -248,62 +248,95 @@ def _dict_or_default(candidate: Any, fallback: dict[str, Any]) -> dict[str, Any]
     return candidate if isinstance(candidate, dict) else fallback
 
 
+def _ctx_float(context: dict[str, Any], key: str, fallback: float = 0.0) -> float:
+    raw = context.get(key)
+    return float(raw) if raw else fallback
+
+
+def _ctx_int(context: dict[str, Any], key: str, fallback: int = 0) -> int:
+    raw = context.get(key)
+    return int(raw) if raw else fallback
+
+
+def _ctx_str(context: dict[str, Any], key: str, fallback: str = "") -> str:
+    raw = context.get(key)
+    return str(raw) if raw else fallback
+
+
+def _positive_rounded_or_none(value: float) -> float | None:
+    return round(value, 2) if value > 0 else None
+
+
+def _pricing_change_pct(recommended: float, current: float) -> float | None:
+    if current <= 0:
+        return None
+    return round(((recommended - current) / current) * 100, 1)
+
+
+def _context_bounds(recommended: float, context: dict[str, Any]) -> tuple[float, float, dict[str, float]]:
+    low_val = round(_ctx_float(context, "low", recommended), 2)
+    high_val = round(_ctx_float(context, "high", recommended), 2)
+    bounds = {
+        "low": low_val,
+        "high": high_val,
+        "p25": _ctx_float(context, "p25"),
+        "p75": _ctx_float(context, "p75"),
+    }
+    return low_val, high_val, bounds
+
+
 def build_pricing_result(
     source: str,
     recommended: float,
     context: dict[str, Any],
 ) -> dict[str, Any]:
     """Assemble Fast Sale, Balanced, and Premium pricing outputs with strict provenance."""
-    low_val = round(float(context.get("low") or recommended), 2)
-    high_val = round(float(context.get("high") or recommended), 2)
+    low_val, high_val, bounds = _context_bounds(recommended, context)
     target = round(recommended, 2)
-    bounds = {
-        "low": low_val,
-        "high": high_val,
-        "p25": float(context.get("p25") or 0.0),
-        "p75": float(context.get("p75") or 0.0),
-    }
     quick, premium, prov, strategy, market_status = _resolve_tier_tuple(source, target, bounds)
     quick, premium = _ensure_distinct_tiers(quick, target, premium)
 
-    current = float(context.get("current") or 0.0)
-    ai_price = float(context.get("ai_price") or 0.0)
+    current = _ctx_float(context, "current")
+    ai_price = _ctx_float(context, "ai_price")
     insufficient = bool(context.get("insufficient"))
-    change = round(((recommended - current) / current) * 100, 1) if current > 0 else None
+    insufficient_view = {
+        True: {"marketPrice": None, "message": INSUFFICIENT_MARKET_MESSAGE},
+        False: {"marketPrice": target, "message": ""},
+    }[insufficient]
     demand_signal, demand_status = _demand_meta_fields(context.get("demand"))
     empty_comp = {"status": "not_configured", "sampleSize": 0}
 
     return {
         "status": "ok",
         "recommendedPrice": target,
-        "marketRecommendedPrice": None if insufficient else target,
+        "marketRecommendedPrice": insufficient_view["marketPrice"],
         "fastSalePrice": quick,
         "quickSalePrice": quick,
         "balancedPrice": target,
         "targetPrice": target,
         "premiumPrice": premium,
-        "aiEstimatedPrice": round(ai_price, 2) if ai_price > 0 else None,
+        "aiEstimatedPrice": _positive_rounded_or_none(ai_price),
         "pricingSource": source,
         "provenanceSource": prov,
         "pricingStrategy": strategy,
-        "pricingConfidence": str(context.get("confidence") or "low"),
+        "pricingConfidence": _ctx_str(context, "confidence", "low"),
         "insufficientMarketEvidence": insufficient,
         "marketStatus": market_status,
-        "marketMessage": INSUFFICIENT_MARKET_MESSAGE if insufficient else "",
+        "marketMessage": insufficient_view["message"],
         "requiresSellerConfirmation": insufficient,
         "isFallback": insufficient,
-        "sampleSize": int(context.get("sample_size") or 0),
+        "sampleSize": _ctx_int(context, "sample_size"),
         "lowPrice": low_val,
         "highPrice": high_val,
         "currentPrice": round(current, 2),
-        "recommendedChangePct": change,
-        "adjustmentReason": str(context.get("reason") or ""),
+        "recommendedChangePct": _pricing_change_pct(recommended, current),
+        "adjustmentReason": _ctx_str(context, "reason"),
         "soldComparableSummary": _dict_or_default(context.get("sold_summary"), empty_comp),
         "activeCompetitionSummary": _dict_or_default(context.get("active_summary"), empty_comp),
         "demandSignal": demand_signal,
         "currentDemandStatus": demand_status,
         "dataFreshness": _now(),
-        "comparableQuery": str(context.get("query") or ""),
+        "comparableQuery": _ctx_str(context, "query"),
     }
 
 

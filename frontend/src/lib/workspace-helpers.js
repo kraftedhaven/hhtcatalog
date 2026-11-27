@@ -304,6 +304,7 @@ function confirmProvenanceKeys(mergedProvenance, keys) {
         const base = asObject(mergedProvenance[key]) || { source: 'seller_input', confidence: 'high' };
         mergedProvenance[key] = { ...base, sellerConfirmed: true };
     }
+    return true;
 }
 
 function applyTitleCandidatePatch(incoming, mergedListing, key) {
@@ -318,12 +319,10 @@ function applyPricingOptionPatch(incoming, mergedListing, key) {
 
 function applyConfirmationPatch(mergedProvenance, field, value) {
     if (field === 'confirmField') {
-        if (value) confirmProvenanceKeys(mergedProvenance, [String(value)]);
-        return true;
+        return confirmProvenanceKeys(mergedProvenance, value ? [String(value)] : []);
     }
     if (field === 'confirmAll') {
-        if (value === true) confirmProvenanceKeys(mergedProvenance, Object.keys(mergedProvenance));
-        return true;
+        return confirmProvenanceKeys(mergedProvenance, value === true ? Object.keys(mergedProvenance) : []);
     }
     return false;
 }

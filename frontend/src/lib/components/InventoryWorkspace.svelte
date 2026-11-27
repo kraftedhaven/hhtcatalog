@@ -1182,7 +1182,6 @@
         currentPatch[field] = value;
         pendingPatches.set(item.id, currentPatch);
         localEditGeneration += 1;
-        activePollRequestId += 1;
 
         autosaveStatus = "saving";
         if (autosaveTimeout) clearTimeout(autosaveTimeout);
@@ -1196,7 +1195,6 @@
         }
         autosaveStatus = "saving";
         localEditGeneration += 1;
-        activePollRequestId += 1;
         const entries = Array.from(pendingPatches.entries()).map(([itemId, patchData]) => [
             itemId,
             { ...patchData },
@@ -1212,7 +1210,6 @@
                 const [itemId, patchData] = entries[idxEntry];
                 const updated = await inventoryPatchItem(itemId, patchData);
                 localEditGeneration += 1;
-                activePollRequestId += 1;
                 inflightPatches.delete(itemId);
                 const protectedPatch = getProtectedPatches();
                 const protectedUpdated = mergePolledItemsWithPending(
