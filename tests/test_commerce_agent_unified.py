@@ -295,6 +295,18 @@ class UnifiedCommerceAgentTests(unittest.TestCase):
         jordan1 = optimize_title({"title": "Nike Air Jordan 1", "brand": "Nike", "color": "Red"})
         self.assertIn("1", jordan1["recommendedTitle"].split())
 
+    def test_title_optimizer_preserves_internal_punctuation_in_specs(self):
+        shoes = optimize_title({"title": "Nike Shoes Size 10.5", "brand": "Nike", "type": "Shoes", "color": "Black"})
+        self.assertIn("10.5", shoes["recommendedTitle"])
+        self.assertNotIn("10 5", shoes["recommendedTitle"])
+
+        lens = optimize_title({"title": "Canon 50mm f/1.8 Lens", "brand": "Canon", "type": "Lens"})
+        self.assertIn("f/1.8", lens["recommendedTitle"])
+        self.assertIn("50mm", lens["recommendedTitle"])
+
+        size_and_model = optimize_title({"title": "Nike Shoes Size 10.5", "brand": "Nike", "size": "10", "model": "5"})
+        self.assertIn("10.5", size_and_model["recommendedTitle"])
+
 
 if __name__ == "__main__":
     unittest.main()

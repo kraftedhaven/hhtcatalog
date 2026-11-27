@@ -225,8 +225,11 @@ def _clean_values(item: dict[str, Any], category_name: str = "") -> dict[str, st
     return values
 
 
+_TITLE_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['&./-][A-Za-z0-9]+)*")
+
+
 def _token_words(text: str) -> list[str]:
-    return [w.casefold() for w in re.findall(r"[A-Za-z0-9']+", text)]
+    return [w.casefold() for w in _TITLE_TOKEN_RE.findall(text)]
 
 
 def _should_skip_token(cleaned: str, excluded_words: set[str], seen_cf: set[str]) -> bool:
@@ -235,15 +238,13 @@ def _should_skip_token(cleaned: str, excluded_words: set[str], seen_cf: set[str]
     low = cleaned.casefold()
     if low in STOP or low in seen_cf:
         return True
-    words = set(_token_words(cleaned))
-    return bool(words) and words <= excluded_words
+    return low in excluded_words
 
 
 def _unique_novel_tokens(text: str, excluded_words: set[str], limit: int) -> list[str]:
     tokens: list[str] = []
     seen_cf: set[str] = set()
-    for raw in re.findall(r"[A-Za-z0-9'&-]+", text):
-        cleaned = raw.strip("-'&")
+    for cleaned in _TITLE_TOKEN_RE.findall(text):
         if _should_skip_token(cleaned, excluded_words, seen_cf):
             continue
         tokens.append(cleaned)
