@@ -7,6 +7,7 @@ os.environ.setdefault("DEMO_MODE", "true")
 os.environ.setdefault("EBAY_MUTATIONS_ENABLED", "false")
 
 from hht_app import commerce_agent
+from hht_app.title_optimizer import optimize_title
 
 
 class UnifiedCommerceAgentTests(unittest.TestCase):
@@ -107,6 +108,29 @@ class UnifiedCommerceAgentTests(unittest.TestCase):
         })
         self.assertIn("commerceAgentReport", audit)
         self.assertEqual(audit["soldPricing"]["provenanceSource"], "seller_input")
+
+    def test_title_optimizer_preserves_identifying_title_when_attributes_absent(self):
+        unstructured = optimize_title({"title": "Apple iPhone 13 Pro Max 256GB"})
+        self.assertEqual(unstructured["recommendedTitle"], "Apple iPhone 13 Pro Max 256GB")
+        self.assertFalse(unstructured["changed"])
+        self.assertEqual(unstructured["title"], "")
+
+        categorized_only = optimize_title(
+            {"title": "Apple iPhone 13 Pro Max 256GB"},
+            category_name="Cell Phones & Smartphones",
+        )
+        self.assertEqual(categorized_only["recommendedTitle"], "Apple iPhone 13 Pro Max 256GB")
+        self.assertFalse(categorized_only["changed"])
+
+        sparse_brand = optimize_title({"title": "WH-1000XM5 Wireless Headphones", "brand": "Sony"})
+        self.assertIn("WH-1000XM5", sparse_brand["recommendedTitle"])
+        self.assertIn("Sony", sparse_brand["recommendedTitle"])
+        self.assertLessEqual(len(sparse_brand["recommendedTitle"]), 80)
+
+        audit = commerce_agent.audit_listing(
+            {"title": "Apple iPhone 13 Pro Max 256GB", "price": 500.0, "cat": "9355"}
+        )
+        self.assertNotIn("title", audit["proposed"])
 
 
 if __name__ == "__main__":

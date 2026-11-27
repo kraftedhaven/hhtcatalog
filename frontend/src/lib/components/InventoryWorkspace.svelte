@@ -224,6 +224,7 @@
     let analysisPollInFlight = false;
     let activePollRequestId = 0;
     let wasAnalyzing = false;
+    let activeFlushPromise = null;
 
     function stopAnalysisPolling() {
         activePollRequestId += 1;
@@ -1120,31 +1121,59 @@
         }
     }
 
-    async function saveCurrentOrPending() {
-        globalError = "";
+    async function waitForInflightSave() {
+        if (autosaveTimeout) {
+            clearTimeout(autosaveTimeout);
+            autosaveTimeout = null;
+        }
+        if (activeFlushPromise) {
+            await activeFlushPromise;
+        }
         if (pendingPatches.size > 0) {
             await flushPendingPatches();
+        }
+    }
+
+    function applySafeRefreshedItem(refreshed, requestGen) {
+        if (requestGen !== localEditGeneration) return false;
+        items = items.map((it) => (it.id === refreshed.id ? refreshed : it));
+        if (inspectingItem && inspectingItem.id === refreshed.id) {
+            inspectingItem = refreshed;
+        }
+        return true;
+    }
+
+    async function saveCurrentOrPending() {
+        globalError = "";
+        const hadPendingWork = Boolean(
+            autosaveTimeout || activeFlushPromise || pendingPatches.size > 0,
+        );
+        await waitForInflightSave();
+        if (hadPendingWork) {
             if (autosaveStatus !== "error") {
                 globalStatus = "Saved your pending item edits.";
             }
             return;
         }
-        if (inspectingItem) {
-            try {
-                actionLoading = true;
-                const refreshed = await inventoryGetItem(inspectingItem.id);
-                items = items.map((it) =>
-                    it.id === refreshed.id ? refreshed : it,
-                );
-                inspectingItem = refreshed;
-                globalStatus = "Item state synced and saved.";
-            } catch (err) {
-                globalError = err.message || "Unable to save item.";
-            } finally {
-                actionLoading = false;
-            }
-        } else {
+        if (!inspectingItem) {
             globalStatus = "All item edits are already saved.";
+            return;
+        }
+        const targetItemId = inspectingItem.id;
+        const requestGen = localEditGeneration;
+        try {
+            actionLoading = true;
+            const refreshed = await inventoryGetItem(targetItemId);
+            if (activeFlushPromise) {
+                await activeFlushPromise;
+            }
+            if (applySafeRefreshedItem(refreshed, requestGen)) {
+                globalStatus = "Item state synced and saved.";
+            }
+        } catch (err) {
+            globalError = err.message || "Unable to save item.";
+        } finally {
+            actionLoading = false;
         }
     }
 
@@ -1185,10 +1214,32 @@
 
         autosaveStatus = "saving";
         if (autosaveTimeout) clearTimeout(autosaveTimeout);
-        autosaveTimeout = setTimeout(flushPendingPatches, 450);
+        autosaveTimeout = setTimeout(() => {
+            autosaveTimeout = null;
+            void flushPendingPatches();
+        }, 450);
     }
 
     async function flushPendingPatches() {
+        while (activeFlushPromise) {
+            await activeFlushPromise;
+        }
+        if (pendingPatches.size === 0) {
+            if (autosaveStatus === "saving") autosaveStatus = "idle";
+            return;
+        }
+        const run = executePendingPatchFlush();
+        activeFlushPromise = run;
+        try {
+            await run;
+        } finally {
+            if (activeFlushPromise === run) {
+                activeFlushPromise = null;
+            }
+        }
+    }
+
+    async function executePendingPatchFlush() {
         if (pendingPatches.size === 0) {
             autosaveStatus = "idle";
             return;

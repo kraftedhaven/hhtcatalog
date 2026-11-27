@@ -248,7 +248,15 @@ def _unique_novel_tokens(text: str, excluded_cf: str, limit: int) -> list[str]:
 def _extra_descriptor_tokens(current: str, values: dict[str, str]) -> list[str]:
     if not current or current.strip().casefold() in GENERIC_TITLES:
         return []
-    return _unique_novel_tokens(current, " ".join(values.values()).casefold(), 4)
+    return _unique_novel_tokens(current, " ".join(values.values()).casefold(), 16)
+
+
+def _should_preserve_identifying_title(values: dict[str, str], current: str) -> bool:
+    if not current or current.casefold() in GENERIC_TITLES:
+        return False
+    if "model" in values or "type" in values:
+        return False
+    return (len(values) - int("category" in values)) < 2
 
 
 def _extract_market_tokens(queries: list[str], values: dict[str, str]) -> list[str]:
@@ -282,7 +290,7 @@ def _build_candidate_title(
     _append_tokens_dedup(parts, token_bundle["extras"])
     _append_tokens_dedup(parts, token_bundle["market"])
     current = token_bundle["current"]
-    if not parts:
+    if token_bundle.get("preserve") or not parts:
         return fit_title(current, brand_prefix) if current else ""
     return fit_title(re.sub(r"\s+", " ", " ".join(parts)).strip(), brand_prefix)
 
@@ -341,10 +349,16 @@ def _build_candidates(
     market_tokens = candidate_ctx["market"]
     current = candidate_ctx["current"]
     confidence = candidate_ctx["confidence"]
+    preserve = bool(candidate_ctx.get("preserve"))
     candidates: dict[str, dict[str, Any]] = {}
 
     for name, keys, reason, base_score in _STRATEGY_SPECS:
-        bundle = {"extras": {"quick_sale": []}.get(name, extras), "market": market_tokens, "current": current}
+        bundle = {
+            "extras": {"quick_sale": []}.get(name, extras),
+            "market": market_tokens,
+            "current": current,
+            "preserve": preserve,
+        }
         cand_title = _build_candidate_title(values, keys, bundle)
         if not cand_title:
             continue
@@ -463,8 +477,17 @@ def optimize_title(
     attr_values = [val for key, val in values.items() if key != "category"]
     keyword_priority = _build_keyword_priority(values, market_tokens)
     confidence = _compute_title_confidence(mctx, len(attr_values))
+    preserve_current = _should_preserve_identifying_title(values, current)
     candidates = _build_candidates(
-        values, mctx, {"extras": extras, "market": market_tokens, "current": current, "confidence": confidence}
+        values,
+        mctx,
+        {
+            "extras": extras,
+            "market": market_tokens,
+            "current": current,
+            "confidence": confidence,
+            "preserve": preserve_current,
+        },
     )
 
     best = _select_best_title(candidates, current, values.get("brand", ""))
